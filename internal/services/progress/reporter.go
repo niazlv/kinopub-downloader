@@ -167,6 +167,14 @@ func (r *LiveReporter) ByteProgress(key domain.EpisodeKey, downloaded, total int
 			ep.speed = ep.speed*0.7 + instantSpeed*0.3
 		}
 
+		// If no bytes were transferred, decay speed toward zero quickly.
+		if byteDiff == 0 {
+			ep.speed *= 0.3
+			if ep.speed < 1024 {
+				ep.speed = 0
+			}
+		}
+
 		ep.lastSpeedTime = now
 		ep.lastSpeedBytes = downloaded
 	}
@@ -230,6 +238,16 @@ func (r *LiveReporter) tickLoop() {
 			return
 		case <-r.ticker.C:
 			r.mu.Lock()
+			// Decay speed for episodes that haven't received data recently.
+			now := time.Now()
+			for _, ep := range r.currentEpisodes {
+				if !ep.lastSpeedTime.IsZero() && now.Sub(ep.lastSpeedTime) > 3*time.Second {
+					ep.speed *= 0.5
+					if ep.speed < 1024 {
+						ep.speed = 0
+					}
+				}
+			}
 			r.render()
 			r.mu.Unlock()
 		}

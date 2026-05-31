@@ -1,13 +1,13 @@
-// Package downloader — chunked.go implements resumable HTTP Range-based
-// downloading for progressive MP4 sources. It downloads the raw video file
-// in chunks, resuming from where it left off on failure. After the raw file
-// is fully downloaded, ffmpeg remuxes it into the final container with
-// metadata, poster, and audio/subtitle labels.
+// Package downloader — chunked.go implements resumable HTTP streaming download
+// for progressive MP4 sources. It downloads the raw video file in a single
+// streaming GET request (with Range header for resume), writing directly to a
+// .part file. On network failure, it retries from the last written byte.
+// This approach matches yt-dlp behavior: one long-lived connection, no
+// per-chunk overhead, instant resume on interruption.
 package downloader
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,20 +20,20 @@ import (
 )
 
 const (
-	// defaultChunkSize is the size of each HTTP Range request (10 MB).
-	defaultChunkSize = 10 * 1024 * 1024
-
-	// maxResumeAttempts is the maximum number of retry attempts for a single
-	// chunk before giving up.
+	// maxResumeAttempts is the maximum number of retry attempts before giving up.
 	maxResumeAttempts = 10
 
 	// retryBaseDelay is the initial delay between retries (doubles each attempt).
 	retryBaseDelay = 3 * time.Second
+
+	// progressReportInterval controls how often we report progress (by bytes).
+	// Report every 512KB downloaded.
+	progressReportInterval = 512 * 1024
 )
 
-// ChunkedDownloader downloads files using HTTP Range requests with resume
-// capability. It writes chunks to a partial file (.part) and can resume
-// from where it left off if interrupted.
+// ChunkedDownloader downloads files using HTTP streaming with resume capability.
+// It opens a single GET connection and streams the body to disk. On failure,
+// it resumes from the last written byte using Range headers.
 type ChunkedDownloader struct {
 	client *http.Client
 	auth   domain.RequestAuth
@@ -41,13 +41,10 @@ type ChunkedDownloader struct {
 }
 
 // NewChunked creates a ChunkedDownloader with the given HTTP client and auth.
-// The client's Timeout is cleared internally because chunked downloads need
-// per-chunk timeouts (via context), not a global request timeout that would
-// fire on large chunks over slow connections.
+// The client's Timeout is cleared because streaming downloads are long-lived
+// and should not have a global deadline.
 func NewChunked(client *http.Client, auth domain.RequestAuth, logger domain.Logger) *ChunkedDownloader {
 	// Create a copy of the client without the global Timeout.
-	// The global Timeout covers the entire request lifecycle including body
-	// reading, which is too restrictive for large chunk downloads.
 	noTimeoutClient := *client
 	noTimeoutClient.Timeout = 0
 
@@ -58,197 +55,130 @@ func NewChunked(client *http.Client, auth domain.RequestAuth, logger domain.Logg
 	}
 }
 
-// CanHandle reports whether this source can be downloaded via chunked HTTP.
+// CanHandle reports whether this source can be downloaded via streaming HTTP.
 // Only progressive (direct MP4/MKV) sources with a known URL are supported.
-// HLS sources require segment-by-segment handling which is not implemented.
 func (c *ChunkedDownloader) CanHandle(media domain.ResolvedMedia) bool {
 	return media.Source.Kind == domain.MediaProgressive && media.Source.URL != ""
 }
 
-// Download fetches the raw media file using HTTP Range requests with resume.
+// Download fetches the raw media file using HTTP streaming with resume.
 // It writes to outPath+".part" during download and renames to outPath on
 // completion. The sink receives progress updates based on bytes downloaded.
 //
-// Returns nil on success. On failure, the .part file is preserved for resume
-// on the next attempt.
+// On failure, the .part file is preserved for resume on the next attempt.
 func (c *ChunkedDownloader) Download(ctx context.Context, url string, outPath string, key domain.EpisodeKey, sink domain.ProgressSink) error {
 	partPath := outPath + ".part"
 
 	// 1. Determine total file size via HEAD request.
-	totalSize, supportsRange, err := c.probeSize(ctx, url)
+	totalSize, err := c.probeSize(ctx, url)
 	if err != nil {
-		return fmt.Errorf("chunked probe: %w", err)
+		return fmt.Errorf("probe: %w", err)
 	}
 
-	if !supportsRange || totalSize <= 0 {
-		return fmt.Errorf("server does not support Range requests or unknown content length")
-	}
-
-	c.logger.Info("chunked download starting",
+	c.logger.Info("streaming download starting",
 		domain.F("episode", fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
 		domain.F("total_size", formatBytes(totalSize)),
-		domain.F("url", truncateURL(url)),
 	)
 
 	track := domain.TrackRef{Kind: domain.TrackVideo, Index: 0}
 
-	// 2. Check if we have a partial file from a previous attempt.
-	var offset int64
-	if info, err := os.Stat(partPath); err == nil {
-		offset = info.Size()
-		if offset >= totalSize {
-			// File is already complete — just rename.
-			c.logger.Info("partial file already complete, renaming",
-				domain.F("episode", fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
-			)
-			// Report 100% before rename.
-			if sink != nil {
-				sink.TrackProgress(key, track, 100)
-				if byteSink, ok := sink.(domain.ByteProgressSink); ok {
-					byteSink.ByteProgress(key, totalSize, totalSize)
-				}
-			}
-			return os.Rename(partPath, outPath)
-		}
-		// Sanity check: if the partial file is larger than the total size
-		// reported by the server (e.g., URL changed to a different file),
-		// discard the partial and start fresh.
-		if offset > totalSize {
-			c.logger.Warn("partial file larger than server reports, starting fresh",
-				domain.F("partial_size", offset),
-				domain.F("server_size", totalSize),
-			)
-			os.Remove(partPath)
-			offset = 0
-		} else {
-			c.logger.Info("resuming from partial file",
-				domain.F("episode", fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
-				domain.F("offset", formatBytes(offset)),
-				domain.F("remaining", formatBytes(totalSize-offset)),
-			)
-			// Report initial progress from the existing partial file.
-			if sink != nil && totalSize > 0 {
-				pct := int(offset * 100 / totalSize)
-				sink.TrackProgress(key, track, pct)
-				if byteSink, ok := sink.(domain.ByteProgressSink); ok {
-					byteSink.ByteProgress(key, offset, totalSize)
-				}
+	// 2. Check existing partial file.
+	offset := c.getPartialOffset(partPath, totalSize)
+
+	// Already complete?
+	if offset >= totalSize && totalSize > 0 {
+		c.logger.Info("file already complete, renaming",
+			domain.F("episode", fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
+		)
+		if sink != nil {
+			sink.TrackProgress(key, track, 100)
+			if byteSink, ok := sink.(domain.ByteProgressSink); ok {
+				byteSink.ByteProgress(key, totalSize, totalSize)
 			}
 		}
+		return os.Rename(partPath, outPath)
 	}
 
-	// 3. Open the partial file for appending.
-	f, err := os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("open part file: %w", err)
-	}
-
-	// Seek to the current offset.
-	if offset > 0 {
-		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			f.Close()
-			return fmt.Errorf("seek part file: %w", err)
+	// Report initial progress if resuming.
+	if offset > 0 && sink != nil && totalSize > 0 {
+		c.logger.Info("resuming download",
+			domain.F("episode", fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
+			domain.F("offset", formatBytes(offset)),
+			domain.F("remaining", formatBytes(totalSize-offset)),
+		)
+		pct := int(offset * 100 / totalSize)
+		sink.TrackProgress(key, track, pct)
+		if byteSink, ok := sink.(domain.ByteProgressSink); ok {
+			byteSink.ByteProgress(key, offset, totalSize)
 		}
 	}
 
-	// 4. Download in chunks with retry.
+	// 3. Stream with retry loop.
 	consecutiveFailures := 0
-	hasStarted := offset > 0 // true if we already have data (resume)
 
 	for offset < totalSize {
 		if ctx.Err() != nil {
-			f.Close()
 			return ctx.Err()
 		}
 
-		// Calculate chunk range.
-		end := offset + defaultChunkSize - 1
-		if end >= totalSize {
-			end = totalSize - 1
-		}
+		// Open streaming connection from current offset.
+		n, err := c.streamFrom(ctx, url, partPath, offset, totalSize, key, track, sink)
+		offset += n
 
-		// Download this chunk with retries.
-		n, err := c.downloadChunk(ctx, f, url, offset, end)
 		if err != nil {
-			// If we haven't successfully downloaded any chunk yet in this
-			// session, fail fast — the URL is likely expired or CDN is blocking.
-			// The caller (engine) can re-resolve and retry with a fresh URL.
-			if !hasStarted {
-				f.Close()
-				return fmt.Errorf("initial chunk failed (URL may be expired): %w", err)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
+			// If we haven't downloaded anything at all, fail fast (URL expired).
+			if offset == 0 && n == 0 {
+				return fmt.Errorf("download failed immediately (URL may be expired): %w", err)
 			}
 
 			consecutiveFailures++
 			if consecutiveFailures >= maxResumeAttempts {
-				f.Close()
-				return fmt.Errorf("chunked download failed after %d consecutive errors at offset %d: %w",
-					maxResumeAttempts, offset, err)
+				return fmt.Errorf("download failed after %d retries at %s: %w",
+					maxResumeAttempts, formatBytes(offset), err)
 			}
 
-			c.logger.Warn("chunk download failed, retrying",
+			c.logger.Warn("connection lost, resuming",
 				domain.F("episode", fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
-				domain.F("offset", offset),
+				domain.F("downloaded", formatBytes(offset)),
 				domain.F("attempt", consecutiveFailures),
 				domain.F("error", err.Error()),
 			)
 
-			// Exponential backoff.
+			// Exponential backoff: 3s, 6s, 12s, ... capped at 30s.
 			delay := retryBaseDelay * time.Duration(1<<(consecutiveFailures-1))
-			if delay > 60*time.Second {
-				delay = 60 * time.Second
+			if delay > 30*time.Second {
+				delay = 30 * time.Second
 			}
 			select {
 			case <-ctx.Done():
-				f.Close()
 				return ctx.Err()
 			case <-time.After(delay):
 			}
-
-			// Re-seek to the correct position (in case partial write happened).
-			currentSize, _ := f.Seek(0, io.SeekEnd)
-			offset = currentSize
 			continue
 		}
 
-		// Success — advance offset, reset failure counter.
-		offset += n
+		// Stream completed successfully.
 		consecutiveFailures = 0
-		hasStarted = true
-
-		// Report progress.
-		if sink != nil && totalSize > 0 {
-			pct := int(offset * 100 / totalSize)
-			if pct > 100 {
-				pct = 100
-			}
-			sink.TrackProgress(key, track, pct)
-
-			// Report byte-level progress if the sink supports it.
-			if byteSink, ok := sink.(domain.ByteProgressSink); ok {
-				byteSink.ByteProgress(key, offset, totalSize)
-			}
-		}
 	}
 
-	// 5. Close and verify.
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close part file: %w", err)
-	}
-
+	// 4. Verify and rename.
 	info, err := os.Stat(partPath)
 	if err != nil {
 		return fmt.Errorf("stat part file: %w", err)
 	}
-	if info.Size() != totalSize {
+	if totalSize > 0 && info.Size() != totalSize {
 		return fmt.Errorf("size mismatch: got %d, expected %d", info.Size(), totalSize)
 	}
 
-	// 6. Rename .part → final raw path.
 	if err := os.Rename(partPath, outPath); err != nil {
 		return fmt.Errorf("rename part to final: %w", err)
 	}
 
-	c.logger.Info("chunked download complete",
+	c.logger.Info("download complete",
 		domain.F("episode", fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
 		domain.F("size", formatBytes(totalSize)),
 	)
@@ -256,71 +186,27 @@ func (c *ChunkedDownloader) Download(ctx context.Context, url string, outPath st
 	return nil
 }
 
-// probeSize sends a HEAD request to determine the file size and whether
-// the server supports Range requests. Uses a short timeout since this is
-// just a probe — if the server doesn't respond quickly, the URL is likely dead.
-func (c *ChunkedDownloader) probeSize(ctx context.Context, url string) (int64, bool, error) {
-	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(probeCtx, http.MethodHead, url, nil)
-	if err != nil {
-		return 0, false, err
-	}
-	c.applyAuth(req)
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return 0, false, err
-	}
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, false, fmt.Errorf("HEAD returned HTTP %d", resp.StatusCode)
-	}
-
-	// Check Accept-Ranges header.
-	supportsRange := strings.Contains(resp.Header.Get("Accept-Ranges"), "bytes")
-
-	// Content-Length gives us the total size.
-	size := resp.ContentLength
-	if size <= 0 {
-		// Try parsing Content-Length header directly.
-		clStr := resp.Header.Get("Content-Length")
-		if clStr != "" {
-			size, _ = strconv.ParseInt(clStr, 10, 64)
-		}
-	}
-
-	// Even if Accept-Ranges is not explicitly set, many CDNs support it.
-	// We'll try Range requests anyway and fall back if they fail.
-	if !supportsRange && size > 0 {
-		supportsRange = true // optimistic — will fail gracefully in downloadChunk
-	}
-
-	return size, supportsRange, nil
-}
-
-// downloadChunk downloads bytes [start, end] from url and writes them to w.
-// Returns the number of bytes written. Uses a per-chunk timeout proportional
-// to the chunk size (minimum 60s, allows ~170KB/s minimum speed).
-func (c *ChunkedDownloader) downloadChunk(ctx context.Context, w io.WriterAt, url string, start, end int64) (int64, error) {
-	chunkSize := end - start + 1
-	// Timeout: at least 60s, or 1 second per 500KB (allows ~500KB/s minimum).
-	timeout := time.Duration(chunkSize/500000+1) * time.Second
-	if timeout < 60*time.Second {
-		timeout = 60 * time.Second
-	}
-
-	chunkCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(chunkCtx, http.MethodGet, url, nil)
+// streamFrom opens a single GET connection starting at offset and streams
+// the body to the .part file. Returns bytes written in this session and any
+// error (nil means stream completed to EOF).
+func (c *ChunkedDownloader) streamFrom(
+	ctx context.Context,
+	url, partPath string,
+	offset, totalSize int64,
+	key domain.EpisodeKey,
+	track domain.TrackRef,
+	sink domain.ProgressSink,
+) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
 	}
 	c.applyAuth(req)
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+
+	// Request from offset to end.
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -328,59 +214,146 @@ func (c *ChunkedDownloader) downloadChunk(ctx context.Context, w io.WriterAt, ur
 	}
 	defer resp.Body.Close()
 
-	// Accept both 206 Partial Content and 200 OK (some servers ignore Range).
+	// Validate response.
 	switch resp.StatusCode {
-	case http.StatusPartialContent:
-		// Expected — server supports Range.
 	case http.StatusOK:
-		// Server ignored Range header — cannot do chunked download.
-		return 0, fmt.Errorf("server returned 200 instead of 206 (Range not supported)")
+		// Full file from start — only valid if offset is 0.
+		if offset > 0 {
+			// Server ignored Range — can't resume. Start fresh.
+			offset = 0
+		}
+	case http.StatusPartialContent:
+		// Expected for Range requests.
 	case http.StatusRequestedRangeNotSatisfiable:
-		// We're past the end — file is complete.
+		// Already past the end.
 		return 0, nil
 	default:
-		return 0, fmt.Errorf("chunk request returned HTTP %d", resp.StatusCode)
+		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	// Write the response body at the correct offset.
-	// We use a SectionWriter pattern via WriteAt.
-	written, err := copyAt(w, resp.Body, start)
+	// Open file for writing at offset.
+	f, err := os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return written, err
+		return 0, fmt.Errorf("open part file: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return 0, fmt.Errorf("seek: %w", err)
 	}
 
-	return written, nil
-}
-
-// copyAt copies from r to w starting at offset, returning bytes written.
-func copyAt(w io.WriterAt, r io.Reader, offset int64) (int64, error) {
-	buf := make([]byte, 32*1024) // 32KB buffer
-	var total int64
+	// Stream body to file with progress reporting.
+	buf := make([]byte, 64*1024) // 64KB read buffer
+	var written int64
+	var lastReport int64
 
 	for {
-		n, readErr := r.Read(buf)
+		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
-			nw, writeErr := w.WriteAt(buf[:n], offset+total)
-			total += int64(nw)
+			nw, writeErr := f.Write(buf[:n])
+			written += int64(nw)
 			if writeErr != nil {
-				return total, writeErr
+				return written, writeErr
+			}
+
+			// Report progress periodically.
+			if sink != nil && totalSize > 0 && (written-lastReport) >= progressReportInterval {
+				lastReport = written
+				currentTotal := offset + written
+				pct := int(currentTotal * 100 / totalSize)
+				if pct > 100 {
+					pct = 100
+				}
+				sink.TrackProgress(key, track, pct)
+				if byteSink, ok := sink.(domain.ByteProgressSink); ok {
+					byteSink.ByteProgress(key, currentTotal, totalSize)
+				}
 			}
 		}
 		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				return total, nil
+			if readErr == io.EOF {
+				// Final progress report.
+				if sink != nil && totalSize > 0 {
+					currentTotal := offset + written
+					pct := int(currentTotal * 100 / totalSize)
+					if pct > 100 {
+						pct = 100
+					}
+					sink.TrackProgress(key, track, pct)
+					if byteSink, ok := sink.(domain.ByteProgressSink); ok {
+						byteSink.ByteProgress(key, currentTotal, totalSize)
+					}
+				}
+				return written, nil
 			}
-			return total, readErr
+			return written, readErr
 		}
 	}
 }
 
+// getPartialOffset returns the size of an existing .part file, or 0 if none.
+// If the partial file is larger than totalSize, it's deleted and 0 is returned.
+func (c *ChunkedDownloader) getPartialOffset(partPath string, totalSize int64) int64 {
+	info, err := os.Stat(partPath)
+	if err != nil {
+		return 0
+	}
+	offset := info.Size()
+	if totalSize > 0 && offset > totalSize {
+		c.logger.Warn("partial file larger than expected, starting fresh",
+			domain.F("partial_size", offset),
+			domain.F("server_size", totalSize),
+		)
+		os.Remove(partPath)
+		return 0
+	}
+	return offset
+}
+
+// probeSize sends a HEAD request to determine the file size.
+// Returns 0 if size cannot be determined (download will still work but
+// without progress percentage).
+func (c *ChunkedDownloader) probeSize(ctx context.Context, url string) (int64, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodHead, url, nil)
+	if err != nil {
+		return 0, err
+	}
+	c.applyAuth(req)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("HEAD returned HTTP %d", resp.StatusCode)
+	}
+
+	size := resp.ContentLength
+	if size <= 0 {
+		clStr := resp.Header.Get("Content-Length")
+		if clStr != "" {
+			size, _ = strconv.ParseInt(clStr, 10, 64)
+		}
+	}
+
+	return size, nil
+}
+
 // applyAuth sets authentication headers on the request.
+// NOTE: Cookie is NOT sent to CDN hosts (cdntogo.net, etc.) — it causes
+// throttling and timeouts. Only User-Agent and extra headers (Referer) are sent.
+// Cookie is only needed for kino.pub domain requests.
 func (c *ChunkedDownloader) applyAuth(req *http.Request) {
 	if c.auth.UserAgent != "" {
 		req.Header.Set("User-Agent", c.auth.UserAgent)
 	}
-	if c.auth.Cookie != "" {
+	// Only send Cookie to kino.pub, not to CDN hosts.
+	if c.auth.Cookie != "" && strings.Contains(req.URL.Host, "kino.pub") {
 		req.Header.Set("Cookie", c.auth.Cookie)
 	}
 	for k, v := range c.auth.Headers {
