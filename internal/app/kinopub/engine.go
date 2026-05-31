@@ -162,6 +162,7 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 
 	// 7. Start progress reporting.
 	plan := domain.SeriesPlan{
+		Title:              series.Title,
 		Total:              len(allMatching),
 		Seasons:            countSeasons(allMatching),
 		AlreadyCompleted:   alreadyCompleted,
@@ -516,6 +517,7 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 
 	// 8. Start progress reporting.
 	plan := domain.SeriesPlan{
+		Title:              series.Title,
 		Total:              len(allMatching),
 		Seasons:            countSeasons(allMatching),
 		AlreadyCompleted:   alreadyCompleted,

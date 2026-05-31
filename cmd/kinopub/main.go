@@ -32,6 +32,7 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/services/mediaresolver"
 	"github.com/niazlv/kinopub-downloader/internal/services/outputlayout"
 	"github.com/niazlv/kinopub-downloader/internal/services/pagescraper"
+	"github.com/niazlv/kinopub-downloader/internal/lib/termuxapi"
 	"github.com/niazlv/kinopub-downloader/internal/services/progress"
 	"github.com/niazlv/kinopub-downloader/internal/services/proxyprovider"
 	"github.com/niazlv/kinopub-downloader/internal/services/scheduler"
@@ -495,6 +496,8 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	} else {
 		progReporter = progress.NewLog(logger)
 	}
+	// Wrap with Termux notifications if termux-notification is available.
+	progReporter = termuxapi.Wrap(progReporter)
 
 	deps := kinopub.Dependencies{
 		Logger:           logger,
