@@ -38,7 +38,7 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/services/statestore"
 )
 
-const version = "0.1.0"
+var version = "dev"
 
 func main() {
 	os.Exit(run())
