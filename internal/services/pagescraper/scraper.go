@@ -13,7 +13,7 @@ import (
 	"regexp"
 	"time"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // podcastHrefRe matches the podcast feed link in the page HTML.

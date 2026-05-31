@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // testLogger is a no-op logger for tests.

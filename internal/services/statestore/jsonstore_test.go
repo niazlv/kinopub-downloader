@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"kinopub_downloader/internal/domain"
-	"kinopub_downloader/internal/lib/logx"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/lib/logx"
 )
 
 // testLogger returns a no-op logger suitable for tests.

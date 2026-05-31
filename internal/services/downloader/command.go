@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // buildInputAuthOpts returns ffmpeg input options that inject authentication

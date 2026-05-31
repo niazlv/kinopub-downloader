@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // Segment represents a single HLS segment from a media playlist.

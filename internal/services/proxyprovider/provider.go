@@ -15,7 +15,7 @@ import (
 
 	"golang.org/x/net/proxy"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // EnvLookupFunc abstracts os.Getenv for testability.

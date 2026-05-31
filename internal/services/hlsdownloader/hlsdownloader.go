@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"kinopub_downloader/internal/domain"
-	"kinopub_downloader/internal/lib/httpx"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/lib/httpx"
 )
 
 const (

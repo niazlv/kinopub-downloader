@@ -7,7 +7,7 @@ package httpx
 import (
 	"net/http"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // authTransport wraps a base RoundTripper and injects authentication headers

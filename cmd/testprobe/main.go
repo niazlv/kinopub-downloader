@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"kinopub_downloader/internal/domain"
-	"kinopub_downloader/internal/services/mediaresolver"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/services/mediaresolver"
 )
 
 type nopLog struct{}

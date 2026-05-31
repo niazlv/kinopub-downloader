@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // Variant represents a single quality variant from an HLS master playlist.

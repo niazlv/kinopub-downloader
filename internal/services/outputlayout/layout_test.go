@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // Compile-time interface satisfaction check.

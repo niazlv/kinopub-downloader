@@ -5,8 +5,8 @@ import (
 	"io"
 	"strings"
 
-	"kinopub_downloader/internal/domain"
-	"kinopub_downloader/internal/lib/termx"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/lib/termx"
 )
 
 // ---------------------------------------------------------------------------

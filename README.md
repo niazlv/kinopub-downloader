@@ -22,7 +22,7 @@ CLI-утилита для скачивания видео с [kino.pub](https://
 
 ### Из релизов (рекомендуется)
 
-Скачайте бинарник для вашей платформы со [страницы релизов](../../releases/latest):
+Скачайте бинарник для вашей платформы со [страницы релизов](https://github.com/niazlv/kinopub-downloader/releases/latest):
 
 | Платформа | Архитектура | Файл |
 |-----------|-------------|------|
@@ -44,13 +44,13 @@ sudo mv kinopub-linux-amd64 /usr/local/bin/kinopub
 ### Из исходников
 
 ```bash
-go install kinopub_downloader/cmd/kinopub@latest
+go install github.com/niazlv/kinopub-downloader/cmd/kinopub@latest
 ```
 
 Или:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/kinopub_downloader.git
+git clone https://github.com/niazlv/kinopub-downloader.git
 cd kinopub_downloader
 go build -o kinopub ./cmd/kinopub
 ```

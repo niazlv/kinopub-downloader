@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // fakeEnv builds an EnvLookupFunc from a map.

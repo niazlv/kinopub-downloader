@@ -1,4 +1,4 @@
-module kinopub_downloader
+module github.com/niazlv/kinopub-downloader
 
 go 1.26.3
 

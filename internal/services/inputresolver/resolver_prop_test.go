@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 
 	"pgregory.net/rapid"
 )

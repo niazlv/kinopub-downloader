@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 const (

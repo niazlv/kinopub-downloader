@@ -26,8 +26,8 @@ import (
 	"strings"
 	"time"
 
-	"kinopub_downloader/internal/domain"
-	"kinopub_downloader/internal/lib/fsutil"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/lib/fsutil"
 )
 
 // Issue describes a single problem found during verification.

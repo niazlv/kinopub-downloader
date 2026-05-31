@@ -3,7 +3,7 @@ package progress
 import (
 	"sync"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // LogReporter is a non-interactive fallback that emits discrete log records

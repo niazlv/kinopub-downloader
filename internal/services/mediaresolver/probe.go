@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // ffprobeOutput represents the JSON output of ffprobe -show_streams -show_format -print_format json.

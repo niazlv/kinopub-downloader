@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 func TestParseAudioPreference(t *testing.T) {

@@ -3,8 +3,8 @@ package progress
 import (
 	"testing"
 
-	"kinopub_downloader/internal/domain"
-	"kinopub_downloader/internal/lib/logx"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/lib/logx"
 
 	"pgregory.net/rapid"
 )

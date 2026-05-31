@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // fakeHLSDownloader simulates the HLS downloader. For each episode key it can

@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 func TestWithAuth_InjectsHeaders(t *testing.T) {

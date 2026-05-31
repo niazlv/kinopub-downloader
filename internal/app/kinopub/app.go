@@ -3,7 +3,7 @@ package kinopub
 import (
 	"context"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // Dependencies holds all injectable interfaces required by the App.

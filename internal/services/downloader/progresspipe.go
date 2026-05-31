@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // progressParser implements io.Writer and parses ffmpeg -progress output.

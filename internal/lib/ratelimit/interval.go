@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // Interval enforces a minimum time gap between successive Wait() calls.

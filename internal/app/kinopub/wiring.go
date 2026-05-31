@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // validateDependencies checks that no required field in the Dependencies struct is nil.

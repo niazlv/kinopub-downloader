@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 func validConfig() *domain.RunConfig {

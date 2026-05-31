@@ -8,7 +8,7 @@ import (
 
 	"pgregory.net/rapid"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // **Validates: Requirements 6.1, 6.2, 6.3, 6.4, 6.5**

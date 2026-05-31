@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // resolveHLS fetches and parses an m3u8 master playlist to enumerate

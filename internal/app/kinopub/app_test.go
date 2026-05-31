@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"testing"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // --- Minimal mock implementations for testing ---

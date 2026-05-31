@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"time"
 
-	"kinopub_downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // playerPlaylistRe extracts the PLAYER_PLAYLIST JSON array from the page HTML.
