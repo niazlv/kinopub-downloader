@@ -26,7 +26,7 @@ func TestBuildFFmpegArgs_InjectsAuthBeforeEachInput(t *testing.T) {
 		Headers:   map[string]string{"X-Extra": "1"},
 	}
 
-	args := BuildFFmpegArgs(job, nil, auth, "/tmp/out.mkv.tmp")
+	args := BuildFFmpegArgs(job, nil, auth, "/tmp/out.mkv.tmp", nil)
 
 	// Count inputs (-i) and auth option groups (-user_agent).
 	var inputs, uaOpts, headerOpts int
@@ -77,7 +77,7 @@ func TestBuildFFmpegArgs_NoAuthNoExtraOpts(t *testing.T) {
 		},
 	}
 
-	args := BuildFFmpegArgs(job, nil, domain.RequestAuth{}, "/tmp/out.mkv.tmp")
+	args := BuildFFmpegArgs(job, nil, domain.RequestAuth{}, "/tmp/out.mkv.tmp", nil)
 
 	for _, a := range args {
 		if a == "-user_agent" || a == "-headers" {

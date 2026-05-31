@@ -31,11 +31,15 @@ func (r *LogReporter) Start(plan domain.SeriesPlan) {
 	defer r.mu.Unlock()
 
 	r.plan = plan
-	r.completedTotal = 0
+	r.completedTotal = plan.AlreadyCompleted
 	r.completedSeason = make(map[int]int, len(plan.Seasons))
+	for season, count := range plan.CompletedPerSeason {
+		r.completedSeason[season] = count
+	}
 
 	r.logger.Info("progress reporting started",
 		domain.F("total_episodes", plan.Total),
+		domain.F("already_completed", plan.AlreadyCompleted),
 		domain.F("seasons", len(plan.Seasons)),
 	)
 }

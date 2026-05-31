@@ -63,7 +63,7 @@ func TestDownloader_Download_Success(t *testing.T) {
 		}
 		// Write some progress to stdout if available.
 		if stdout != nil {
-			fmt.Fprint(stdout, "out_time=00:01:00.000000\nprogress=continue\n")
+			fmt.Fprint(stdout, "out_time=00:02:00.000000\nprogress=end\n")
 		}
 		return nil
 	}
@@ -113,15 +113,15 @@ func TestDownloader_Download_Success(t *testing.T) {
 	if len(sink.updates) == 0 {
 		t.Error("expected progress updates")
 	}
-	// 1 minute out of 2 minutes = 50%
-	found50 := false
+	// 2 minutes out of 2 minutes = 100%
+	found100 := false
 	for _, u := range sink.updates {
-		if u.percent == 50 {
-			found50 = true
+		if u.percent == 100 {
+			found100 = true
 		}
 	}
-	if !found50 {
-		t.Errorf("expected 50%% progress, got updates: %v", sink.updates)
+	if !found100 {
+		t.Errorf("expected 100%% progress, got updates: %v", sink.updates)
 	}
 }
 

@@ -11,19 +11,24 @@ import (
 )
 
 // ANSI escape sequences for color rendering.
+// These are standard ANSI codes supported on macOS, Linux, and Termux.
 const (
 	// Reset clears all ANSI formatting.
 	Reset = "\033[0m"
 
 	// Exported color constants used by logx and other packages.
-	Cyan    = "\033[36m"
-	Green   = "\033[32m"
-	Yellow  = "\033[33m"
-	Red     = "\033[31m"
-	Blue    = "\033[34m"
-	Gray    = "\033[90m"
-	Bold    = "\033[1m"
-	BoldRed = "\033[1;31m"
+	Cyan      = "\033[36m"
+	Green     = "\033[32m"
+	Yellow    = "\033[33m"
+	Red       = "\033[31m"
+	Blue      = "\033[34m"
+	Magenta   = "\033[35m"
+	Gray      = "\033[90m"
+	White     = "\033[37m"
+	Bold      = "\033[1m"
+	BoldRed   = "\033[1;31m"
+	BoldGreen = "\033[1;32m"
+	BoldCyan  = "\033[1;36m"
 )
 
 // defaultWidth is used when terminal width cannot be detected.

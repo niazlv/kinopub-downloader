@@ -20,14 +20,37 @@ var (
 	pageLinkeRe = regexp.MustCompile(`^/item/view/(\d+)(?:/[^/]*)?$`)
 )
 
+// PageScraper extracts a FeedSource from a kino.pub page by fetching its HTML
+// and parsing the embedded podcast link. This is an optional dependency: when
+// nil, page link resolution falls back to ErrFeedTokenUnavailable.
+type PageScraper interface {
+	ExtractFeedSource(ctx context.Context, pageURL string) (domain.FeedSource, error)
+}
+
 // Resolver implements domain.InputResolver.
 type Resolver struct {
-	log domain.Logger
+	log     domain.Logger
+	scraper PageScraper
 }
 
 // New creates a new Resolver. The logger is used for diagnostic output.
-func New(log domain.Logger) *Resolver {
-	return &Resolver{log: log}
+// The scraper is optional — pass nil to disable page link resolution.
+func New(log domain.Logger, opts ...Option) *Resolver {
+	r := &Resolver{log: log}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
+}
+
+// Option configures the Resolver.
+type Option func(*Resolver)
+
+// WithPageScraper sets the page scraper used to resolve page links into feed
+// sources. When set, page links (https://kino.pub/item/view/...) are fetched
+// and the podcast feed URL is extracted from the HTML.
+func WithPageScraper(s PageScraper) Option {
+	return func(r *Resolver) { r.scraper = s }
 }
 
 // Classify inspects a raw URL string and returns its InputClass.
@@ -90,10 +113,14 @@ func (r *Resolver) Resolve(ctx context.Context, rawURL string) (domain.FeedSourc
 		}, nil
 
 	case domain.ClassPageLink:
-		r.log.Warn("page link resolution requires feed token which is currently unavailable",
-			domain.F("url", rawURL),
-		)
-		return domain.FeedSource{}, domain.ErrFeedTokenUnavailable
+		if r.scraper == nil {
+			r.log.Warn("page link resolution requires --cookie/--browser-cookies for authentication",
+				domain.F("url", rawURL),
+			)
+			return domain.FeedSource{}, domain.ErrFeedTokenUnavailable
+		}
+		r.log.Info("resolving page link via HTML scraping", domain.F("url", rawURL))
+		return r.scraper.ExtractFeedSource(ctx, rawURL)
 
 	default:
 		return domain.FeedSource{}, domain.ErrInvalidInputURL

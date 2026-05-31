@@ -30,6 +30,7 @@ type Downloader struct {
 	logger     domain.Logger
 	ffmpegPath string
 	auth       domain.RequestAuth
+	extraArgs  []string
 }
 
 // Option configures the Downloader.
@@ -47,6 +48,15 @@ func WithFFmpegPath(path string) Option {
 func WithAuth(auth domain.RequestAuth) Option {
 	return func(d *Downloader) {
 		d.auth = auth
+	}
+}
+
+// WithExtraArgs sets additional ffmpeg arguments injected before the output
+// path. This allows users to override encoding settings (e.g. -c:v libx265)
+// or add filters on the fly.
+func WithExtraArgs(args []string) Option {
+	return func(d *Downloader) {
+		d.extraArgs = args
 	}
 }
 
@@ -86,7 +96,7 @@ func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.P
 	tempPath := job.OutPath + ".tmp"
 
 	// 3. Build ffmpeg args.
-	args := BuildFFmpegArgs(job, proxyEnv, d.auth, tempPath)
+	args := BuildFFmpegArgs(job, proxyEnv, d.auth, tempPath, d.extraArgs)
 
 	// 4. Set up progress parsing.
 	// Compute total duration for percentage. We use the video track's duration
@@ -138,6 +148,25 @@ func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.P
 		// Delete temp file if it exists but is empty.
 		_ = os.Remove(tempPath)
 		return domain.ErrEmptyOutput
+	}
+
+	// 7b. Verify duration: if we know the expected duration, check that the
+	// downloaded file is at least 85% of it. CDN may silently truncate the
+	// stream (especially under parallel load), and ffmpeg exits 0 with a
+	// partial file. We detect this by checking the progress parser's last
+	// reported percentage.
+	if parser != nil && duration > 0 {
+		lastPct := parser.lastPercent()
+		if lastPct < 85 {
+			d.logger.Error("download appears truncated",
+				domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+				domain.F("last_progress_percent", lastPct),
+				domain.F("expected_duration", duration.String()),
+				domain.F("file_size", info.Size()),
+			)
+			_ = os.Remove(tempPath)
+			return fmt.Errorf("%w: download truncated at %d%% (CDN may have dropped the connection)", domain.ErrFFmpegFailed, lastPct)
+		}
 	}
 
 	// 8. Atomic rename to final path (Req 7.6).

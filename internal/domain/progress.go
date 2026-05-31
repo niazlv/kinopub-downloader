@@ -2,8 +2,10 @@ package domain
 
 // SeriesPlan describes the scope of a download run for progress tracking.
 type SeriesPlan struct {
-	Total   int         // total selected episodes
-	Seasons map[int]int // season number → episode count in that season
+	Total            int         // total episodes in the series (including already completed)
+	Seasons          map[int]int // season number → total episode count in that season
+	AlreadyCompleted int         // episodes already completed from previous sessions
+	CompletedPerSeason map[int]int // season → already completed count from previous sessions
 }
 
 // ProgressSnapshot captures the current progress state at a point in time.

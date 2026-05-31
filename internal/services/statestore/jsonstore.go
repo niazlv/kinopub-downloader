@@ -89,17 +89,41 @@ func episodeKeyString(key domain.EpisodeKey) string {
 // MarkCompleted persists a completed record for the given episode atomically
 // (temp + rename via fsutil.AtomicWrite) before the job is recorded as
 // succeeded (Req 12.1, 12.3).
-func (s *JSONStore) MarkCompleted(_ context.Context, key domain.EpisodeKey) error {
+func (s *JSONStore) MarkCompleted(_ context.Context, info domain.CompletedInfo) error {
 	// Load current state (or start fresh).
-	state, _ := s.Load(context.Background(), key.Series)
+	state, _ := s.Load(context.Background(), info.Key.Series)
 
 	rec := domain.CompletedRec{
-		Season:      key.Season,
-		Episode:     key.Episode,
+		Season:      info.Key.Season,
+		Episode:     info.Key.Episode,
+		Path:        info.Path,
+		Bytes:       info.Bytes,
 		CompletedAt: time.Now(),
+		Title:       info.Title,
+		Quality:     info.Quality,
+		PageLink:    info.PageLink,
+		MediaURL:    info.MediaURL,
 	}
 
-	state.Completed[episodeKeyString(key)] = rec
+	state.Completed[episodeKeyString(info.Key)] = rec
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("statestore: marshal state: %w", err)
+	}
+
+	if err := fsutil.AtomicWrite(s.statePath(), data, 0644); err != nil {
+		return fmt.Errorf("statestore: persist state: %w", err)
+	}
+
+	return nil
+}
+
+// SetMetadata persists series-level metadata (title, description, feed URL, etc.)
+// into the state file for provenance and recovery.
+func (s *JSONStore) SetMetadata(_ context.Context, series domain.SeriesID, meta domain.SeriesMetadata) error {
+	state, _ := s.Load(context.Background(), series)
+	state.Metadata = &meta
 
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {

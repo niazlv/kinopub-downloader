@@ -6,12 +6,14 @@ package progress
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"kinopub_downloader/internal/domain"
 	"kinopub_downloader/internal/lib/logx"
+	"kinopub_downloader/internal/lib/termx"
 )
 
 // LiveReporter renders a multi-line live progress display refreshed at least
@@ -21,19 +23,21 @@ import (
 type LiveReporter struct {
 	w     io.Writer
 	coord *logx.Coordinator
+	isTTY bool
 
 	mu   sync.Mutex
 	plan domain.SeriesPlan
 
 	// Tracking state
-	completedTotal   int            // total completed episodes across all seasons
-	completedSeason  map[int]int    // season → completed count
-	currentEpisodes  map[domain.EpisodeKey]*episodeState
-	failedEpisodes   map[domain.EpisodeKey]error
+	completedTotal  int            // total completed episodes across all seasons
+	completedSeason map[int]int    // season → completed count
+	currentEpisodes map[domain.EpisodeKey]*episodeState
+	failedEpisodes  map[domain.EpisodeKey]error
 
 	// Display state
-	lastLines int // number of lines rendered in the last frame
-	stopped   bool
+	lastLines  int       // number of lines rendered in the last frame
+	lastRender time.Time // last time we rendered (for throttling TrackProgress)
+	stopped    bool
 
 	// Ticker for periodic refresh
 	ticker *time.Ticker
@@ -42,7 +46,11 @@ type LiveReporter struct {
 
 // episodeState tracks per-episode download progress.
 type episodeState struct {
-	tracks map[domain.TrackRef]int // track → percent [0,100]
+	tracks           map[domain.TrackRef]int // track → percent [0,100]
+	startTime        time.Time
+	firstProgressAt  time.Time // when we first received a non-zero progress update
+	firstProgressPct int       // percent at that moment
+	lastBytes        int64     // for speed estimation (future use)
 }
 
 // NewLive creates a LiveReporter that writes to w and coordinates with the
@@ -51,6 +59,7 @@ func NewLive(w io.Writer, coord *logx.Coordinator) *LiveReporter {
 	return &LiveReporter{
 		w:     w,
 		coord: coord,
+		isTTY: true,
 	}
 }
 
@@ -60,8 +69,11 @@ func (r *LiveReporter) Start(plan domain.SeriesPlan) {
 	defer r.mu.Unlock()
 
 	r.plan = plan
-	r.completedTotal = 0
+	r.completedTotal = plan.AlreadyCompleted
 	r.completedSeason = make(map[int]int, len(plan.Seasons))
+	for season, count := range plan.CompletedPerSeason {
+		r.completedSeason[season] = count
+	}
 	r.currentEpisodes = make(map[domain.EpisodeKey]*episodeState)
 	r.failedEpisodes = make(map[domain.EpisodeKey]error)
 	r.lastLines = 0
@@ -83,7 +95,8 @@ func (r *LiveReporter) EpisodeStarted(key domain.EpisodeKey) {
 	defer r.mu.Unlock()
 
 	r.currentEpisodes[key] = &episodeState{
-		tracks: make(map[domain.TrackRef]int),
+		tracks:    make(map[domain.TrackRef]int),
+		startTime: time.Now(),
 	}
 	r.render()
 }
@@ -97,7 +110,22 @@ func (r *LiveReporter) TrackProgress(key domain.EpisodeKey, track domain.TrackRe
 	if !ok {
 		return
 	}
-	ep.tracks[track] = clampPercent(percent)
+	percent = clampPercent(percent)
+	ep.tracks[track] = percent
+
+	// Record the first meaningful progress for accurate ETA calculation.
+	// We wait until percent >= 2 to skip the initial ffmpeg header copy burst.
+	if ep.firstProgressAt.IsZero() && percent >= 2 {
+		ep.firstProgressAt = time.Now()
+		ep.firstProgressPct = percent
+	}
+
+	// Throttle renders to avoid excessive redraws (ffmpeg emits progress frequently).
+	now := time.Now()
+	if now.Sub(r.lastRender) >= 200*time.Millisecond {
+		r.lastRender = now
+		r.render()
+	}
 }
 
 // EpisodeCompleted signals that an episode download finished successfully.
@@ -196,36 +224,165 @@ func (r *LiveReporter) clearLines() {
 // and within a coordinator-protected section.
 func (r *LiveReporter) renderFrame() {
 	var lines []string
+	termWidth := termx.TerminalWidth()
 
-	// Series progress line.
+	// ─── Header separator ───
+	lines = append(lines, r.colorize(termx.Gray, r.repeatChar('─', min(termWidth, 60))))
+
+	// Series progress line with colored bar.
 	seriesPct := r.seriesPercent()
-	lines = append(lines, fmt.Sprintf("Series: %d%% (%d/%d episodes)", seriesPct, r.completedTotal, r.plan.Total))
+	seriesBar := r.progressBar(seriesPct, 20, termx.Green)
+	seriesLine := fmt.Sprintf("  %s %s %s",
+		r.colorize(termx.Bold, "Series"),
+		seriesBar,
+		r.colorize(termx.Gray, fmt.Sprintf("%d/%d episodes", r.completedTotal, r.plan.Total)))
+	lines = append(lines, seriesLine)
 
-	// Season progress lines.
-	for season, total := range r.plan.Seasons {
+	// Season progress lines (sorted by season number).
+	seasonNums := make([]int, 0, len(r.plan.Seasons))
+	for season := range r.plan.Seasons {
+		seasonNums = append(seasonNums, season)
+	}
+	sort.Ints(seasonNums)
+
+	for _, season := range seasonNums {
+		total := r.plan.Seasons[season]
 		completed := r.completedSeason[season]
 		pct := computePercent(completed, total)
-		lines = append(lines, fmt.Sprintf("  Season %d: %d%% (%d/%d)", season, pct, completed, total))
+
+		barColor := termx.Blue
+		if pct == 100 {
+			barColor = termx.Green
+		}
+		bar := r.progressBar(pct, 15, barColor)
+		seasonLine := fmt.Sprintf("    Season %d %s %s",
+			season, bar,
+			r.colorize(termx.Gray, fmt.Sprintf("%d/%d", completed, total)))
+		lines = append(lines, seasonLine)
 	}
 
-	// Current episode progress.
-	for key, ep := range r.currentEpisodes {
-		epPct := r.episodePercent(ep)
-		lines = append(lines, fmt.Sprintf("  ↓ S%02dE%02d: %d%%", key.Season, key.Episode, epPct))
-		for track, pct := range ep.tracks {
-			label := trackLabel(track)
-			lines = append(lines, fmt.Sprintf("      %s: %d%%", label, pct))
+	// Current episode downloads (parallel).
+	if len(r.currentEpisodes) > 0 {
+		lines = append(lines, "") // blank separator
+		lines = append(lines, r.colorize(termx.Cyan, "  ⬇ Downloading:"))
+
+		// Sort episode keys for stable display.
+		keys := make([]domain.EpisodeKey, 0, len(r.currentEpisodes))
+		for key := range r.currentEpisodes {
+			keys = append(keys, key)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			if keys[i].Season != keys[j].Season {
+				return keys[i].Season < keys[j].Season
+			}
+			return keys[i].Episode < keys[j].Episode
+		})
+
+		for _, key := range keys {
+			ep := r.currentEpisodes[key]
+			epPct := r.episodePercent(ep)
+
+			bar := r.progressBar(epPct, 25, termx.Yellow)
+
+			// ETA estimation: use time since first real progress, not since
+			// EpisodeStarted (which includes resolve + ffmpeg startup time).
+			etaStr := ""
+			if epPct > 2 && epPct < 100 && !ep.firstProgressAt.IsZero() {
+				elapsed := time.Since(ep.firstProgressAt)
+				// pctSinceFirst: how much progress was made since we started tracking
+				pctDone := epPct - ep.firstProgressPct
+				if pctDone > 0 {
+					totalEstimate := elapsed * time.Duration(100-ep.firstProgressPct) / time.Duration(pctDone)
+					remaining := totalEstimate - elapsed
+					if remaining > 0 {
+						etaStr = r.colorize(termx.Gray, fmt.Sprintf(" ETA %s", formatDuration(remaining)))
+					}
+				}
+			}
+
+			epLine := fmt.Sprintf("    %s %s%s",
+				r.colorize(termx.Bold, fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
+				bar,
+				etaStr)
+			lines = append(lines, epLine)
 		}
 	}
 
 	// Failed episodes.
-	for key, err := range r.failedEpisodes {
-		lines = append(lines, fmt.Sprintf("  ✗ S%02dE%02d: FAILED (%s)", key.Season, key.Episode, err.Error()))
+	if len(r.failedEpisodes) > 0 {
+		lines = append(lines, "") // blank separator
+		// Sort failed keys for stable display.
+		failedKeys := make([]domain.EpisodeKey, 0, len(r.failedEpisodes))
+		for key := range r.failedEpisodes {
+			failedKeys = append(failedKeys, key)
+		}
+		sort.Slice(failedKeys, func(i, j int) bool {
+			if failedKeys[i].Season != failedKeys[j].Season {
+				return failedKeys[i].Season < failedKeys[j].Season
+			}
+			return failedKeys[i].Episode < failedKeys[j].Episode
+		})
+
+		for _, key := range failedKeys {
+			errMsg := r.failedEpisodes[key].Error()
+			// Truncate long error messages.
+			if len(errMsg) > 40 {
+				errMsg = errMsg[:37] + "..."
+			}
+			failLine := fmt.Sprintf("    %s %s",
+				r.colorize(termx.Red, fmt.Sprintf("✗ S%02dE%02d", key.Season, key.Episode)),
+				r.colorize(termx.Gray, errMsg))
+			lines = append(lines, failLine)
+		}
 	}
+
+	// Bottom separator.
+	lines = append(lines, r.colorize(termx.Gray, r.repeatChar('─', min(termWidth, 60))))
 
 	output := strings.Join(lines, "\n") + "\n"
 	fmt.Fprint(r.w, output)
 	r.lastLines = len(lines)
+}
+
+// progressBar renders a colored progress bar of the given width.
+// Example: [████████░░░░░░░░░░░░] 45%
+func (r *LiveReporter) progressBar(percent, width int, color string) string {
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+
+	filled := (percent * width) / 100
+	empty := width - filled
+
+	var b strings.Builder
+	b.WriteString(r.colorize(termx.Gray, "["))
+	b.WriteString(color)
+	b.WriteString(strings.Repeat("█", filled))
+	b.WriteString(termx.Reset)
+	b.WriteString(r.colorize(termx.Gray, strings.Repeat("░", empty)))
+	b.WriteString(r.colorize(termx.Gray, "]"))
+	b.WriteString(fmt.Sprintf(" %3d%%", percent))
+
+	return b.String()
+}
+
+// colorize wraps text in ANSI color codes if TTY is detected.
+func (r *LiveReporter) colorize(color, text string) string {
+	if !r.isTTY {
+		return text
+	}
+	return color + text + termx.Reset
+}
+
+// repeatChar repeats a rune n times.
+func (r *LiveReporter) repeatChar(ch rune, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.Repeat(string(ch), n)
 }
 
 // seriesPercent computes the overall series completion percentage.
@@ -286,6 +443,36 @@ func trackLabel(ref domain.TrackRef) string {
 	default:
 		return fmt.Sprintf("Track[%d]", ref.Index)
 	}
+}
+
+// formatDuration formats a duration as a human-readable string (e.g. "2m30s", "45s").
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		return "0s"
+	}
+	d = d.Round(time.Second)
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		m := int(d.Minutes())
+		s := int(d.Seconds()) - m*60
+		if s > 0 {
+			return fmt.Sprintf("%dm%ds", m, s)
+		}
+		return fmt.Sprintf("%dm", m)
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) - h*60
+	return fmt.Sprintf("%dh%dm", h, m)
+}
+
+// min returns the smaller of two ints.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // Verify that *LiveReporter satisfies domain.ProgressReporter at compile time.

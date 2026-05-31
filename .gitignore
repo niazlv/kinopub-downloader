@@ -1,1 +1,11 @@
 .kiro
+
+# Test artifacts
+*.test
+*.out
+
+# OS files
+.DS_Store
+
+# Local test data
+s1e1.html

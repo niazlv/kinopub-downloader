@@ -186,7 +186,7 @@ func makeUnique(labels []string) []string {
 //   - -metadata:s:a:N and -metadata:s:s:N for labels and languages
 //   - -progress pipe:1 for progress reporting
 //   - The temp output path as the final argument
-func BuildFFmpegArgs(job domain.Job, proxyEnv []string, auth domain.RequestAuth, tempPath string) []string {
+func BuildFFmpegArgs(job domain.Job, proxyEnv []string, auth domain.RequestAuth, tempPath string, extraArgs []string) []string {
 	media := job.Media
 	isHLS := media.Source.Kind == domain.MediaHLS
 
@@ -295,6 +295,34 @@ func BuildFFmpegArgs(job domain.Job, proxyEnv []string, auth domain.RequestAuth,
 	if strings.HasSuffix(strings.TrimSuffix(tempPath, ".tmp"), ".mp4") {
 		outFormat = "mp4"
 	}
+
+	// Container-level metadata (title, show, season/episode for media players).
+	if job.Episode.Title != "" {
+		args = append(args, "-metadata", fmt.Sprintf("title=%s", job.Episode.Title))
+	}
+	if job.SeriesTitle != "" {
+		args = append(args, "-metadata", fmt.Sprintf("SHOW=%s", job.SeriesTitle))
+	}
+	// Series title from the episode key's context — we embed season/episode info
+	// so media players (Plex, Kodi, VLC) can display it properly.
+	args = append(args, "-metadata", fmt.Sprintf("episode_sort=%d", job.Episode.Key.Episode))
+	args = append(args, "-metadata", fmt.Sprintf("season_number=%d", job.Episode.Key.Season))
+	args = append(args, "-metadata", fmt.Sprintf("episode_id=S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode))
+
+	// Attach poster image as cover art (MKV only — -attach is a Matroska feature).
+	if job.PosterPath != "" && outFormat == "matroska" {
+		args = append(args, "-attach", job.PosterPath)
+		args = append(args, "-metadata:s:t:0", "mimetype=image/jpeg")
+		args = append(args, "-metadata:s:t:0", "filename=cover.jpg")
+	}
+
+	// Extra user-supplied ffmpeg arguments (advanced: --ffmpeg-args / --x).
+	// Inserted before -f and output path so they can override -c copy or add
+	// filters/encoding options.
+	if len(extraArgs) > 0 {
+		args = append(args, extraArgs...)
+	}
+
 	args = append(args, "-f", outFormat)
 
 	// Output path (temp file).

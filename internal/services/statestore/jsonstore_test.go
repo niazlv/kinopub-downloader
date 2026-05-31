@@ -65,7 +65,16 @@ func TestMarkCompletedAndLoad(t *testing.T) {
 	store := New(dir, testLogger())
 
 	key := domain.EpisodeKey{Series: "series-1", Season: 2, Episode: 5}
-	err := store.MarkCompleted(context.Background(), key)
+	info := domain.CompletedInfo{
+		Key:      key,
+		Path:     "/tmp/test/S02E05.mkv",
+		Bytes:    123456,
+		Title:    "Test Episode",
+		Quality:  "1080p",
+		PageLink: "https://example.com/s02e05",
+		MediaURL: "https://cdn.example.com/video.mp4",
+	}
+	err := store.MarkCompleted(context.Background(), info)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -92,6 +101,15 @@ func TestMarkCompletedAndLoad(t *testing.T) {
 	if rec.Season != 2 || rec.Episode != 5 {
 		t.Errorf("expected season=2, episode=5, got season=%d, episode=%d", rec.Season, rec.Episode)
 	}
+	if rec.Path != "/tmp/test/S02E05.mkv" {
+		t.Errorf("expected path '/tmp/test/S02E05.mkv', got %q", rec.Path)
+	}
+	if rec.Bytes != 123456 {
+		t.Errorf("expected bytes 123456, got %d", rec.Bytes)
+	}
+	if rec.Title != "Test Episode" {
+		t.Errorf("expected title 'Test Episode', got %q", rec.Title)
+	}
 
 	// Load and verify.
 	loaded, err := store.Load(context.Background(), "series-1")
@@ -108,7 +126,7 @@ func TestIsCompleted(t *testing.T) {
 	store := New(dir, testLogger())
 
 	key := domain.EpisodeKey{Series: "series-1", Season: 1, Episode: 3}
-	_ = store.MarkCompleted(context.Background(), key)
+	_ = store.MarkCompleted(context.Background(), domain.CompletedInfo{Key: key, Path: "/tmp/ep.mkv", Bytes: 100})
 
 	state, _ := store.Load(context.Background(), "series-1")
 
@@ -133,7 +151,7 @@ func TestMarkCompletedMultiple(t *testing.T) {
 	}
 
 	for _, k := range keys {
-		if err := store.MarkCompleted(context.Background(), k); err != nil {
+		if err := store.MarkCompleted(context.Background(), domain.CompletedInfo{Key: k, Path: "/tmp/ep.mkv", Bytes: 100}); err != nil {
 			t.Fatalf("unexpected error marking %v: %v", k, err)
 		}
 	}
@@ -160,7 +178,7 @@ func TestLoadDifferentSeries(t *testing.T) {
 
 	// Mark an episode for series "alpha".
 	key := domain.EpisodeKey{Series: "alpha", Season: 1, Episode: 1}
-	_ = store.MarkCompleted(context.Background(), key)
+	_ = store.MarkCompleted(context.Background(), domain.CompletedInfo{Key: key, Path: "/tmp/ep.mkv", Bytes: 100})
 
 	// Load for a different series should return empty.
 	state, err := store.Load(context.Background(), "beta")

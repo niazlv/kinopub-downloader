@@ -99,11 +99,14 @@ type mockStateStore struct {
 func (m *mockStateStore) Load(ctx context.Context, series domain.SeriesID) (domain.DownloadState, error) {
 	return m.state, nil
 }
-func (m *mockStateStore) MarkCompleted(ctx context.Context, key domain.EpisodeKey) error {
+func (m *mockStateStore) MarkCompleted(ctx context.Context, info domain.CompletedInfo) error {
 	if m.completed == nil {
 		m.completed = make(map[domain.EpisodeKey]bool)
 	}
-	m.completed[key] = true
+	m.completed[info.Key] = true
+	return nil
+}
+func (m *mockStateStore) SetMetadata(ctx context.Context, series domain.SeriesID, meta domain.SeriesMetadata) error {
 	return nil
 }
 func (m *mockStateStore) IsCompleted(state domain.DownloadState, key domain.EpisodeKey) bool {

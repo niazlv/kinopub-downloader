@@ -82,7 +82,7 @@ func TestProperty31_StatePersistenceRoundTrip(t *testing.T) {
 
 		// Mark all keys as completed.
 		for _, k := range markedKeys {
-			if err := store.MarkCompleted(ctx, k); err != nil {
+			if err := store.MarkCompleted(ctx, domain.CompletedInfo{Key: k}); err != nil {
 				t.Fatalf("MarkCompleted failed for %v: %v", k, err)
 			}
 		}
@@ -132,7 +132,7 @@ func TestProperty32_CompletedRecordsSurviveCorruption(t *testing.T) {
 
 		// Mark all keys as completed.
 		for _, k := range keys {
-			if err := store.MarkCompleted(ctx, k); err != nil {
+			if err := store.MarkCompleted(ctx, domain.CompletedInfo{Key: k}); err != nil {
 				t.Fatalf("MarkCompleted failed for %v: %v", k, err)
 			}
 		}
@@ -192,7 +192,7 @@ func TestProperty33_ForceRedownloadIsCallerResponsibility(t *testing.T) {
 
 		// Mark all keys as completed.
 		for _, k := range keys {
-			if err := store.MarkCompleted(ctx, k); err != nil {
+			if err := store.MarkCompleted(ctx, domain.CompletedInfo{Key: k}); err != nil {
 				t.Fatalf("MarkCompleted failed for %v: %v", k, err)
 			}
 		}

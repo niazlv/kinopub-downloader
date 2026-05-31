@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/browserutils/kooky v0.2.9
+	golang.org/x/crypto v0.51.0
 	golang.org/x/net v0.55.0
 	golang.org/x/term v0.43.0
 	pgregory.net/rapid v1.3.0
@@ -17,7 +18,6 @@ require (
 	github.com/keybase/go-keychain v0.0.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/zalando/go-keyring v0.2.7 // indirect
-	golang.org/x/crypto v0.51.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/ini.v1 v1.67.1 // indirect

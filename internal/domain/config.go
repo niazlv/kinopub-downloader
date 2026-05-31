@@ -64,6 +64,11 @@ type RunConfig struct {
 	// instead of fetching the feed over the network — useful when the feed URL
 	// returns 403. The InputURL is still used to derive the SeriesID when present.
 	FeedFile string
+
+	// FFmpegExtraArgs are additional arguments passed to ffmpeg before the output
+	// path. This allows advanced users to override encoding settings (e.g.
+	// transcode on the fly) or add filters.
+	FFmpegExtraArgs []string
 }
 
 // RequestAuth carries credentials and request-shaping headers applied to every

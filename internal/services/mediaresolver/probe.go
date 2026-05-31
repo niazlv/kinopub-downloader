@@ -11,9 +11,15 @@ import (
 	"kinopub_downloader/internal/domain"
 )
 
-// ffprobeOutput represents the JSON output of ffprobe -show_streams -print_format json.
+// ffprobeOutput represents the JSON output of ffprobe -show_streams -show_format -print_format json.
 type ffprobeOutput struct {
 	Streams []ffprobeStream `json:"streams"`
+	Format  ffprobeFormat   `json:"format"`
+}
+
+// ffprobeFormat represents the format-level info from ffprobe output.
+type ffprobeFormat struct {
+	Duration string `json:"duration"` // seconds as a decimal string, e.g. "1423.456"
 }
 
 // ffprobeStream represents a single stream from ffprobe output.
@@ -23,6 +29,7 @@ type ffprobeStream struct {
 	Width     int    `json:"width"`
 	Height    int    `json:"height"`
 	BitRate   string `json:"bit_rate"`
+	Duration  string `json:"duration"` // stream-level duration (seconds)
 	Tags      struct {
 		Language string `json:"language"`
 		Title    string `json:"title"`
@@ -76,6 +83,7 @@ func (r *Resolver) resolveProgressive(ctx context.Context, source domain.MediaSo
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_streams",
+		"-show_format",
 		finalURL,
 	)
 
@@ -193,12 +201,40 @@ func parseFFprobeOutput(data []byte, source domain.MediaSource) (domain.Resolved
 		return domain.ResolvedMedia{}, domain.ErrNoVideoTrack
 	}
 
+	// Parse duration from format-level info (most reliable), falling back to
+	// the video stream's duration.
+	duration := parseDurationSeconds(probe.Format.Duration)
+	if duration == 0 {
+		for _, stream := range probe.Streams {
+			if stream.CodecType == "video" && stream.Duration != "" {
+				duration = parseDurationSeconds(stream.Duration)
+				break
+			}
+		}
+	}
+
 	return domain.ResolvedMedia{
-		Source: source,
-		Video:  video,
-		Audio:  audioTracks,
+		Source:    source,
+		Video:    video,
+		Audio:    audioTracks,
+		Duration: duration,
 		// Progressive sources don't have separate subtitle streams in the
 		// same way HLS does — subtitle enumeration is HLS-only per design.
 		Subtitles: nil,
 	}, nil
+}
+
+// parseDurationSeconds parses a decimal seconds string (e.g. "1423.456") into
+// a time.Duration. Returns 0 if parsing fails.
+func parseDurationSeconds(s string) time.Duration {
+	if s == "" {
+		return 0
+	}
+	// Parse as float64 seconds.
+	var secs float64
+	_, err := fmt.Sscanf(s, "%f", &secs)
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs * float64(time.Second))
 }

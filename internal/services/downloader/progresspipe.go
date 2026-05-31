@@ -7,6 +7,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"kinopub_downloader/internal/domain"
@@ -25,6 +26,10 @@ type progressParser struct {
 	reader *io.PipeReader
 	writer *io.PipeWriter
 	done   chan struct{}
+
+	// Track the last reported percent for truncation detection.
+	mu         sync.Mutex
+	lastPctVal int
 }
 
 // newProgressParser creates a progressParser that writes parsed progress to sink.
@@ -123,7 +128,19 @@ func (p *progressParser) reportProgress(elapsed time.Duration) {
 		percent = 100
 	}
 
+	p.mu.Lock()
+	p.lastPctVal = percent
+	p.mu.Unlock()
+
 	p.sink.TrackProgress(p.key, p.track, percent)
+}
+
+// lastPercent returns the last reported progress percentage.
+// Used by the downloader to detect truncated downloads.
+func (p *progressParser) lastPercent() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastPctVal
 }
 
 // parseOutTime parses ffmpeg's out_time format: HH:MM:SS.microseconds

@@ -122,7 +122,7 @@ func TestProperty20_FFmpegCommandMapsEveryTrack(t *testing.T) {
 		job := genJob(numAudio, numSubs).Draw(t, "job")
 		tempPath := "/tmp/episode.mkv.tmp"
 
-		args := BuildFFmpegArgs(job, nil, domain.RequestAuth{}, tempPath)
+		args := BuildFFmpegArgs(job, nil, domain.RequestAuth{}, tempPath, nil)
 
 		// Count -map entries.
 		var videoMaps, audioMaps, subMaps int
@@ -266,7 +266,7 @@ func TestProperty22_AudioLanguageMapsToISO6392(t *testing.T) {
 			},
 		}
 
-		args := BuildFFmpegArgs(job, nil, domain.RequestAuth{}, "/tmp/out.mkv.tmp")
+		args := BuildFFmpegArgs(job, nil, domain.RequestAuth{}, "/tmp/out.mkv.tmp", nil)
 		argsStr := strings.Join(args, " ")
 
 		// The args should contain language=<3-letter-code>.
@@ -394,7 +394,7 @@ func TestProperty24_TrackPreservationRegardlessOfAttributes(t *testing.T) {
 			},
 		}
 
-		args := BuildFFmpegArgs(job, nil, domain.RequestAuth{}, "/tmp/out.mkv.tmp")
+		args := BuildFFmpegArgs(job, nil, domain.RequestAuth{}, "/tmp/out.mkv.tmp", nil)
 
 		// Count audio and subtitle -map entries.
 		var audioMaps, subMaps int
@@ -465,7 +465,7 @@ func TestProperty25_AbsentSubtitlesProduceNoTrack(t *testing.T) {
 			},
 		}
 
-		args := BuildFFmpegArgs(job, nil, domain.RequestAuth{}, "/tmp/out.mkv.tmp")
+		args := BuildFFmpegArgs(job, nil, domain.RequestAuth{}, "/tmp/out.mkv.tmp", nil)
 
 		// No subtitle -map entries.
 		for i := 0; i < len(args)-1; i++ {

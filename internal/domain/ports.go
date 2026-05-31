@@ -185,7 +185,8 @@ type ProgressReporter interface {
 // StateStore persists and queries download completion state (Req 12).
 type StateStore interface {
 	Load(ctx context.Context, series SeriesID) (DownloadState, error)
-	MarkCompleted(ctx context.Context, key EpisodeKey) error
+	MarkCompleted(ctx context.Context, info CompletedInfo) error
+	SetMetadata(ctx context.Context, series SeriesID, meta SeriesMetadata) error
 	IsCompleted(state DownloadState, key EpisodeKey) bool
 }
 
