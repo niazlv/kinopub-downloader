@@ -41,16 +41,26 @@ func (s *Scraper) ExtractFeedSource(ctx context.Context, pageURL string) (domain
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	body, err := s.fetchPage(ctx, pageURL)
+	if err != nil {
+		return domain.FeedSource{}, err
+	}
+
+	return s.parseBody(body, pageURL)
+}
+
+// fetchPage fetches a kino.pub page and returns the body bytes.
+func (s *Scraper) fetchPage(ctx context.Context, pageURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
-		return domain.FeedSource{}, fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("build request: %w", err)
 	}
 
 	s.log.Debug("fetching page", domain.F("url", pageURL))
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return domain.FeedSource{}, fmt.Errorf("fetch page: %w", err)
+		return nil, fmt.Errorf("fetch page: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -59,20 +69,20 @@ func (s *Scraper) ExtractFeedSource(ctx context.Context, pageURL string) (domain
 			domain.F("url", pageURL),
 			domain.F("status", resp.StatusCode),
 		)
-		return domain.FeedSource{}, domain.ErrAuthRequired
+		return nil, domain.ErrAuthRequired
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return domain.FeedSource{}, fmt.Errorf("unexpected status %d for %s", resp.StatusCode, pageURL)
+		return nil, fmt.Errorf("unexpected status %d for %s", resp.StatusCode, pageURL)
 	}
 
 	// Read the body (limit to 2MB to avoid unbounded memory usage).
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 	if err != nil {
-		return domain.FeedSource{}, fmt.Errorf("read body: %w", err)
+		return nil, fmt.Errorf("read body: %w", err)
 	}
 
-	return s.parseBody(body, pageURL)
+	return body, nil
 }
 
 // parseBody extracts the podcast feed link from the HTML body bytes.

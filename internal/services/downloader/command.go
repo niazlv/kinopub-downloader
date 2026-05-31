@@ -330,3 +330,147 @@ func BuildFFmpegArgs(job domain.Job, proxyEnv []string, auth domain.RequestAuth,
 
 	return args
 }
+
+// BuildRemuxArgs constructs ffmpeg arguments to remux a LOCAL media file
+// (e.g. a concatenated HLS .ts) into the final container. Unlike
+// BuildFFmpegArgs, it:
+//   - takes a single local input (no auth options, no proxy)
+//   - uses "-map 0" to copy EVERY stream (all video, all audio, all subtitles)
+//   - relies on the muxed streams already present in the input file
+//
+// This is used by the HLS pipeline where the downloaded .ts already contains
+// video + all audio tracks muxed together.
+func BuildRemuxArgs(job domain.Job, localInput, tempPath string) []string {
+	var args []string
+
+	// Overwrite without asking.
+	args = append(args, "-y")
+
+	// Single local input — no auth, no proxy options.
+	args = append(args, "-i", localInput)
+
+	// Map ALL streams from the input (video + every audio + subtitles).
+	args = append(args, "-map", "0")
+
+	// Stream copy — no re-encoding.
+	args = append(args, "-c", "copy")
+
+	// Determine output format from the final extension.
+	outFormat := "matroska"
+	finalPath := strings.TrimSuffix(tempPath, ".tmp")
+	if strings.HasSuffix(finalPath, ".mp4") {
+		outFormat = "mp4"
+	}
+
+	// Container-level metadata.
+	if job.Episode.Title != "" {
+		args = append(args, "-metadata", fmt.Sprintf("title=%s", job.Episode.Title))
+	}
+	if job.SeriesTitle != "" {
+		args = append(args, "-metadata", fmt.Sprintf("SHOW=%s", job.SeriesTitle))
+	}
+	args = append(args, "-metadata", fmt.Sprintf("episode_sort=%d", job.Episode.Key.Episode))
+	args = append(args, "-metadata", fmt.Sprintf("season_number=%d", job.Episode.Key.Season))
+	args = append(args, "-metadata", fmt.Sprintf("episode_id=S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode))
+
+	// Attach poster as cover art (MKV only).
+	if job.PosterPath != "" && outFormat == "matroska" {
+		args = append(args, "-attach", job.PosterPath)
+		args = append(args, "-metadata:s:t:0", "mimetype=image/jpeg")
+		args = append(args, "-metadata:s:t:0", "filename=cover.jpg")
+	}
+
+	args = append(args, "-f", outFormat)
+	args = append(args, tempPath)
+
+	return args
+}
+
+// BuildHLSMuxArgs constructs ffmpeg arguments to mux a downloaded HLS video
+// file together with separately-downloaded audio track files into the final
+// container. Each audio file is a separate input; -c copy avoids re-encoding.
+//
+// Layout:
+//   -i video.ts -i audio_0.ts -i audio_1.ts ...
+//   -map 0:v -map 1:a -map 2:a ...
+//   -c copy
+//   -metadata:s:a:N title=... language=...
+func BuildHLSMuxArgs(job domain.Job, hls *domain.HLSDownloadResult, tempPath string) []string {
+	var args []string
+
+	args = append(args, "-y")
+
+	// Input 0: video.
+	args = append(args, "-i", hls.VideoPath)
+
+	// Inputs 1..N: audio tracks.
+	for _, a := range hls.AudioTracks {
+		args = append(args, "-i", a.Path)
+	}
+
+	// Map video from input 0.
+	args = append(args, "-map", "0:v:0")
+
+	if len(hls.AudioTracks) > 0 {
+		// Map each audio input's first audio stream.
+		for i := range hls.AudioTracks {
+			args = append(args, "-map", fmt.Sprintf("%d:a:0", i+1))
+		}
+	} else {
+		// No separate audio — the video file may contain muxed audio. Map any
+		// audio streams from input 0 if present (ignore failure with ?).
+		args = append(args, "-map", "0:a?")
+	}
+
+	// Stream copy.
+	args = append(args, "-c", "copy")
+
+	// Audio metadata: labels and languages.
+	labels := make([]string, len(hls.AudioTracks))
+	for i, a := range hls.AudioTracks {
+		if a.Name != "" {
+			labels[i] = a.Name
+		} else if a.Language != "" {
+			labels[i] = a.Language
+		} else {
+			labels[i] = "Audio"
+		}
+	}
+	labels = makeUnique(labels)
+	for i, a := range hls.AudioTracks {
+		args = append(args, fmt.Sprintf("-metadata:s:a:%d", i), fmt.Sprintf("title=%s", labels[i]))
+		if a.Language != "" {
+			args = append(args, fmt.Sprintf("-metadata:s:a:%d", i), fmt.Sprintf("language=%s", ToISO6392(a.Language)))
+		}
+	}
+
+	// Output format.
+	outFormat := "matroska"
+	finalPath := strings.TrimSuffix(tempPath, ".tmp")
+	if strings.HasSuffix(finalPath, ".mp4") {
+		outFormat = "mp4"
+	}
+
+	// Container metadata.
+	if job.Episode.Title != "" {
+		args = append(args, "-metadata", fmt.Sprintf("title=%s", job.Episode.Title))
+	}
+	if job.SeriesTitle != "" {
+		args = append(args, "-metadata", fmt.Sprintf("SHOW=%s", job.SeriesTitle))
+	}
+	args = append(args, "-metadata", fmt.Sprintf("episode_sort=%d", job.Episode.Key.Episode))
+	args = append(args, "-metadata", fmt.Sprintf("season_number=%d", job.Episode.Key.Season))
+	args = append(args, "-metadata", fmt.Sprintf("episode_id=S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode))
+
+	// Poster as cover art (MKV only).
+	if job.PosterPath != "" && outFormat == "matroska" {
+		args = append(args, "-attach", job.PosterPath)
+		args = append(args, "-metadata:s:t:0", "mimetype=image/jpeg")
+		args = append(args, "-metadata:s:t:0", "filename=cover.jpg")
+	}
+
+	args = append(args, "-f", outFormat)
+	args = append(args, tempPath)
+
+	return args
+}

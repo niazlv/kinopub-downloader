@@ -43,5 +43,38 @@ type ProgressSink interface {
 type ByteProgressSink interface {
 	ProgressSink
 	// ByteProgress reports bytes downloaded out of total for an episode.
+	// When total is not known exactly (e.g. an estimate), implementations may
+	// still use it for size/ETA display; callers should mark estimates via
+	// SegmentProgressSink.
 	ByteProgress(key EpisodeKey, downloaded, total int64)
+}
+
+// SegmentProgressSink extends ProgressSink with HLS segment-level progress.
+// Implementations that support it can show "downloaded/total segments" and an
+// approximate total size derived from the average segment size so far.
+type SegmentProgressSink interface {
+	ProgressSink
+	// SegmentProgress reports how many segments have been downloaded out of the
+	// total, along with the bytes downloaded so far and an approximate total
+	// size estimated from the average segment size. approxTotalBytes is 0 when
+	// no estimate is available yet.
+	SegmentProgress(key EpisodeKey, doneSegments, totalSegments int, downloadedBytes, approxTotalBytes int64)
+}
+
+// TrackProgressInfo describes the download progress of a single HLS track
+// (the video, or one of the audio tracks) for nested display.
+type TrackProgressInfo struct {
+	Label            string // "Video", "Audio: Русский", etc.
+	DoneSegments     int    // segments downloaded so far for this track
+	TotalSegments    int    // total segments for this track
+	DownloadedBytes  int64  // bytes downloaded so far for this track
+	ApproxTotalBytes int64  // estimated total size of this track (0 if unknown)
+}
+
+// HLSProgressSink extends ProgressSink with detailed, per-track HLS progress so
+// the UI can render nested bars for the video and each audio track.
+type HLSProgressSink interface {
+	ProgressSink
+	// HLSProgress reports the full per-track breakdown for an episode.
+	HLSProgress(key EpisodeKey, tracks []TrackProgressInfo)
 }

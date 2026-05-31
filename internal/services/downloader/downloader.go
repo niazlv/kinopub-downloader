@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"kinopub_downloader/internal/domain"
@@ -19,6 +20,7 @@ import (
 var (
 	_ domain.Downloader  = (*Downloader)(nil)
 	_ domain.JobExecutor = (*Downloader)(nil)
+	_ domain.HLSMuxer    = (*Downloader)(nil)
 )
 
 // RunFunc is a function that runs a command, streaming stdout to the provided
@@ -112,9 +114,15 @@ func New(run RunFunc, proxy domain.ProxyProvider, logger domain.Logger, opts ...
 // the traditional ffmpeg-based streaming approach.
 func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.ProgressSink) error {
 	// Determine if we can use chunked mode.
+	// Determine if we can use chunked mode.
+	// Skip chunked for local files (no http:// prefix) — they're already on disk.
+	isRemoteURL := strings.HasPrefix(job.Media.Source.URL, "http://") ||
+		strings.HasPrefix(job.Media.Source.URL, "https://")
+
 	useChunked := !d.noChunked &&
 		d.httpClient != nil &&
 		job.Media.Source.Kind == domain.MediaProgressive &&
+		isRemoteURL &&
 		len(d.extraArgs) == 0 // extra ffmpeg args imply transcoding, skip chunked
 
 	if useChunked {
@@ -174,30 +182,70 @@ func (d *Downloader) downloadChunked(ctx context.Context, job domain.Job, sink d
 // remuxLocal runs ffmpeg to remux a local raw file into the final container
 // with all metadata, poster, and audio/subtitle labels.
 func (d *Downloader) remuxLocal(ctx context.Context, job domain.Job, rawPath string) error {
+	return d.RemuxLocal(ctx, job, rawPath)
+}
+
+// MuxHLS combines a downloaded HLS video file with separate audio tracks into
+// the final container at job.OutPath. For demuxed HLS, video and audio come
+// from separate files; this maps them all together with -c copy and applies
+// per-track labels/languages.
+func (d *Downloader) MuxHLS(ctx context.Context, job domain.Job, hls *domain.HLSDownloadResult) error {
+	d.logger.Info("muxing HLS streams",
+		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+		domain.F("audio_tracks", len(hls.AudioTracks)),
+		domain.F("output", job.OutPath),
+	)
+
 	tempPath := job.OutPath + ".tmp"
+	args := BuildHLSMuxArgs(job, hls, tempPath)
 
-	// Build a modified job that points to the local file instead of the URL.
-	localJob := job
-	localJob.Media.Source.URL = rawPath
-
-	// Build ffmpeg args using the local file as input (no auth needed).
-	args := BuildFFmpegArgs(localJob, nil, domain.RequestAuth{}, tempPath, d.extraArgs)
-
-	// Run ffmpeg for remux (no progress needed — it's fast for local files).
 	runErr := d.run(ctx, d.ffmpegPath, args, nil, nil)
 	if runErr != nil {
 		os.Remove(tempPath)
 		return fmt.Errorf("%w: %v", domain.ErrFFmpegFailed, runErr)
 	}
 
-	// Verify output.
 	info, err := os.Stat(tempPath)
 	if err != nil || info.Size() == 0 {
 		os.Remove(tempPath)
 		return domain.ErrEmptyOutput
 	}
 
-	// Atomic rename.
+	if err := os.Rename(tempPath, job.OutPath); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("rename temp to final: %w", err)
+	}
+
+	return nil
+}
+
+// RemuxLocal remuxes a local media file (e.g. a concatenated HLS .ts) into the
+// final container at job.OutPath. It copies ALL streams (video + every audio
+// track + subtitles) using -map 0, applies container metadata and poster, and
+// does NOT inject any HTTP auth options (the input is a local file).
+func (d *Downloader) RemuxLocal(ctx context.Context, job domain.Job, localPath string) error {
+	d.logger.Info("remuxing local file",
+		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+		domain.F("input", localPath),
+		domain.F("output", job.OutPath),
+	)
+
+	tempPath := job.OutPath + ".tmp"
+	args := BuildRemuxArgs(job, localPath, tempPath)
+
+	// Run ffmpeg (no proxy env, no auth — local file).
+	runErr := d.run(ctx, d.ffmpegPath, args, nil, nil)
+	if runErr != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("%w: %v", domain.ErrFFmpegFailed, runErr)
+	}
+
+	info, err := os.Stat(tempPath)
+	if err != nil || info.Size() == 0 {
+		os.Remove(tempPath)
+		return domain.ErrEmptyOutput
+	}
+
 	if err := os.Rename(tempPath, job.OutPath); err != nil {
 		os.Remove(tempPath)
 		return fmt.Errorf("rename temp to final: %w", err)

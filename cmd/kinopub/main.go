@@ -26,6 +26,7 @@ import (
 	"kinopub_downloader/internal/services/doctor"
 	"kinopub_downloader/internal/services/downloader"
 	"kinopub_downloader/internal/services/feedparser"
+	"kinopub_downloader/internal/services/hlsdownloader"
 	"kinopub_downloader/internal/services/inputresolver"
 	"kinopub_downloader/internal/services/mediaresolver"
 	"kinopub_downloader/internal/services/outputlayout"
@@ -485,6 +486,16 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 		ProgressReporter: progReporter,
 		StateStore:       stateStr,
 		OutputLayout:     layout,
+	}
+
+	// Optional HLS pipeline: only available when auth is present (page scraping
+	// requires cookies to access the player page).
+	if !auth.IsZero() {
+		scraper := pagescraper.New(httpClient, logger)
+		hlsDl := hlsdownloader.New(httpClient, auth, logger,
+			hlsdownloader.WithConcurrency(cfg.MaxConcurrency))
+		deps.PageScraper = scraper
+		deps.HLSDownloader = hlsDl
 	}
 
 	return deps, cleanup, nil

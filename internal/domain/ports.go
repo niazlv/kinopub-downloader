@@ -201,3 +201,76 @@ type OutputLayout interface {
 type DownloadEngine interface {
 	Run(ctx context.Context, cfg RunConfig) (RunResult, error)
 }
+
+// HLSDownloader downloads episodes via HLS segment-based streaming.
+// It fetches the master playlist, selects quality, downloads segments,
+// and concatenates them into local files.
+type HLSDownloader interface {
+	// DownloadEpisode downloads an episode's video and audio streams via HLS
+	// segments to local files. Returns paths in HLSDownloadResult; the caller
+	// must remux them and remove HLSDownloadResult.TempDir afterwards.
+	DownloadEpisode(ctx context.Context, manifestURL string, quality Quality,
+		outPath string, key EpisodeKey, sink ProgressSink) (*HLSDownloadResult, error)
+}
+
+// HLSMuxer muxes downloaded HLS video + audio files into a final container.
+type HLSMuxer interface {
+	// MuxHLS combines the video file and audio tracks into job.OutPath using
+	// ffmpeg (-c copy), applying labels, languages, and metadata.
+	MuxHLS(ctx context.Context, job Job, hls *HLSDownloadResult) error
+}
+
+// HLSDownloadResult contains info about a completed HLS download.
+type HLSDownloadResult struct {
+	Resolution  string // e.g. "1920x1080"
+	BitrateKbps int    // selected variant bitrate
+	Codec       string // "h264" or "h265"
+	TotalBytes  int64
+
+	// VideoPath is the local path to the concatenated video .ts file.
+	VideoPath string
+	// AudioTracks are the local audio files downloaded separately (demuxed HLS).
+	// Empty when audio is muxed into the video stream.
+	AudioTracks []HLSAudioTrack
+	// TempDir is the directory holding the intermediate files; the caller
+	// should remove it after remuxing.
+	TempDir string
+}
+
+// HLSAudioTrack describes a downloaded audio rendition.
+type HLSAudioTrack struct {
+	Path     string // local .ts/.aac file path
+	Name     string // studio/track label, e.g. "MVO, AniLibria"
+	Language string // language tag, e.g. "ru"
+}
+
+// PageScraper extracts playlist data from kino.pub pages.
+type PageScraper interface {
+	// ExtractAllSeasons fetches all seasons' playlists from a page URL.
+	ExtractAllSeasons(ctx context.Context, baseURL string) (*PagePlaylist, error)
+}
+
+// PagePlaylist holds extracted playlist data from a kino.pub page.
+type PagePlaylist struct {
+	ItemID   int
+	Title    string
+	Poster   string
+	Episodes []PageEpisode
+	Seasons  []PageSeason
+}
+
+// PageEpisode is a single episode from the page playlist.
+type PageEpisode struct {
+	ManifestURL  string
+	MediaID      int
+	EpisodeTitle string
+	Duration     int // seconds
+	Season       int
+	Episode      int
+}
+
+// PageSeason is season metadata from the page.
+type PageSeason struct {
+	Season int
+	Count  int
+}

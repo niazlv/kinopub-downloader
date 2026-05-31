@@ -18,6 +18,10 @@ type Dependencies struct {
 	ProgressReporter domain.ProgressReporter
 	StateStore       domain.StateStore
 	OutputLayout     domain.OutputLayout
+
+	// Optional: HLS pipeline components (nil = HLS pipeline disabled).
+	HLSDownloader domain.HLSDownloader // nil when auth unavailable
+	PageScraper   domain.PageScraper   // nil when auth unavailable
 }
 
 // App is the composition root that wires all services together and exposes

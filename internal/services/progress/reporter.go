@@ -57,6 +57,14 @@ type episodeState struct {
 	lastSpeedBytes  int64     // bytes at last speed sample
 	lastSpeedTime   time.Time // time of last speed sample
 	speed           float64   // current speed in bytes/sec (smoothed)
+
+	// HLS segment-level tracking.
+	doneSegments  int  // segments downloaded so far
+	totalSegments int  // total segments to download
+	sizeIsApprox  bool // true when totalBytes is an estimate (HLS)
+
+	// Per-track HLS breakdown for nested display (video + audio tracks).
+	hlsTracks []domain.TrackProgressInfo
 }
 
 // NewLive creates a LiveReporter that writes to w and coordinates with the
@@ -178,6 +186,70 @@ func (r *LiveReporter) ByteProgress(key domain.EpisodeKey, downloaded, total int
 		ep.lastSpeedTime = now
 		ep.lastSpeedBytes = downloaded
 	}
+}
+
+// SegmentProgress reports HLS segment-level progress with an approximate total
+// size estimated from the average segment size so far.
+func (r *LiveReporter) SegmentProgress(key domain.EpisodeKey, doneSegments, totalSegments int, downloadedBytes, approxTotalBytes int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	ep, ok := r.currentEpisodes[key]
+	if !ok {
+		return
+	}
+
+	ep.doneSegments = doneSegments
+	ep.totalSegments = totalSegments
+	ep.sizeIsApprox = true
+
+	// Reuse the byte-progress machinery for speed/size by recording the
+	// downloaded and estimated-total byte counts.
+	ep.downloadedBytes = downloadedBytes
+	ep.totalBytes = approxTotalBytes
+
+	// Calculate speed using a sliding window (same approach as ByteProgress).
+	now := time.Now()
+	if ep.lastSpeedTime.IsZero() {
+		ep.lastSpeedTime = now
+		ep.lastSpeedBytes = downloadedBytes
+		return
+	}
+
+	elapsed := now.Sub(ep.lastSpeedTime)
+	if elapsed >= 1*time.Second {
+		byteDiff := downloadedBytes - ep.lastSpeedBytes
+		instantSpeed := float64(byteDiff) / elapsed.Seconds()
+
+		if ep.speed == 0 {
+			ep.speed = instantSpeed
+		} else {
+			ep.speed = ep.speed*0.7 + instantSpeed*0.3
+		}
+
+		if byteDiff == 0 {
+			ep.speed *= 0.3
+			if ep.speed < 1024 {
+				ep.speed = 0
+			}
+		}
+
+		ep.lastSpeedTime = now
+		ep.lastSpeedBytes = downloadedBytes
+	}
+}
+
+// HLSProgress reports the per-track breakdown (video + audio tracks) so the
+// live display can render a nested set of bars under the episode line.
+func (r *LiveReporter) HLSProgress(key domain.EpisodeKey, tracks []domain.TrackProgressInfo) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	ep, ok := r.currentEpisodes[key]
+	if !ok {
+		return
+	}
+	ep.hlsTracks = tracks
 }
 
 // EpisodeCompleted signals that an episode download finished successfully.
@@ -352,11 +424,26 @@ func (r *LiveReporter) renderFrame() {
 				speedStr = r.colorize(termx.Cyan, fmt.Sprintf(" %s/s", formatBytesShort(ep.speed)))
 			}
 
+			// Segment count (HLS): show "123/572 seg".
+			segStr := ""
+			if ep.totalSegments > 0 {
+				segStr = r.colorize(termx.Gray, fmt.Sprintf(" %d/%d seg", ep.doneSegments, ep.totalSegments))
+			}
+
 			sizeStr := ""
 			if ep.totalBytes > 0 {
-				sizeStr = r.colorize(termx.Gray, fmt.Sprintf(" %s/%s",
+				// Prefix an "~" when the total is an estimate (HLS).
+				prefix := ""
+				if ep.sizeIsApprox {
+					prefix = "~"
+				}
+				sizeStr = r.colorize(termx.Gray, fmt.Sprintf(" %s/%s%s",
 					formatBytesShort(float64(ep.downloadedBytes)),
+					prefix,
 					formatBytesShort(float64(ep.totalBytes))))
+			} else if ep.downloadedBytes > 0 {
+				// No total estimate yet — at least show what we've downloaded.
+				sizeStr = r.colorize(termx.Gray, fmt.Sprintf(" %s", formatBytesShort(float64(ep.downloadedBytes))))
 			}
 
 			// ETA estimation: use speed if available (more accurate for chunked),
@@ -379,13 +466,41 @@ func (r *LiveReporter) renderFrame() {
 				}
 			}
 
-			epLine := fmt.Sprintf("    %s %s%s%s%s",
+			epLine := fmt.Sprintf("    %s %s%s%s%s%s",
 				r.colorize(termx.Bold, fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
 				bar,
+				segStr,
 				speedStr,
 				sizeStr,
 				etaStr)
 			lines = append(lines, epLine)
+
+			// Nested per-track breakdown (video + each audio track).
+			for _, ti := range ep.hlsTracks {
+				tPct := 0
+				if ti.TotalSegments > 0 {
+					tPct = computePercent(ti.DoneSegments, ti.TotalSegments)
+				}
+				tBar := r.progressBar(tPct, 15, termx.Magenta)
+
+				tSeg := r.colorize(termx.Gray, fmt.Sprintf(" %d/%d seg", ti.DoneSegments, ti.TotalSegments))
+
+				tSize := ""
+				if ti.ApproxTotalBytes > 0 {
+					tSize = r.colorize(termx.Gray, fmt.Sprintf(" %s/~%s",
+						formatBytesShort(float64(ti.DownloadedBytes)),
+						formatBytesShort(float64(ti.ApproxTotalBytes))))
+				} else if ti.DownloadedBytes > 0 {
+					tSize = r.colorize(termx.Gray, fmt.Sprintf(" %s", formatBytesShort(float64(ti.DownloadedBytes))))
+				}
+
+				trackLine := fmt.Sprintf("      %s %s%s%s",
+					r.colorize(termx.Gray, fmt.Sprintf("%-14s", ti.Label)),
+					tBar,
+					tSeg,
+					tSize)
+				lines = append(lines, trackLine)
+			}
 		}
 	}
 
@@ -561,6 +676,12 @@ var _ domain.ProgressReporter = (*LiveReporter)(nil)
 
 // Verify that *LiveReporter satisfies domain.ByteProgressSink at compile time.
 var _ domain.ByteProgressSink = (*LiveReporter)(nil)
+
+// Verify that *LiveReporter satisfies domain.SegmentProgressSink at compile time.
+var _ domain.SegmentProgressSink = (*LiveReporter)(nil)
+
+// Verify that *LiveReporter satisfies domain.HLSProgressSink at compile time.
+var _ domain.HLSProgressSink = (*LiveReporter)(nil)
 
 // formatBytesShort formats a byte count as a compact human-readable string.
 func formatBytesShort(b float64) string {
