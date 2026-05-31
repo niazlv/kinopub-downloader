@@ -2,10 +2,53 @@ package downloader
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"kinopub_downloader/internal/domain"
 )
+
+// buildInputAuthOpts returns ffmpeg input options that inject authentication
+// into HTTP(S) requests: -user_agent for the User-Agent and -headers for the
+// Cookie header plus any extra headers. The returned options must be placed
+// immediately before an -i so they apply to that input.
+//
+// ffmpeg's -headers option takes a single string of CRLF-separated header
+// lines. Headers are emitted in a deterministic order so the command is stable.
+func buildInputAuthOpts(auth domain.RequestAuth) []string {
+	if auth.IsZero() {
+		return nil
+	}
+
+	var opts []string
+
+	if auth.UserAgent != "" {
+		opts = append(opts, "-user_agent", auth.UserAgent)
+	}
+
+	// Collect header lines (Cookie + extra headers), sorted for determinism.
+	var lines []string
+	if auth.Cookie != "" {
+		lines = append(lines, "Cookie: "+auth.Cookie)
+	}
+	if len(auth.Headers) > 0 {
+		keys := make([]string, 0, len(auth.Headers))
+		for k := range auth.Headers {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			lines = append(lines, k+": "+auth.Headers[k])
+		}
+	}
+
+	if len(lines) > 0 {
+		// ffmpeg expects header lines separated (and terminated) by CRLF.
+		opts = append(opts, "-headers", strings.Join(lines, "\r\n")+"\r\n")
+	}
+
+	return opts
+}
 
 // iso639Map maps common 2-letter language codes to their ISO 639-2 (3-letter)
 // equivalents. If a code is already 3 letters or is unknown, it passes through.
@@ -133,16 +176,30 @@ func makeUnique(labels []string) []string {
 // track with a separate URI gets its own -i.
 // For progressive sources: a single -i contains all streams.
 //
+// The auth argument, when non-empty, injects a Cookie header, User-Agent, and
+// any extra headers via ffmpeg's -headers / -user_agent input options so that
+// ffmpeg's requests pass Cloudflare and kino.pub authentication. These options
+// are applied before each -i so they affect every input.
+//
 // The function produces:
-//   - Per-input -i flags
+//   - Per-input -i flags (each preceded by auth options when provided)
 //   - -map flags for video, audio, and subtitle tracks
 //   - -c copy (stream copy, no re-encode)
 //   - -metadata:s:a:N and -metadata:s:s:N for labels and languages
 //   - -progress pipe:1 for progress reporting
 //   - The temp output path as the final argument
-func BuildFFmpegArgs(job domain.Job, proxyEnv []string, tempPath string) []string {
+func BuildFFmpegArgs(job domain.Job, proxyEnv []string, auth domain.RequestAuth, tempPath string) []string {
 	media := job.Media
 	isHLS := media.Source.Kind == domain.MediaHLS
+
+	// inputOpts are options that must precede every -i (auth headers, UA).
+	inputOpts := buildInputAuthOpts(auth)
+
+	addInput := func(args []string, url string) []string {
+		args = append(args, inputOpts...)
+		args = append(args, "-i", url)
+		return args
+	}
 
 	var args []string
 
@@ -161,32 +218,22 @@ func BuildFFmpegArgs(job domain.Job, proxyEnv []string, tempPath string) []strin
 	}
 
 	// Build input list and track the input index for mapping.
-	// inputIdx tracks which -i index each track maps to.
 	if isHLS {
 		// HLS: video URL is first input.
-		args = append(args, "-i", media.Source.URL)
-		inputIdx := 1 // next input index
+		args = addInput(args, media.Source.URL)
 
 		// Each audio track with a URI gets its own input.
 		for range media.Audio {
-			// For HLS, audio tracks have their own playlist URIs derived from
-			// the master playlist. We use the source URL as the base — in practice
-			// the media resolver would have resolved individual URIs. For the
-			// command builder, we use the source URL for all inputs since the
-			// actual URI resolution happens upstream.
-			args = append(args, "-i", media.Source.URL)
-			inputIdx++
+			args = addInput(args, media.Source.URL)
 		}
 
 		// Each subtitle track gets its own input.
 		for range media.Subtitles {
-			args = append(args, "-i", media.Source.URL)
-			inputIdx++
+			args = addInput(args, media.Source.URL)
 		}
-		_ = inputIdx
 	} else {
 		// Progressive: single input contains all streams.
-		args = append(args, "-i", media.Source.URL)
+		args = addInput(args, media.Source.URL)
 	}
 
 	// Map video track: always from input 0, video stream.

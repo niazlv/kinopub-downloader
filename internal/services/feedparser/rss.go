@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -41,7 +43,14 @@ func New(client *http.Client, log domain.Logger) *Parser {
 // Entries whose season/episode cannot be determined are excluded with a warn
 // log (Req 2.8). Returns ErrEmptyFeed when zero episodes parse (Req 2.6),
 // and descriptive errors for retrieval/parse failures (Req 2.5, 2.7).
+//
+// When src.LocalPath is set, the feed is read from that file instead of being
+// fetched over the network — useful when the feed URL returns 403.
 func (p *Parser) Parse(ctx context.Context, src domain.FeedSource) (domain.Series, error) {
+	if src.LocalPath != "" {
+		return p.parseLocalFile(src)
+	}
+
 	url := feedURL(src)
 	p.log.Info("retrieving feed", domain.F("url", url))
 
@@ -67,6 +76,26 @@ func (p *Parser) Parse(ctx context.Context, src domain.FeedSource) (domain.Serie
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return domain.Series{}, fmt.Errorf("%w: reading body: %v", domain.ErrFeedRetrieval, err)
+	}
+
+	return p.parseRSS(body, src)
+}
+
+// parseLocalFile reads and parses an RSS feed from a local file path.
+func (p *Parser) parseLocalFile(src domain.FeedSource) (domain.Series, error) {
+	p.log.Info("reading feed from local file", domain.F("path", src.LocalPath))
+
+	body, err := os.ReadFile(src.LocalPath)
+	if err != nil {
+		return domain.Series{}, fmt.Errorf("%w: reading feed file: %v", domain.ErrFeedRetrieval, err)
+	}
+
+	// When no explicit ID was provided (no URL), derive one from the filename
+	// so the state store has a stable key.
+	if src.ID == "" {
+		base := filepath.Base(src.LocalPath)
+		ext := filepath.Ext(base)
+		src.ID = strings.TrimSuffix(base, ext)
 	}
 
 	return p.parseRSS(body, src)

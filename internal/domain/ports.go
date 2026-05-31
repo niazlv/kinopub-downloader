@@ -56,6 +56,10 @@ type Runner interface {
 type FeedSource struct {
 	ID    string // numeric podcast id from the URL
 	Token string // feed authentication token
+
+	// LocalPath, when non-empty, points to a locally saved RSS feed file that
+	// should be read instead of fetching the feed over the network.
+	LocalPath string
 }
 
 // QualityPref is an alias for Quality used in media resolution preference.

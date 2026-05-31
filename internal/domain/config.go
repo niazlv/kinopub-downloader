@@ -50,6 +50,34 @@ type RunConfig struct {
 	EpisodeSel      Selection     // (Req 15.5)
 	DryRun          bool          // (Req 15.6)
 	GracePeriod     time.Duration // default 30s (Req 4.7)
+
+	// Authentication / request shaping. kino.pub sits behind Cloudflare and may
+	// return HTTP 403 for unauthenticated requests. These fields let the user
+	// supply credentials captured from a logged-in browser session so the tool
+	// and ffmpeg can issue requests that pass Cloudflare and kino.pub auth.
+	Cookie         string            // raw Cookie header value applied to all requests
+	UserAgent      string            // User-Agent applied to all requests (must match the cf_clearance UA)
+	Headers        map[string]string // extra HTTP headers applied to all requests
+	BrowserCookies string            // browser name to auto-load kino.pub cookies from ("", "safari", "chrome", "firefox", "auto")
+
+	// FeedFile, when set, is a path to a locally saved RSS feed file. It is used
+	// instead of fetching the feed over the network — useful when the feed URL
+	// returns 403. The InputURL is still used to derive the SeriesID when present.
+	FeedFile string
+}
+
+// RequestAuth carries credentials and request-shaping headers applied to every
+// outbound HTTP request (and propagated to ffmpeg). It exists so the tool can
+// reuse a logged-in browser session to pass Cloudflare and kino.pub auth.
+type RequestAuth struct {
+	Cookie    string            // raw Cookie header value
+	UserAgent string            // User-Agent (must match the cf_clearance UA)
+	Headers   map[string]string // extra headers
+}
+
+// IsZero reports whether the auth carries no information.
+func (a RequestAuth) IsZero() bool {
+	return a.Cookie == "" && a.UserAgent == "" && len(a.Headers) == 0
 }
 
 // Selection is a parsed set/range expression over season or episode numbers.

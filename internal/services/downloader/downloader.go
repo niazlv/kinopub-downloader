@@ -29,6 +29,7 @@ type Downloader struct {
 	proxy      domain.ProxyProvider
 	logger     domain.Logger
 	ffmpegPath string
+	auth       domain.RequestAuth
 }
 
 // Option configures the Downloader.
@@ -38,6 +39,14 @@ type Option func(*Downloader)
 func WithFFmpegPath(path string) Option {
 	return func(d *Downloader) {
 		d.ffmpegPath = path
+	}
+}
+
+// WithAuth sets the request authentication (Cookie, User-Agent, extra headers)
+// propagated to ffmpeg so its requests pass Cloudflare and kino.pub auth.
+func WithAuth(auth domain.RequestAuth) Option {
+	return func(d *Downloader) {
+		d.auth = auth
 	}
 }
 
@@ -77,7 +86,7 @@ func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.P
 	tempPath := job.OutPath + ".tmp"
 
 	// 3. Build ffmpeg args.
-	args := BuildFFmpegArgs(job, proxyEnv, tempPath)
+	args := BuildFFmpegArgs(job, proxyEnv, d.auth, tempPath)
 
 	// 4. Set up progress parsing.
 	// Compute total duration for percentage. We use the video track's duration

@@ -16,11 +16,27 @@ type engine struct {
 func (e *engine) run(ctx context.Context, cfg domain.RunConfig) (domain.RunResult, error) {
 	log := e.deps.Logger.Component("engine")
 
-	// 1. Classify + resolve input URL → FeedSource
-	log.Info("resolving input URL", domain.F("url", cfg.InputURL))
-	feedSrc, err := e.deps.InputResolver.Resolve(ctx, cfg.InputURL)
-	if err != nil {
-		return domain.RunResult{}, err
+	// 1. Resolve input → FeedSource.
+	// When a local feed file is configured, use it directly and only try to
+	// derive the SeriesID from the URL when one is supplied. Otherwise classify
+	// and resolve the URL as usual.
+	var feedSrc domain.FeedSource
+	if cfg.FeedFile != "" {
+		log.Info("using local feed file", domain.F("path", cfg.FeedFile))
+		feedSrc = domain.FeedSource{LocalPath: cfg.FeedFile}
+		if cfg.InputURL != "" {
+			if resolved, rerr := e.deps.InputResolver.Resolve(ctx, cfg.InputURL); rerr == nil {
+				feedSrc.ID = resolved.ID
+				feedSrc.Token = resolved.Token
+			}
+		}
+	} else {
+		log.Info("resolving input URL", domain.F("url", cfg.InputURL))
+		resolved, err := e.deps.InputResolver.Resolve(ctx, cfg.InputURL)
+		if err != nil {
+			return domain.RunResult{}, err
+		}
+		feedSrc = resolved
 	}
 
 	// 2. Parse feed → Series

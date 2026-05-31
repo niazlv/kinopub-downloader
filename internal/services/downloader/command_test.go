@@ -192,7 +192,7 @@ func TestBuildFFmpegArgs_HLS(t *testing.T) {
 		OutPath: "/output/S01E01.mkv",
 	}
 
-	args := BuildFFmpegArgs(job, nil, "/tmp/S01E01.mkv.tmp")
+	args := BuildFFmpegArgs(job, nil, domain.RequestAuth{}, "/tmp/S01E01.mkv.tmp")
 
 	// Verify key elements are present.
 	argsStr := strings.Join(args, " ")
@@ -283,7 +283,7 @@ func TestBuildFFmpegArgs_Progressive(t *testing.T) {
 		OutPath: "/output/S02E05.mkv",
 	}
 
-	args := BuildFFmpegArgs(job, nil, "/tmp/S02E05.mkv.tmp")
+	args := BuildFFmpegArgs(job, nil, domain.RequestAuth{}, "/tmp/S02E05.mkv.tmp")
 
 	// Progressive: single -i.
 	inputCount := 0
@@ -328,7 +328,7 @@ func TestBuildFFmpegArgs_NoAudioNoSubtitles(t *testing.T) {
 		},
 	}
 
-	args := BuildFFmpegArgs(job, nil, "/tmp/out.mkv.tmp")
+	args := BuildFFmpegArgs(job, nil, domain.RequestAuth{}, "/tmp/out.mkv.tmp")
 
 	// Should still have -map 0:v.
 	if !containsPair(args, "-map", "0:v") {
@@ -357,7 +357,7 @@ func TestBuildFFmpegArgs_WithProxyEnv(t *testing.T) {
 	}
 
 	proxyEnv := []string{"-http_proxy http://proxy.example.com:8080"}
-	args := BuildFFmpegArgs(job, proxyEnv, "/tmp/out.mkv.tmp")
+	args := BuildFFmpegArgs(job, proxyEnv, domain.RequestAuth{}, "/tmp/out.mkv.tmp")
 
 	argsStr := strings.Join(args, " ")
 	if !strings.Contains(argsStr, "-http_proxy") {

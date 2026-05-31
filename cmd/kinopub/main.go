@@ -12,11 +12,14 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"kinopub_downloader/internal/app/kinopub"
 	"kinopub_downloader/internal/domain"
+	"kinopub_downloader/internal/lib/browsercookies"
+	"kinopub_downloader/internal/lib/httpx"
 	"kinopub_downloader/internal/lib/logx"
 	"kinopub_downloader/internal/lib/termx"
 	"kinopub_downloader/internal/services/downloader"
@@ -54,6 +57,11 @@ func run() int {
 		dryRun      bool
 		minInterval int
 		showVersion bool
+		cookie      string
+		userAgent   string
+		headerVals  headerList
+		browserCk   browserCookiesFlag
+		feedFile    string
 	)
 
 	fs := flag.NewFlagSet("kinopub", flag.ContinueOnError)
@@ -77,6 +85,11 @@ func run() int {
 	fs.StringVar(&episodes, "episodes", "", "episode selection (e.g. 1,3-5)")
 	fs.BoolVar(&dryRun, "dry-run", false, "list episodes without downloading")
 	fs.IntVar(&minInterval, "min-interval", 0, "minimum interval between requests in ms")
+	fs.StringVar(&cookie, "cookie", "", "raw Cookie header value sent with every request (and to ffmpeg)")
+	fs.StringVar(&userAgent, "user-agent", "", "User-Agent sent with every request (must match the browser that issued the cookies)")
+	fs.Var(&headerVals, "header", "extra HTTP header 'Name: Value' (repeatable)")
+	fs.Var(&browserCk, "browser-cookies", "auto-load kino.pub cookies from a browser: safari, chrome, firefox, or auto (default auto when given without a value)")
+	fs.StringVar(&feedFile, "feed-file", "", "read the RSS feed from a local file instead of fetching it over the network")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 
 	fs.Usage = func() {
@@ -94,7 +107,14 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "  # List what would be downloaded without writing files\n")
 		fmt.Fprintf(os.Stderr, "  kinopub --dry-run https://kino.pub/podcast/get/12345/token\n\n")
 		fmt.Fprintf(os.Stderr, "  # Only seasons 1 and 3-5, 1080p, through a proxy\n")
-		fmt.Fprintf(os.Stderr, "  kinopub --seasons 1,3-5 -q 1080p --proxy socks5://127.0.0.1:1080 <url>\n")
+		fmt.Fprintf(os.Stderr, "  kinopub --seasons 1,3-5 -q 1080p --proxy socks5://127.0.0.1:1080 <url>\n\n")
+		fmt.Fprintf(os.Stderr, "  # Pass cookies and User-Agent from a logged-in browser (fixes HTTP 403)\n")
+		fmt.Fprintf(os.Stderr, "  kinopub --cookie \"cf_clearance=...; PHPSESSID=...\" \\\n")
+		fmt.Fprintf(os.Stderr, "          --user-agent \"Mozilla/5.0 ...\" <url>\n\n")
+		fmt.Fprintf(os.Stderr, "  # Auto-load kino.pub cookies from Safari\n")
+		fmt.Fprintf(os.Stderr, "  kinopub --browser-cookies safari --user-agent \"Mozilla/5.0 ...\" <url>\n\n")
+		fmt.Fprintf(os.Stderr, "  # Use a feed saved from the browser instead of fetching it\n")
+		fmt.Fprintf(os.Stderr, "  kinopub --feed-file ./feed.xml -o ./downloads\n")
 	}
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -104,20 +124,53 @@ func run() int {
 		return 1
 	}
 
+	// Support the space-separated form "--browser-cookies safari": because the
+	// flag has an optional value, the browser name lands in the positional args.
+	// If the flag was given bare and the first positional is a known browser
+	// name, consume it as the flag's value.
+	posArgs := fs.Args()
+	if browserCk.set && browserCk.value == browsercookies.BrowserAuto && len(posArgs) > 0 {
+		if isKnownBrowser(posArgs[0]) {
+			browserCk.value = strings.ToLower(posArgs[0])
+			posArgs = posArgs[1:]
+		}
+	}
+
 	// --version
 	if showVersion {
 		fmt.Printf("kinopub %s\n", version)
 		return 0
 	}
 
-	// Validate exactly one positional URL argument (Req 1.4).
-	args := fs.Args()
-	if len(args) != 1 {
-		fmt.Fprintf(os.Stderr, "Error: %s\n\n", domain.ErrExactlyOneURL.Error())
+	// Validate the positional URL argument (Req 1.4).
+	// Exactly one URL is required, unless a local --feed-file is supplied, in
+	// which case the URL is optional (used only to derive the series id).
+	args := posArgs
+	if feedFile == "" {
+		if len(args) != 1 {
+			fmt.Fprintf(os.Stderr, "Error: %s\n\n", domain.ErrExactlyOneURL.Error())
+			fs.Usage()
+			return 1
+		}
+	} else if len(args) > 1 {
+		fmt.Fprintf(os.Stderr, "Error: at most one URL argument is allowed with --feed-file\n\n")
 		fs.Usage()
 		return 1
 	}
-	inputURL := args[0]
+	var inputURL string
+	if len(args) == 1 {
+		inputURL = args[0]
+	}
+
+	// Auto-detect: if the positional argument is a path to an existing file
+	// (not a URL), treat it as a local feed file. This lets the user simply
+	// pass a downloaded .xml file without needing --feed-file explicitly.
+	if inputURL != "" && feedFile == "" && !strings.Contains(inputURL, "://") {
+		if info, err := os.Stat(inputURL); err == nil && !info.IsDir() {
+			feedFile = inputURL
+			inputURL = "" // no URL to resolve
+		}
+	}
 
 	// Parse verbosity.
 	verb, err := parseVerbosity(verbosity)
@@ -145,6 +198,18 @@ func run() int {
 		return 1
 	}
 
+	// Resolve the Cookie header: an explicit --cookie wins; otherwise try to
+	// auto-load cookies from the named browser.
+	resolvedCookie := cookie
+	if resolvedCookie == "" && browserCk.set {
+		ck, cerr := browsercookies.Load(browserCk.value, "kino.pub")
+		if cerr != nil {
+			fmt.Fprintf(os.Stderr, "Error: could not load cookies from browser %q: %v\n", browserCk.value, cerr)
+			return 1
+		}
+		resolvedCookie = ck
+	}
+
 	// Build RunConfig.
 	cfg := domain.RunConfig{
 		InputURL:        inputURL,
@@ -162,6 +227,11 @@ func run() int {
 		SeasonSel:       seasonSel,
 		EpisodeSel:      episodeSel,
 		DryRun:          dryRun,
+		Cookie:          resolvedCookie,
+		UserAgent:       userAgent,
+		Headers:         headerVals.toMap(),
+		BrowserCookies:  browserCk.value,
+		FeedFile:        feedFile,
 	}
 
 	// Apply defaults and validate.
@@ -171,10 +241,13 @@ func run() int {
 		return 1
 	}
 
-	// Check ffmpeg availability (Req 7.3).
-	if _, err := exec.LookPath(cfg.FFmpegPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", domain.ErrFFmpegNotFound.Error())
-		return 1
+	// Check ffmpeg availability (Req 7.3). Skipped in dry-run mode since no
+	// downloads are performed.
+	if !cfg.DryRun {
+		if _, err := exec.LookPath(cfg.FFmpegPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", domain.ErrFFmpegNotFound.Error())
+			return 1
+		}
 	}
 
 	// Set up signal-driven context for graceful shutdown.
@@ -246,15 +319,24 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 		return kinopub.Dependencies{}, cleanup, err
 	}
 
+	// Build the auth-aware HTTP client: wrap the proxy client so every request
+	// carries the configured Cookie / User-Agent / extra headers.
+	auth := domain.RequestAuth{
+		Cookie:    cfg.Cookie,
+		UserAgent: cfg.UserAgent,
+		Headers:   cfg.Headers,
+	}
+	httpClient := httpx.WithAuth(proxyProv.HTTPClient(), auth)
+
 	// Input resolver.
 	inputRes := inputresolver.New(logger)
 
 	// Feed parser.
-	feedPars := feedparser.New(proxyProv.HTTPClient(), logger)
+	feedPars := feedparser.New(httpClient, logger)
 
 	// Media resolver — needs a RunOutput function for ffprobe.
 	mediaRes := mediaresolver.New(
-		proxyProv.HTTPClient(),
+		httpClient,
 		makeRunOutput(),
 		logger,
 	)
@@ -275,6 +357,7 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 		proxyProv,
 		logger,
 		downloader.WithFFmpegPath(cfg.FFmpegPath),
+		downloader.WithAuth(auth),
 	)
 
 	// Scheduler.
@@ -346,6 +429,81 @@ func parseContainer(s string) (domain.Container, error) {
 		return domain.ContainerMP4, nil
 	default:
 		return 0, fmt.Errorf("%w: container must be mkv or mp4, got %q", domain.ErrInvalidFlag, s)
+	}
+}
+
+// headerList is a repeatable string flag that collects "Name: Value" header
+// entries supplied via --header.
+type headerList []string
+
+// String implements flag.Value.
+func (h *headerList) String() string {
+	return strings.Join(*h, ", ")
+}
+
+// Set implements flag.Value, appending each --header occurrence.
+func (h *headerList) Set(v string) error {
+	if !strings.Contains(v, ":") {
+		return fmt.Errorf("%w: header must be in 'Name: Value' form, got %q", domain.ErrInvalidFlag, v)
+	}
+	*h = append(*h, v)
+	return nil
+}
+
+// toMap parses the collected header entries into a map of header name to value.
+func (h headerList) toMap() map[string]string {
+	if len(h) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(h))
+	for _, entry := range h {
+		name, value, _ := strings.Cut(entry, ":")
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if name != "" {
+			m[name] = value
+		}
+	}
+	return m
+}
+
+// browserCookiesFlag is a flag with an optional value. Used bare
+// (--browser-cookies) it defaults to "auto"; with a value
+// (--browser-cookies=safari) it selects a specific browser. Implementing
+// IsBoolFlag lets the standard flag package accept it without a following
+// argument, so a positional URL after it is not mistaken for its value.
+type browserCookiesFlag struct {
+	set   bool
+	value string
+}
+
+// String implements flag.Value.
+func (b *browserCookiesFlag) String() string { return b.value }
+
+// Set implements flag.Value. An empty value (bare flag) means "auto".
+func (b *browserCookiesFlag) Set(v string) error {
+	b.set = true
+	if v == "" || v == "true" {
+		b.value = browsercookies.BrowserAuto
+	} else {
+		b.value = strings.ToLower(strings.TrimSpace(v))
+	}
+	return nil
+}
+
+// IsBoolFlag tells the flag package the value is optional.
+func (b *browserCookiesFlag) IsBoolFlag() bool { return true }
+
+// isKnownBrowser reports whether s names a browser supported for cookie loading.
+func isKnownBrowser(s string) bool {
+	switch strings.ToLower(s) {
+	case browsercookies.BrowserAuto,
+		browsercookies.BrowserSafari,
+		browsercookies.BrowserChrome,
+		browsercookies.BrowserFirefox:
+		return true
+	default:
+		return false
 	}
 }
 
