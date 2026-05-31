@@ -16,6 +16,7 @@ import (
 	"golang.org/x/net/proxy"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/lib/httpx"
 )
 
 // EnvLookupFunc abstracts os.Getenv for testability.
@@ -113,6 +114,11 @@ func (p *Provider) Mode() domain.ProxyMode {
 	return p.mode
 }
 
+// ProxyURL returns the configured proxy URL, or nil for direct connections.
+func (p *Provider) ProxyURL() *url.URL {
+	return p.proxyURL
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -168,8 +174,11 @@ func (p *Provider) systemProxyURL() *url.URL {
 func (p *Provider) buildHTTPClient() *http.Client {
 	switch {
 	case p.proxyURL == nil:
-		// Direct connection.
+		// Direct connection — use platform-aware dialer (fixes DNS on Android/Termux).
 		return &http.Client{
+			Transport: &http.Transport{
+				DialContext: httpx.NewDialer().DialContext,
+			},
 			Timeout: 30 * time.Second,
 		}
 

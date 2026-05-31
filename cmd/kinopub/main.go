@@ -514,7 +514,8 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	if !auth.IsZero() {
 		scraper := pagescraper.New(httpClient, logger)
 		hlsDl := hlsdownloader.New(httpClient, auth, logger,
-			hlsdownloader.WithConcurrency(cfg.MaxConcurrency))
+			hlsdownloader.WithConcurrency(cfg.MaxConcurrency),
+			hlsdownloader.WithProxy(proxyProv.ProxyURL()))
 		deps.PageScraper = scraper
 		deps.HLSDownloader = hlsDl
 	}

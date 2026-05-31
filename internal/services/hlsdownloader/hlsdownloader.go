@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,7 @@ type Downloader struct {
 	auth        domain.RequestAuth
 	logger      domain.Logger
 	concurrency int
+	proxyURL    *url.URL
 
 	mu        sync.RWMutex
 	audioPref domain.AudioPreference
@@ -53,16 +55,17 @@ func WithConcurrency(n int) Option {
 	}
 }
 
+// WithProxy sets the proxy URL for CDN segment requests.
+func WithProxy(proxyURL *url.URL) Option {
+	return func(d *Downloader) {
+		d.proxyURL = proxyURL
+	}
+}
+
 // New creates a new HLS Downloader.
 // It uses a browser-fingerprint HTTP client (uTLS) to bypass CDN throttling.
 func New(client *http.Client, auth domain.RequestAuth, logger domain.Logger, opts ...Option) *Downloader {
-	// Use browser-fingerprint client for CDN requests.
-	// The regular Go HTTP client gets throttled by Cloudflare/CDN due to
-	// its distinctive TLS fingerprint.
-	browserClient := httpx.NewBrowserClient()
-
 	d := &Downloader{
-		client:      browserClient,
 		auth:        auth,
 		logger:      logger.Component("hls"),
 		concurrency: defaultConcurrency,
@@ -70,6 +73,10 @@ func New(client *http.Client, auth domain.RequestAuth, logger domain.Logger, opt
 	for _, o := range opts {
 		o(d)
 	}
+	// Use browser-fingerprint client for CDN requests, routing through proxy if set.
+	// The regular Go HTTP client gets throttled by Cloudflare/CDN due to
+	// its distinctive TLS fingerprint.
+	d.client = httpx.NewBrowserClient(d.proxyURL)
 	return d
 }
 

@@ -29,7 +29,8 @@ CLI-утилита для скачивания видео с [kino.pub](https://
 | macOS | Apple Silicon (M1/M2/M3) | `kinopub-darwin-arm64` |
 | macOS | Intel | `kinopub-darwin-amd64` |
 | Linux | x86_64 | `kinopub-linux-amd64` |
-| Linux | ARM64 (Termux, Raspberry Pi) | `kinopub-linux-arm64` |
+| Linux | ARM64 (Raspberry Pi и др.) | `kinopub-linux-arm64` |
+| Android / Termux | ARM64 | `kinopub-android-arm64` |
 
 ```bash
 # Пример для macOS Apple Silicon:
@@ -221,7 +222,7 @@ Doctor проверяет:
 - **macOS Safari**: Требует Full Disk Access для терминала
 - **macOS Chrome**: Куки зашифрованы через Keychain, может потребоваться разрешение
 - **Linux Chrome/Firefox**: Работает если профиль не зашифрован
-- **Termux**: Автозагрузка из браузера недоступна, используйте ручное копирование куки
+- **Termux**: Используй бинарник `kinopub-android-arm64` — он собран специально для Android и не падает с `SIGSYS`. Автозагрузка из браузера недоступна, используйте ручное копирование куки.
 
 ## Все флаги
 
@@ -350,8 +351,11 @@ GOOS=darwin GOARCH=amd64 go build -o kinopub-darwin-amd64 ./cmd/kinopub
 # Linux x86_64
 GOOS=linux GOARCH=amd64 go build -o kinopub-linux-amd64 ./cmd/kinopub
 
-# Linux ARM64 (Termux, Raspberry Pi)
+# Linux ARM64 (Raspberry Pi и др.)
 GOOS=linux GOARCH=arm64 go build -o kinopub-linux-arm64 ./cmd/kinopub
+
+# Android / Termux
+CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -o kinopub-android-arm64 ./cmd/kinopub
 ```
 
 ## Лицензия

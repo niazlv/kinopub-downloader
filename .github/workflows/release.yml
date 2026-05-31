@@ -30,6 +30,9 @@ jobs:
           GOOS=linux   GOARCH=amd64 go build -ldflags="$LDFLAGS" -o kinopub-linux-amd64   ./cmd/kinopub
           GOOS=linux   GOARCH=arm64 go build -ldflags="$LDFLAGS" -o kinopub-linux-arm64   ./cmd/kinopub
           GOOS=windows GOARCH=amd64 go build -ldflags="$LDFLAGS" -o kinopub-windows-amd64.exe ./cmd/kinopub
+          # Termux (Android): GOOS=android избегает faccessat2 syscall,
+          # который Android блокирует через seccomp (SIGSYS вместо ENOSYS).
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="$LDFLAGS" -o kinopub-android-arm64 ./cmd/kinopub
 
           # Архивы для Homebrew (требует .tar.gz)
           for bin in kinopub-darwin-arm64 kinopub-darwin-amd64 kinopub-linux-amd64 kinopub-linux-arm64; do
@@ -52,3 +55,4 @@ jobs:
             kinopub-linux-arm64.tar.gz
             kinopub-windows-amd64.exe
             kinopub-windows-amd64.zip
+            kinopub-android-arm64
