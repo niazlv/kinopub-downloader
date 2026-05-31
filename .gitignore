@@ -1,5 +1,13 @@
 .kiro
 
+# Built binaries
+/kinopub
+/kinopub-darwin-arm64
+/kinopub-darwin-amd64
+/kinopub-linux-amd64
+/kinopub-linux-arm64
+/kinopub-windows-amd64.exe
+
 # Test artifacts
 *.test
 *.out
