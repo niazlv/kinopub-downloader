@@ -35,6 +35,9 @@ type Downloader struct {
 	auth        domain.RequestAuth
 	logger      domain.Logger
 	concurrency int
+
+	mu        sync.RWMutex
+	audioPref domain.AudioPreference
 }
 
 // Option configures the Downloader.
@@ -93,6 +96,60 @@ func (d *Downloader) DownloadEpisode(
 	return d.downloadEpisodeInternal(ctx, manifestURL, quality, outPath, key, sink)
 }
 
+// SetAudioPreference sets the audio-track filter applied to subsequent
+// DownloadEpisode calls. Safe for concurrent use.
+func (d *Downloader) SetAudioPreference(pref domain.AudioPreference) {
+	d.mu.Lock()
+	d.audioPref = pref
+	d.mu.Unlock()
+}
+
+// audioPreference returns the current audio preference under a read lock.
+func (d *Downloader) audioPreference() domain.AudioPreference {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.audioPref
+}
+
+// ListAudioTracks fetches the master playlist and reports the audio renditions
+// available for the selected quality variant, without downloading segments.
+func (d *Downloader) ListAudioTracks(ctx context.Context, manifestURL string, quality domain.Quality) ([]domain.AudioTrackInfo, error) {
+	master, err := FetchMasterPlaylist(ctx, d.client, manifestURL, d.auth, d.logger)
+	if err != nil {
+		return nil, fmt.Errorf("master playlist: %w", err)
+	}
+	if len(master.Variants) == 0 {
+		return nil, fmt.Errorf("no variants found in master playlist")
+	}
+	selected, err := SelectVariant(master.Variants, quality)
+	if err != nil {
+		return nil, fmt.Errorf("quality selection: %w", err)
+	}
+	renditions := audioRenditionsFor(master, selected)
+	infos := make([]domain.AudioTrackInfo, len(renditions))
+	for i, a := range renditions {
+		infos[i] = domain.AudioTrackInfo{Index: i, Name: a.Name, Language: a.Language}
+	}
+	return infos, nil
+}
+
+// audioRenditionsFor returns the audio renditions belonging to the selected
+// variant's audio group (in master-playlist order), excluding entries with no
+// media URI. When the variant has no audio group, the result is empty (audio is
+// muxed into the video stream).
+func audioRenditionsFor(master *MasterPlaylist, selected Variant) []AudioRendition {
+	var out []AudioRendition
+	if selected.AudioGroup == "" {
+		return out
+	}
+	for _, a := range master.Audio {
+		if a.GroupID == selected.AudioGroup && a.URI != "" {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // downloadEpisodeInternal downloads video segments and (for demuxed HLS) audio
 // segments separately. It returns the local paths so the caller can mux them
 // together with ffmpeg. The caller is responsible for removing result.TempDir.
@@ -134,13 +191,32 @@ func (d *Downloader) downloadEpisodeInternal(
 	}
 
 	// Determine which audio renditions belong to the selected variant.
-	var audioRenditions []AudioRendition
-	if selected.AudioGroup != "" {
-		for _, a := range master.Audio {
-			if a.GroupID == selected.AudioGroup && a.URI != "" {
-				audioRenditions = append(audioRenditions, a)
-			}
+	allRenditions := audioRenditionsFor(master, selected)
+
+	// Apply the audio-track preference (selection / filtering). The preference
+	// is matched against rendition names and languages; an empty preference
+	// keeps every track.
+	pref := d.audioPreference()
+	audioRenditions := allRenditions
+	if !pref.IsAll() && len(allRenditions) > 0 {
+		infos := make([]domain.AudioTrackInfo, len(allRenditions))
+		for i, a := range allRenditions {
+			infos[i] = domain.AudioTrackInfo{Index: i, Name: a.Name, Language: a.Language}
 		}
+		keep := domain.SelectAudio(infos, pref)
+		filtered := make([]AudioRendition, 0, len(keep))
+		var keptLabels []string
+		for _, idx := range keep {
+			filtered = append(filtered, allRenditions[idx])
+			keptLabels = append(keptLabels, allRenditions[idx].Name)
+		}
+		audioRenditions = filtered
+		d.logger.Info("audio tracks selected",
+			domain.F("episode", epLabel),
+			domain.F("available", len(allRenditions)),
+			domain.F("kept", len(audioRenditions)),
+			domain.F("tracks", strings.Join(keptLabels, " | ")),
+		)
 	}
 
 	d.logger.Info("selected quality",
@@ -485,8 +561,8 @@ func (d *Downloader) downloadSegment(ctx context.Context, seg Segment, outPath s
 
 // fetchSegment downloads a single segment to disk.
 func (d *Downloader) fetchSegment(ctx context.Context, segURL, outPath string) (int64, error) {
-	// Per-segment timeout: 60 seconds for slow CDN connections.
-	segCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	// Per-segment timeout: 120 seconds for slow CDN connections.
+	segCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(segCtx, http.MethodGet, segURL, nil)

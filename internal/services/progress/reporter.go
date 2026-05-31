@@ -16,6 +16,15 @@ import (
 	"kinopub_downloader/internal/lib/termx"
 )
 
+// Indentation (in columns) for each row kind in the live display. Bars are
+// aligned to a shared column regardless of indent so they never jump sideways.
+const (
+	indentSeries  = 2
+	indentSeason  = 4
+	indentEpisode = 4
+	indentTrack   = 6
+)
+
 // LiveReporter renders a multi-line live progress display refreshed at least
 // once per second. It uses ANSI escape codes to update in place and shares
 // the logx.Coordinator mutex so log lines don't corrupt the display.
@@ -33,6 +42,7 @@ type LiveReporter struct {
 	completedSeason map[int]int    // season → completed count
 	currentEpisodes map[domain.EpisodeKey]*episodeState
 	failedEpisodes  map[domain.EpisodeKey]error
+	deferredEpisodes map[domain.EpisodeKey]deferredInfo // parked for later retry
 
 	// Display state
 	lastLines  int       // number of lines rendered in the last frame
@@ -42,6 +52,12 @@ type LiveReporter struct {
 	// Ticker for periodic refresh
 	ticker *time.Ticker
 	done   chan struct{}
+}
+
+// deferredInfo records why an episode is parked for a later retry.
+type deferredInfo struct {
+	err      error
+	attempts int
 }
 
 // episodeState tracks per-episode download progress.
@@ -90,6 +106,7 @@ func (r *LiveReporter) Start(plan domain.SeriesPlan) {
 	}
 	r.currentEpisodes = make(map[domain.EpisodeKey]*episodeState)
 	r.failedEpisodes = make(map[domain.EpisodeKey]error)
+	r.deferredEpisodes = make(map[domain.EpisodeKey]deferredInfo)
 	r.lastLines = 0
 	r.stopped = false
 
@@ -108,10 +125,27 @@ func (r *LiveReporter) EpisodeStarted(key domain.EpisodeKey) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// A (re)attempt clears any prior deferred/failed marker for this episode.
+	delete(r.deferredEpisodes, key)
+	delete(r.failedEpisodes, key)
+
 	r.currentEpisodes[key] = &episodeState{
 		tracks:    make(map[domain.TrackRef]int),
 		startTime: time.Now(),
 	}
+	r.render()
+}
+
+// EpisodeDeferred signals that an episode failed on a transient error and has
+// been parked for a later retry. It is shown in a dedicated section so the user
+// sees the tool will come back to it rather than having abandoned it.
+func (r *LiveReporter) EpisodeDeferred(key domain.EpisodeKey, err error, attempts int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	delete(r.currentEpisodes, key)
+	delete(r.failedEpisodes, key)
+	r.deferredEpisodes[key] = deferredInfo{err: err, attempts: attempts}
 	r.render()
 }
 
@@ -258,6 +292,7 @@ func (r *LiveReporter) EpisodeCompleted(key domain.EpisodeKey) {
 	defer r.mu.Unlock()
 
 	delete(r.currentEpisodes, key)
+	delete(r.deferredEpisodes, key)
 	r.completedTotal++
 	r.completedSeason[key.Season]++
 	r.render()
@@ -354,23 +389,40 @@ func (r *LiveReporter) clearLines() {
 	}
 }
 
+// frameLayout holds the per-frame column geometry. It is computed once from
+// the terminal width so that every bar starts at the same column and has the
+// same width, regardless of how long the row's label is. This is what keeps
+// the bars from jumping sideways between frames.
+type frameLayout struct {
+	width    int // terminal width in columns
+	labelCol int // columns reserved for "<indent><label>" before the bar
+	barWidth int // number of cells inside the bar (excluding brackets)
+}
+
+// computeLayout derives a stable layout from the terminal width. The values
+// are clamped so the display stays readable on both narrow and wide terminals.
+func computeLayout(termWidth int) frameLayout {
+	// Reserve roughly 2/5 of the width for the label column so long audio
+	// track names remain mostly readable, and ~1/5 for the bar itself.
+	labelCol := clampInt(termWidth*2/5, 14, 42)
+	barWidth := clampInt(termWidth/5, 10, 20)
+	return frameLayout{width: termWidth, labelCol: labelCol, barWidth: barWidth}
+}
+
 // renderFrame writes the current progress state. Must be called with r.mu held
 // and within a coordinator-protected section.
 func (r *LiveReporter) renderFrame() {
 	var lines []string
-	termWidth := termx.TerminalWidth()
+	lay := computeLayout(termx.TerminalWidth())
+	sepWidth := min(lay.width, 60)
 
 	// ─── Header separator ───
-	lines = append(lines, r.colorize(termx.Gray, r.repeatChar('─', min(termWidth, 60))))
+	lines = append(lines, r.colorize(termx.Gray, r.repeatChar('─', sepWidth)))
 
 	// Series progress line with colored bar.
 	seriesPct := r.seriesPercent()
-	seriesBar := r.progressBar(seriesPct, 20, termx.Green)
-	seriesLine := fmt.Sprintf("  %s %s %s",
-		r.colorize(termx.Bold, "Series"),
-		seriesBar,
-		r.colorize(termx.Gray, fmt.Sprintf("%d/%d episodes", r.completedTotal, r.plan.Total)))
-	lines = append(lines, seriesLine)
+	lines = append(lines, r.barRow(lay, indentSeries, "Series", termx.Bold, seriesPct, termx.Green,
+		fmt.Sprintf("%d/%d episodes", r.completedTotal, r.plan.Total)))
 
 	// Season progress lines (sorted by season number).
 	seasonNums := make([]int, 0, len(r.plan.Seasons))
@@ -388,11 +440,8 @@ func (r *LiveReporter) renderFrame() {
 		if pct == 100 {
 			barColor = termx.Green
 		}
-		bar := r.progressBar(pct, 15, barColor)
-		seasonLine := fmt.Sprintf("    Season %d %s %s",
-			season, bar,
-			r.colorize(termx.Gray, fmt.Sprintf("%d/%d", completed, total)))
-		lines = append(lines, seasonLine)
+		lines = append(lines, r.barRow(lay, indentSeason, fmt.Sprintf("Season %d", season), "",
+			pct, barColor, fmt.Sprintf("%d/%d", completed, total)))
 	}
 
 	// Current episode downloads (parallel).
@@ -416,64 +465,9 @@ func (r *LiveReporter) renderFrame() {
 			ep := r.currentEpisodes[key]
 			epPct := r.episodePercent(ep)
 
-			bar := r.progressBar(epPct, 25, termx.Yellow)
-
-			// Speed and size info.
-			speedStr := ""
-			if ep.speed > 0 {
-				speedStr = r.colorize(termx.Cyan, fmt.Sprintf(" %s/s", formatBytesShort(ep.speed)))
-			}
-
-			// Segment count (HLS): show "123/572 seg".
-			segStr := ""
-			if ep.totalSegments > 0 {
-				segStr = r.colorize(termx.Gray, fmt.Sprintf(" %d/%d seg", ep.doneSegments, ep.totalSegments))
-			}
-
-			sizeStr := ""
-			if ep.totalBytes > 0 {
-				// Prefix an "~" when the total is an estimate (HLS).
-				prefix := ""
-				if ep.sizeIsApprox {
-					prefix = "~"
-				}
-				sizeStr = r.colorize(termx.Gray, fmt.Sprintf(" %s/%s%s",
-					formatBytesShort(float64(ep.downloadedBytes)),
-					prefix,
-					formatBytesShort(float64(ep.totalBytes))))
-			} else if ep.downloadedBytes > 0 {
-				// No total estimate yet — at least show what we've downloaded.
-				sizeStr = r.colorize(termx.Gray, fmt.Sprintf(" %s", formatBytesShort(float64(ep.downloadedBytes))))
-			}
-
-			// ETA estimation: use speed if available (more accurate for chunked),
-			// otherwise fall back to time-based estimation.
-			etaStr := ""
-			if ep.speed > 0 && ep.totalBytes > 0 && epPct < 100 {
-				remaining := float64(ep.totalBytes-ep.downloadedBytes) / ep.speed
-				if remaining > 0 {
-					etaStr = r.colorize(termx.Gray, fmt.Sprintf(" ETA %s", formatDuration(time.Duration(remaining*float64(time.Second)))))
-				}
-			} else if epPct > 2 && epPct < 100 && !ep.firstProgressAt.IsZero() {
-				elapsed := time.Since(ep.firstProgressAt)
-				pctDone := epPct - ep.firstProgressPct
-				if pctDone > 0 {
-					totalEstimate := elapsed * time.Duration(100-ep.firstProgressPct) / time.Duration(pctDone)
-					remaining := totalEstimate - elapsed
-					if remaining > 0 {
-						etaStr = r.colorize(termx.Gray, fmt.Sprintf(" ETA %s", formatDuration(remaining)))
-					}
-				}
-			}
-
-			epLine := fmt.Sprintf("    %s %s%s%s%s%s",
-				r.colorize(termx.Bold, fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
-				bar,
-				segStr,
-				speedStr,
-				sizeStr,
-				etaStr)
-			lines = append(lines, epLine)
+			lines = append(lines, r.barRow(lay, indentEpisode,
+				fmt.Sprintf("S%02dE%02d", key.Season, key.Episode), termx.Bold,
+				epPct, termx.Yellow, r.episodeStats(ep, epPct)))
 
 			// Nested per-track breakdown (video + each audio track).
 			for _, ti := range ep.hlsTracks {
@@ -481,26 +475,39 @@ func (r *LiveReporter) renderFrame() {
 				if ti.TotalSegments > 0 {
 					tPct = computePercent(ti.DoneSegments, ti.TotalSegments)
 				}
-				tBar := r.progressBar(tPct, 15, termx.Magenta)
-
-				tSeg := r.colorize(termx.Gray, fmt.Sprintf(" %d/%d seg", ti.DoneSegments, ti.TotalSegments))
-
-				tSize := ""
-				if ti.ApproxTotalBytes > 0 {
-					tSize = r.colorize(termx.Gray, fmt.Sprintf(" %s/~%s",
-						formatBytesShort(float64(ti.DownloadedBytes)),
-						formatBytesShort(float64(ti.ApproxTotalBytes))))
-				} else if ti.DownloadedBytes > 0 {
-					tSize = r.colorize(termx.Gray, fmt.Sprintf(" %s", formatBytesShort(float64(ti.DownloadedBytes))))
-				}
-
-				trackLine := fmt.Sprintf("      %s %s%s%s",
-					r.colorize(termx.Gray, fmt.Sprintf("%-14s", ti.Label)),
-					tBar,
-					tSeg,
-					tSize)
-				lines = append(lines, trackLine)
+				lines = append(lines, r.barRow(lay, indentTrack, ti.Label, "",
+					tPct, termx.Magenta, r.trackStats(ti)))
 			}
+		}
+	}
+
+	// Deferred episodes (parked for a later retry).
+	if len(r.deferredEpisodes) > 0 {
+		lines = append(lines, "") // blank separator
+		deferredKeys := make([]domain.EpisodeKey, 0, len(r.deferredEpisodes))
+		for key := range r.deferredEpisodes {
+			deferredKeys = append(deferredKeys, key)
+		}
+		sort.Slice(deferredKeys, func(i, j int) bool {
+			if deferredKeys[i].Season != deferredKeys[j].Season {
+				return deferredKeys[i].Season < deferredKeys[j].Season
+			}
+			return deferredKeys[i].Episode < deferredKeys[j].Episode
+		})
+
+		for _, key := range deferredKeys {
+			di := r.deferredEpisodes[key]
+			label := fmt.Sprintf("⟳ S%02dE%02d ", key.Season, key.Episode)
+			note := fmt.Sprintf("retry pending (attempt %d)", di.attempts)
+			if di.err != nil {
+				note = fmt.Sprintf("retry pending (attempt %d): %s", di.attempts, di.err.Error())
+			}
+			budget := lay.width - displayWidth(label) - indentEpisode - 1
+			note = truncateText(note, budget)
+			deferLine := fmt.Sprintf("    %s%s",
+				r.colorize(termx.Yellow, label),
+				r.colorize(termx.Gray, note))
+			lines = append(lines, deferLine)
 		}
 	}
 
@@ -520,27 +527,127 @@ func (r *LiveReporter) renderFrame() {
 		})
 
 		for _, key := range failedKeys {
-			errMsg := r.failedEpisodes[key].Error()
-			// Truncate long error messages.
-			if len(errMsg) > 40 {
-				errMsg = errMsg[:37] + "..."
-			}
-			failLine := fmt.Sprintf("    %s %s",
-				r.colorize(termx.Red, fmt.Sprintf("✗ S%02dE%02d", key.Season, key.Episode)),
+			label := fmt.Sprintf("✗ S%02dE%02d ", key.Season, key.Episode)
+			// Truncate the error so the whole line fits the terminal width.
+			budget := lay.width - displayWidth(label) - indentEpisode - 1
+			errMsg := truncateText(r.failedEpisodes[key].Error(), budget)
+			failLine := fmt.Sprintf("    %s%s",
+				r.colorize(termx.Red, label),
 				r.colorize(termx.Gray, errMsg))
 			lines = append(lines, failLine)
 		}
 	}
 
 	// Bottom separator.
-	lines = append(lines, r.colorize(termx.Gray, r.repeatChar('─', min(termWidth, 60))))
+	lines = append(lines, r.colorize(termx.Gray, r.repeatChar('─', sepWidth)))
 
 	output := strings.Join(lines, "\n") + "\n"
 	fmt.Fprint(r.w, output)
 	r.lastLines = len(lines)
 }
 
-// progressBar renders a colored progress bar of the given width.
+// barRow renders a single aligned progress row:
+//
+//	<indent><label padded/clipped to labelCol> <bar> <pct> <stats>
+//
+// The bar always starts at the same column (labelCol) and has a fixed width, so
+// bars never shift horizontally between frames. The trailing stats are clipped
+// to whatever space remains so the line never wraps.
+func (r *LiveReporter) barRow(lay frameLayout, indent int, label, labelColor string, pct int, barColor, stats string) string {
+	// Build the "<indent><label>" cell padded/clipped to exactly labelCol cols.
+	cell := strings.Repeat(" ", indent) + label
+	cell = padOrClip(cell, lay.labelCol)
+	if labelColor != "" {
+		// Color only the label text, keeping the padding plain so widths align.
+		trimmed := strings.TrimRight(cell, " ")
+		pad := cell[len(trimmed):]
+		cell = r.colorize(labelColor, trimmed) + pad
+	}
+
+	bar := r.progressBar(pct, lay.barWidth, barColor)
+
+	// Remaining columns for the stats tail (after label, space, bar+brackets,
+	// a space, and the " 100%" suffix).
+	used := lay.labelCol + 1 + (lay.barWidth + 2) + 1 + 5
+	remaining := lay.width - used - 1
+	statsOut := ""
+	if stats != "" && remaining > 1 {
+		statsOut = " " + r.colorize(termx.Gray, truncateText(stats, remaining-1))
+	}
+
+	return fmt.Sprintf("%s %s%s", cell, bar, statsOut)
+}
+
+// episodeStats builds the trailing stats string for an episode row (segments,
+// speed, size and ETA). Returned as plain text; coloring/clipping is done by
+// barRow.
+func (r *LiveReporter) episodeStats(ep *episodeState, epPct int) string {
+	var parts []string
+
+	if ep.totalSegments > 0 {
+		parts = append(parts, fmt.Sprintf("%d/%d seg", ep.doneSegments, ep.totalSegments))
+	}
+	if ep.speed > 0 {
+		parts = append(parts, fmt.Sprintf("%s/s", formatBytesShort(ep.speed)))
+	}
+	if ep.totalBytes > 0 {
+		prefix := ""
+		if ep.sizeIsApprox {
+			prefix = "~"
+		}
+		parts = append(parts, fmt.Sprintf("%s/%s%s",
+			formatBytesShort(float64(ep.downloadedBytes)), prefix,
+			formatBytesShort(float64(ep.totalBytes))))
+	} else if ep.downloadedBytes > 0 {
+		parts = append(parts, formatBytesShort(float64(ep.downloadedBytes)))
+	}
+
+	if eta := r.episodeETA(ep, epPct); eta != "" {
+		parts = append(parts, "ETA "+eta)
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// episodeETA returns a formatted ETA string, or "" when it cannot be estimated.
+func (r *LiveReporter) episodeETA(ep *episodeState, epPct int) string {
+	// Prefer speed-based estimation (more accurate for chunked downloads).
+	if ep.speed > 0 && ep.totalBytes > 0 && epPct < 100 {
+		remaining := float64(ep.totalBytes-ep.downloadedBytes) / ep.speed
+		if remaining > 0 {
+			return formatDuration(time.Duration(remaining * float64(time.Second)))
+		}
+		return ""
+	}
+	// Fall back to time-based estimation.
+	if epPct > 2 && epPct < 100 && !ep.firstProgressAt.IsZero() {
+		elapsed := time.Since(ep.firstProgressAt)
+		pctDone := epPct - ep.firstProgressPct
+		if pctDone > 0 {
+			totalEstimate := elapsed * time.Duration(100-ep.firstProgressPct) / time.Duration(pctDone)
+			if remaining := totalEstimate - elapsed; remaining > 0 {
+				return formatDuration(remaining)
+			}
+		}
+	}
+	return ""
+}
+
+// trackStats builds the trailing stats string for a nested track row.
+func (r *LiveReporter) trackStats(ti domain.TrackProgressInfo) string {
+	parts := []string{fmt.Sprintf("%d/%d seg", ti.DoneSegments, ti.TotalSegments)}
+	if ti.ApproxTotalBytes > 0 {
+		parts = append(parts, fmt.Sprintf("%s/~%s",
+			formatBytesShort(float64(ti.DownloadedBytes)),
+			formatBytesShort(float64(ti.ApproxTotalBytes))))
+	} else if ti.DownloadedBytes > 0 {
+		parts = append(parts, formatBytesShort(float64(ti.DownloadedBytes)))
+	}
+	return strings.Join(parts, " ")
+}
+
+// progressBar renders a colored progress bar of the given width followed by a
+// fixed-width percentage suffix (" 100%").
 // Example: [████████░░░░░░░░░░░░] 45%
 func (r *LiveReporter) progressBar(percent, width int, color string) string {
 	if percent < 0 {
@@ -563,6 +670,62 @@ func (r *LiveReporter) progressBar(percent, width int, color string) string {
 	b.WriteString(fmt.Sprintf(" %3d%%", percent))
 
 	return b.String()
+}
+
+// displayWidth returns the number of terminal columns a plain (no-ANSI) string
+// occupies. Latin and Cyrillic letters are single-width; this is a deliberate
+// approximation that ignores rare wide/combining runes.
+func displayWidth(s string) int {
+	n := 0
+	for range s {
+		n++
+	}
+	return n
+}
+
+// padOrClip right-pads s with spaces, or clips it with an ellipsis, so the
+// result occupies exactly cols columns.
+func padOrClip(s string, cols int) string {
+	if cols <= 0 {
+		return ""
+	}
+	rs := []rune(s)
+	if len(rs) == cols {
+		return s
+	}
+	if len(rs) < cols {
+		return s + strings.Repeat(" ", cols-len(rs))
+	}
+	if cols == 1 {
+		return "…"
+	}
+	return string(rs[:cols-1]) + "…"
+}
+
+// truncateText clips s to at most cols columns, adding an ellipsis when cut.
+func truncateText(s string, cols int) string {
+	if cols <= 0 {
+		return ""
+	}
+	rs := []rune(s)
+	if len(rs) <= cols {
+		return s
+	}
+	if cols == 1 {
+		return "…"
+	}
+	return string(rs[:cols-1]) + "…"
+}
+
+// clampInt clamps v to the inclusive range [lo, hi].
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // colorize wraps text in ANSI color codes if TTY is detected.

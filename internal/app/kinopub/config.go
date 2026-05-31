@@ -92,6 +92,48 @@ func ApplyDefaults(cfg *domain.RunConfig) {
 	if !cfg.EpisodeSel.All && len(cfg.EpisodeSel.Values) == 0 && len(cfg.EpisodeSel.Ranges) == 0 {
 		cfg.EpisodeSel = domain.Selection{All: true}
 	}
+	if cfg.AudioMenu && cfg.AudioMenuTimeout == 0 {
+		cfg.AudioMenuTimeout = 90 * time.Second
+	}
+}
+
+// ParseAudioPreference parses an --audio selector string into an
+// AudioPreference. The syntax is a comma-separated list of patterns; a pattern
+// prefixed with "!" or "-" is an exclusion, everything else is an inclusion.
+// Matching is substring/language based and case-insensitive (see
+// domain.AudioPreference). Examples:
+//
+//	"anilibria"        keep only tracks matching "anilibria"
+//	"!jpn"             drop the Japanese track, keep the rest
+//	"anilibria,!jpn"   keep AniLibria, and never the Japanese track
+//	"" or "all"        keep every track
+func ParseAudioPreference(s string) (domain.AudioPreference, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.EqualFold(s, "all") {
+		return domain.AudioPreference{}, nil
+	}
+
+	var pref domain.AudioPreference
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		neg := false
+		for len(part) > 0 && (part[0] == '!' || part[0] == '-') {
+			neg = true
+			part = strings.TrimSpace(part[1:])
+		}
+		if part == "" {
+			return domain.AudioPreference{}, fmt.Errorf("%w: empty audio pattern in %q", domain.ErrInvalidFlag, s)
+		}
+		if neg {
+			pref.Exclude = append(pref.Exclude, part)
+		} else {
+			pref.Include = append(pref.Include, part)
+		}
+	}
+	return pref, nil
 }
 
 // ParseSelection parses a selection string like "1,3-5,8" into a Selection.

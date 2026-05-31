@@ -74,6 +74,18 @@ type RunConfig struct {
 	// progressive MP4 sources are downloaded via HTTP Range requests with
 	// resume capability. When true, all downloads go through ffmpeg directly.
 	NoChunked bool
+
+	// AudioPref selects which audio tracks to keep. The zero value keeps every
+	// track. See AudioPreference for matching semantics. (audio selection)
+	AudioPref AudioPreference
+
+	// AudioMenu enables the interactive audio-track picker shown before the
+	// first download. When the user makes no choice within AudioMenuTimeout,
+	// all tracks are kept. The menu is only shown on a TTY.
+	AudioMenu bool
+	// AudioMenuTimeout bounds how long the interactive picker waits for input
+	// before defaulting to "keep all". Zero means use the package default.
+	AudioMenuTimeout time.Duration
 }
 
 // RequestAuth carries credentials and request-shaping headers applied to every

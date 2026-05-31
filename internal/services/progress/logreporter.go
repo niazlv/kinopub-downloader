@@ -93,6 +93,20 @@ func (r *LogReporter) EpisodeFailed(key domain.EpisodeKey, err error) {
 	)
 }
 
+// EpisodeDeferred signals that an episode failed on a transient error and was
+// parked for a later retry.
+func (r *LogReporter) EpisodeDeferred(key domain.EpisodeKey, err error, attempts int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.logger.Warn("episode deferred for retry",
+		domain.F("season", key.Season),
+		domain.F("episode", key.Episode),
+		domain.F("attempts", attempts),
+		domain.F("error", err.Error()),
+	)
+}
+
 // Stop is a no-op for the log reporter; there is no live display to tear down.
 func (r *LogReporter) Stop() {
 	r.logger.Info("progress reporting stopped")

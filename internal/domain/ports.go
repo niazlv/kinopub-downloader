@@ -209,8 +209,29 @@ type HLSDownloader interface {
 	// DownloadEpisode downloads an episode's video and audio streams via HLS
 	// segments to local files. Returns paths in HLSDownloadResult; the caller
 	// must remux them and remove HLSDownloadResult.TempDir afterwards.
+	//
+	// Only the audio tracks selected by the preference set via
+	// SetAudioPreference are downloaded.
 	DownloadEpisode(ctx context.Context, manifestURL string, quality Quality,
 		outPath string, key EpisodeKey, sink ProgressSink) (*HLSDownloadResult, error)
+
+	// ListAudioTracks fetches the master playlist and reports the audio tracks
+	// available for the selected quality, without downloading anything. It lets
+	// the caller present an interactive picker and derive language preferences.
+	ListAudioTracks(ctx context.Context, manifestURL string, quality Quality) ([]AudioTrackInfo, error)
+
+	// SetAudioPreference sets the audio-track filter applied to subsequent
+	// DownloadEpisode calls. The zero AudioPreference keeps every track.
+	SetAudioPreference(pref AudioPreference)
+}
+
+// AudioChooser presents the available audio tracks to the user and returns the
+// indices to keep. Implementations may block for input up to a timeout; on
+// timeout or non-interactive input they should keep all tracks (return nil).
+type AudioChooser interface {
+	// ChooseAudio shows tracks and returns the selected indices. A nil/empty
+	// result means "keep all tracks".
+	ChooseAudio(tracks []AudioTrackInfo, timeout time.Duration) ([]int, error)
 }
 
 // HLSMuxer muxes downloaded HLS video + audio files into a final container.

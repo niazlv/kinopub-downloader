@@ -18,6 +18,7 @@ import (
 
 	"kinopub_downloader/internal/app/kinopub"
 	"kinopub_downloader/internal/domain"
+	"kinopub_downloader/internal/lib/audiomenu"
 	"kinopub_downloader/internal/lib/browsercookies"
 	"kinopub_downloader/internal/lib/credstore"
 	"kinopub_downloader/internal/lib/httpx"
@@ -53,6 +54,8 @@ func run() int {
 			return runLogout()
 		case "doctor":
 			return runDoctor(os.Args[2:])
+		case "completion":
+			return runCompletion(os.Args[2:])
 		}
 	}
 
@@ -81,6 +84,8 @@ func run() int {
 		ffmpegArgs  string
 		ffmpegX     ffmpegExtraList
 		noChunked   bool
+		audioSel    string
+		audioMenu   bool
 	)
 
 	fs := flag.NewFlagSet("kinopub", flag.ContinueOnError)
@@ -113,6 +118,8 @@ func run() int {
 	fs.StringVar(&ffmpegArgs, "ffmpeg-args", "", "extra ffmpeg arguments as a single string (advanced, e.g. \"-c:v libx265 -crf 28\")")
 	fs.Var(&ffmpegX, "x", "extra ffmpeg argument (repeatable, advanced, e.g. --x \"-c:v\" --x libx265)")
 	fs.BoolVar(&noChunked, "no-chunked", false, "disable chunked HTTP download (use ffmpeg streaming for all sources)")
+	fs.StringVar(&audioSel, "audio", "", "audio track selection: comma-separated patterns; prefix with '!' (or '-') to exclude (e.g. \"anilibria\", \"!jpn\", \"anilibria,!jpn\")")
+	fs.BoolVar(&audioMenu, "audio-menu", false, "show an interactive audio-track picker before downloading (TTY only)")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 
 	fs.Usage = func() {
@@ -121,7 +128,8 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "  kinopub [flags] <url>\n")
 		fmt.Fprintf(os.Stderr, "  kinopub login [flags]       — save authentication credentials\n")
 		fmt.Fprintf(os.Stderr, "  kinopub logout              — remove stored credentials\n")
-		fmt.Fprintf(os.Stderr, "  kinopub doctor [flags]      — verify files and repair state\n\n")
+		fmt.Fprintf(os.Stderr, "  kinopub doctor [flags]      — verify files and repair state\n")
+		fmt.Fprintf(os.Stderr, "  kinopub completion <shell>  — generate shell completion script (bash, fish)\n\n")
 		fmt.Fprintf(os.Stderr, "The <url> can be:\n")
 		fmt.Fprintf(os.Stderr, "  • A kino.pub page link:     https://kino.pub/item/view/38290\n")
 		fmt.Fprintf(os.Stderr, "                              https://kino.pub/item/view/38290/s1e1\n")
@@ -149,6 +157,10 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "  kinopub --dry-run https://kino.pub/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # Only seasons 1 and 3-5, 1080p, through a proxy\n")
 		fmt.Fprintf(os.Stderr, "  kinopub --seasons 1,3-5 -q 1080p --proxy socks5://127.0.0.1:1080 <url>\n\n")
+		fmt.Fprintf(os.Stderr, "  # Keep only the AniLibria dub, never the Japanese original\n")
+		fmt.Fprintf(os.Stderr, "  kinopub --audio \"anilibria,!jpn\" https://kino.pub/item/view/38290\n\n")
+		fmt.Fprintf(os.Stderr, "  # Pick the audio track interactively before downloading\n")
+		fmt.Fprintf(os.Stderr, "  kinopub --audio-menu https://kino.pub/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # One-off with explicit cookies (without saving)\n")
 		fmt.Fprintf(os.Stderr, "  kinopub --cookie \"cf_clearance=...; PHPSESSID=...\" <url>\n\n")
 		fmt.Fprintf(os.Stderr, "  # Use a locally saved feed file\n")
@@ -239,6 +251,13 @@ func run() int {
 		return 1
 	}
 
+	// Parse audio-track preference.
+	audioPref, err := kinopub.ParseAudioPreference(audioSel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
 	// Resolve the Cookie header: an explicit --cookie wins; otherwise try to
 	// auto-load cookies from the named browser; finally fall back to stored
 	// credentials from `kinopub login`.
@@ -308,6 +327,8 @@ func run() int {
 		FeedFile:        feedFile,
 		FFmpegExtraArgs: extraFFmpegArgs,
 		NoChunked:       noChunked,
+		AudioPref:       audioPref,
+		AudioMenu:       audioMenu,
 	}
 
 	// Apply defaults and validate.
@@ -496,6 +517,12 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 			hlsdownloader.WithConcurrency(cfg.MaxConcurrency))
 		deps.PageScraper = scraper
 		deps.HLSDownloader = hlsDl
+	}
+
+	// Interactive audio-track picker. Only meaningful when the menu is enabled
+	// and stdin/stderr are a real terminal.
+	if cfg.AudioMenu && termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr) {
+		deps.AudioChooser = audiomenu.New(os.Stdin, os.Stderr, true)
 	}
 
 	return deps, cleanup, nil
@@ -998,6 +1025,180 @@ func (f *ffmpegExtraList) Set(v string) error {
 	*f = append(*f, v)
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// Subcommand: completion
+// ---------------------------------------------------------------------------
+
+// runCompletion prints a shell completion script to stdout.
+// Usage: kinopub completion bash
+//
+//	kinopub completion fish
+func runCompletion(args []string) int {
+	shell := ""
+	if len(args) > 0 {
+		shell = args[0]
+	}
+	switch shell {
+	case "fish":
+		fmt.Print(fishCompletion)
+	case "bash":
+		fmt.Print(bashCompletion)
+	default:
+		fmt.Fprintf(os.Stderr, "Usage: kinopub completion <shell>\n\n")
+		fmt.Fprintf(os.Stderr, "Available shells:\n")
+		fmt.Fprintf(os.Stderr, "  bash   — source <(kinopub completion bash)\n")
+		fmt.Fprintf(os.Stderr, "  fish   — kinopub completion fish | source\n\n")
+		fmt.Fprintf(os.Stderr, "To install permanently:\n")
+		fmt.Fprintf(os.Stderr, "  bash:  kinopub completion bash >> ~/.bashrc\n")
+		fmt.Fprintf(os.Stderr, "  fish:  kinopub completion fish > ~/.config/fish/completions/kinopub.fish\n")
+		if shell != "" {
+			return 1
+		}
+	}
+	return 0
+}
+
+const fishCompletion = `# kinopub fish shell completion
+# Install: kinopub completion fish > ~/.config/fish/completions/kinopub.fish
+
+set -l subcommands login logout doctor completion
+
+# Subcommands
+complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a login      -d "Save authentication credentials"
+complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a logout     -d "Remove stored credentials"
+complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a doctor     -d "Verify files and repair state"
+complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a completion -d "Generate shell completion script"
+
+# Main command flags
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s o -l output        -d "Output directory path" -r -F
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s c -l concurrency   -d "Max concurrent downloads" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l retries        -d "Max retry count" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l proxy          -d "Proxy URL (http, https, socks5)" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s q -l quality       -d "Quality preference" -r -a "4k 2160p 1080p 720p 480p 360p"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l verbosity      -d "Log verbosity" -r -a "quiet\t'Suppress output' normal\t'Default' verbose\t'All messages'"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s v                  -d "Verbose output"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l ffmpeg         -d "ffmpeg binary path" -r -F
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l log-file       -d "Log file path" -r -F
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l container      -d "Output container" -r -a "mkv\t'Matroska (default)' mp4\t'MPEG-4'"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l force          -d "Force re-download of completed episodes"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l seasons        -d "Season selection (e.g. 1,3-5)" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l episodes       -d "Episode selection (e.g. 1,3-5)" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l dry-run        -d "List episodes without downloading"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l min-interval   -d "Min interval between requests (ms)" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l cookie         -d "Raw Cookie header value" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l user-agent     -d "User-Agent header" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l header         -d "Extra HTTP header 'Name: Value'" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l browser-cookies -d "Auto-load cookies from browser" -r -a "safari chrome firefox auto"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l feed-file      -d "Read RSS feed from local file" -r -F
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l ffmpeg-args    -d "Extra ffmpeg arguments" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s x                  -d "Extra ffmpeg argument (repeatable)" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l no-chunked     -d "Disable chunked HTTP download"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l audio          -d "Audio track selection (e.g. anilibria,!jpn)" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l audio-menu     -d "Show interactive audio-track picker"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l version        -d "Print version and exit"
+
+# login flags
+complete -c kinopub -n "__fish_seen_subcommand_from login" -l cookie          -d "Cookie header to store" -r
+complete -c kinopub -n "__fish_seen_subcommand_from login" -l user-agent      -d "User-Agent to store" -r
+complete -c kinopub -n "__fish_seen_subcommand_from login" -l browser-cookies -d "Auto-load cookies from browser" -r -a "safari chrome firefox auto"
+
+# doctor flags
+complete -c kinopub -n "__fish_seen_subcommand_from doctor" -s o -l output         -d "Output directory to check" -r -F
+complete -c kinopub -n "__fish_seen_subcommand_from doctor"      -l fix             -d "Repair state file"
+complete -c kinopub -n "__fish_seen_subcommand_from doctor"      -l clean-tmp       -d "Delete orphan .tmp files"
+complete -c kinopub -n "__fish_seen_subcommand_from doctor" -s v                   -d "Verbose output"
+complete -c kinopub -n "__fish_seen_subcommand_from doctor"      -l skip-probe      -d "Skip duration verification"
+complete -c kinopub -n "__fish_seen_subcommand_from doctor"      -l ffprobe         -d "ffprobe binary path" -r -F
+complete -c kinopub -n "__fish_seen_subcommand_from doctor"      -l cookie          -d "Cookie header for resolving source" -r
+complete -c kinopub -n "__fish_seen_subcommand_from doctor"      -l user-agent      -d "User-Agent for resolving source" -r
+complete -c kinopub -n "__fish_seen_subcommand_from doctor"      -l browser-cookies -d "Auto-load cookies from browser" -r -a "safari chrome firefox auto"
+complete -c kinopub -n "__fish_seen_subcommand_from doctor"      -l proxy           -d "Proxy URL" -r
+
+# completion flags
+complete -c kinopub -f -n "__fish_seen_subcommand_from completion" -a "bash fish"
+`
+
+const bashCompletion = `# kinopub bash shell completion
+# Install: source <(kinopub completion bash)
+#          or: kinopub completion bash >> ~/.bashrc
+
+_kinopub_completion() {
+    local cur prev words cword
+    _init_completion || return
+
+    local subcommands="login logout doctor completion"
+    local main_flags="-o --output -c --concurrency --retries --proxy -q --quality
+        --verbosity -v --ffmpeg --log-file --container --force --seasons --episodes
+        --dry-run --min-interval --cookie --user-agent --header --browser-cookies
+        --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu --version"
+
+    # Detect which subcommand is active
+    local subcmd=""
+    for w in "${words[@]:1}"; do
+        case "$w" in
+            login|logout|doctor|completion)
+                subcmd="$w"
+                break
+                ;;
+        esac
+    done
+
+    case "$subcmd" in
+        login)
+            case "$prev" in
+                --cookie|--user-agent) return ;;
+                --browser-cookies) COMPREPLY=($(compgen -W "safari chrome firefox auto" -- "$cur")); return ;;
+            esac
+            COMPREPLY=($(compgen -W "--cookie --user-agent --browser-cookies" -- "$cur"))
+            ;;
+        logout)
+            ;;
+        doctor)
+            case "$prev" in
+                -o|--output|--ffprobe) COMPREPLY=($(compgen -d -- "$cur")); return ;;
+                --cookie|--user-agent|--proxy) return ;;
+                --browser-cookies) COMPREPLY=($(compgen -W "safari chrome firefox auto" -- "$cur")); return ;;
+            esac
+            COMPREPLY=($(compgen -W "-o --output --fix --clean-tmp -v --skip-probe
+                --ffprobe --cookie --user-agent --browser-cookies --proxy" -- "$cur"))
+            ;;
+        completion)
+            COMPREPLY=($(compgen -W "bash fish" -- "$cur"))
+            ;;
+        *)
+            # Main command
+            if [[ "$cur" == -* ]]; then
+                case "$prev" in
+                    -o|--output|--log-file|--feed-file|--ffmpeg)
+                        COMPREPLY=($(compgen -f -- "$cur")); return ;;
+                    -q|--quality)
+                        COMPREPLY=($(compgen -W "4k 2160p 1080p 720p 480p 360p" -- "$cur")); return ;;
+                    --container)
+                        COMPREPLY=($(compgen -W "mkv mp4" -- "$cur")); return ;;
+                    --verbosity)
+                        COMPREPLY=($(compgen -W "quiet normal verbose" -- "$cur")); return ;;
+                    --browser-cookies)
+                        COMPREPLY=($(compgen -W "safari chrome firefox auto" -- "$cur")); return ;;
+                    --cookie|--user-agent|--proxy|--header|--seasons|--episodes| \
+                    --min-interval|--retries|--ffmpeg-args|-x|-c|--concurrency|--audio)
+                        return ;;
+                esac
+                COMPREPLY=($(compgen -W "$main_flags" -- "$cur"))
+            else
+                # No subcommand yet: offer subcommands + file completion for URL/path arg
+                if [[ -z "$subcmd" ]]; then
+                    COMPREPLY=($(compgen -W "$subcommands" -- "$cur"))
+                    # Also allow files (for local feed files)
+                    COMPREPLY+=($(compgen -f -- "$cur"))
+                fi
+            fi
+            ;;
+    esac
+}
+
+complete -F _kinopub_completion kinopub
+`
 
 // splitShellArgs splits a string into arguments respecting simple quoting.
 // It handles double-quoted and single-quoted strings, but does not support

@@ -19,6 +19,20 @@ import (
 // engine orchestrates the download workflow using injected dependencies.
 type engine struct {
 	deps Dependencies
+
+	// retryBackoff computes the wait before an episode's next attempt. When
+	// nil, episodeRetryBackoff is used. It exists as a field so tests can
+	// shrink the backoff; production code leaves it nil.
+	retryBackoff func(attempts int) time.Duration
+}
+
+// backoffFor returns the retry backoff for the given attempt count, using the
+// engine's override when present.
+func (e *engine) backoffFor(attempts int) time.Duration {
+	if e.retryBackoff != nil {
+		return e.retryBackoff(attempts)
+	}
+	return episodeRetryBackoff(attempts)
 }
 
 // consecutiveFailLimit is the number of consecutive media resolution failures
@@ -491,7 +505,16 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 		manifestMap[key] = pe.ManifestURL
 	}
 
-	// 7. Start progress reporting.
+	// 7. Resolve audio-track preference before starting the live progress
+	// display. An explicit --audio preference is applied directly; otherwise,
+	// when the interactive menu is enabled, probe the first episode's tracks
+	// and let the user choose. The resulting preference is pushed to the HLS
+	// downloader for all episodes. This runs before progress rendering so the
+	// interactive prompt isn't clobbered by progress redraws.
+	pref := e.resolveAudioPreference(ctx, cfg, selected, manifestMap)
+	e.deps.HLSDownloader.SetAudioPreference(pref)
+
+	// 8. Start progress reporting.
 	plan := domain.SeriesPlan{
 		Total:              len(allMatching),
 		Seasons:            countSeasons(allMatching),
@@ -501,17 +524,20 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 	e.deps.ProgressReporter.Start(plan)
 	defer e.deps.ProgressReporter.Stop()
 
-	// 8. Download episodes (sequential for HLS — each episode is already segmented).
+	// 9. Download episodes with deferred-retry scheduling. New episodes are
+	// processed in order; an episode that fails on a transient network error
+	// (timeout, EOF, connection reset, 5xx) is not dropped — it is parked in a
+	// retry queue and reattempted later, interleaved between new episodes and,
+	// once new episodes are exhausted, cycled with backoff until it succeeds or
+	// exhausts its attempt budget. Partial segments (.hls-tmp) are preserved so
+	// each reattempt resumes instead of restarting.
 	var succeeded, failed, skipped int
-	var consecutiveCDNFails int
 	var outcomes []domain.JobOutcome
 
+	// Build the initial work list, preserving order and skipping episodes with
+	// no manifest URL.
+	newQueue := make([]*pendingEpisode, 0, len(selected))
 	for _, ep := range selected {
-		if ctx.Err() != nil {
-			log.Info("interrupted")
-			break
-		}
-
 		manifestURL, ok := manifestMap[ep.Key]
 		if !ok {
 			log.Warn("no manifest URL for episode, skipping",
@@ -520,127 +546,117 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 			skipped++
 			continue
 		}
+		newQueue = append(newQueue, &pendingEpisode{ep: ep, manifest: manifestURL})
+	}
 
-		// Build output path.
-		outPath, err := e.deps.OutputLayout.EpisodePath(cfg.OutputPath, series, ep)
-		if err != nil {
-			log.Warn("output path failed", domain.F("error", err.Error()))
-			skipped++
-			continue
+	var retryQueue []*pendingEpisode
+
+	// processOne runs a single attempt for a pending episode and routes the
+	// outcome: success → completed; transient failure → re-park (or give up
+	// after the attempt budget); fatal failure → mark failed.
+	processOne := func(pe *pendingEpisode) {
+		if ctx.Err() != nil {
+			return
 		}
-		if err := e.deps.OutputLayout.EnsureDirs(outPath); err != nil {
-			log.Warn("cannot create directory", domain.F("error", err.Error()))
-			skipped++
-			continue
-		}
+		pe.attempts++
+		epLabel := fmt.Sprintf("S%02dE%02d", pe.ep.Key.Season, pe.ep.Key.Episode)
 
-	retryEpisode:
-		// Download via HLS.
-		e.deps.ProgressReporter.EpisodeStarted(ep.Key)
+		res, err := e.attemptHLSEpisode(ctx, cfg, series, pe.ep, pe.manifest, posterPath)
+		switch res {
+		case epSuccess:
+			succeeded++
+			outcomes = append(outcomes, domain.JobOutcome{Key: pe.ep.Key, Succeeded: true, Attempts: pe.attempts})
+			e.deps.ProgressReporter.EpisodeCompleted(pe.ep.Key)
 
-		tsPath := outPath + ".ts"
-		hlsResult, dlErr := e.deps.HLSDownloader.DownloadEpisode(ctx, manifestURL, cfg.Quality, tsPath, ep.Key, e.deps.ProgressReporter)
-
-		if dlErr != nil {
-			log.Warn("HLS download failed",
-				domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
-				domain.F("error", dlErr.Error()),
-			)
-
-			// If CDN is returning 502/503/504, wait and retry the same episode
-			// instead of skipping to the next one (CDN will recover eventually).
-			// Keep the partial segments (.hls-tmp) so the retry resumes.
-			if strings.Contains(dlErr.Error(), "502") ||
-				strings.Contains(dlErr.Error(), "503") ||
-				strings.Contains(dlErr.Error(), "504") {
-				consecutiveCDNFails++
-				waitTime := time.Duration(consecutiveCDNFails) * 30 * time.Second
-				if waitTime > 5*time.Minute {
-					waitTime = 5 * time.Minute
-				}
-				log.Info("CDN unavailable, waiting before retry",
-					domain.F("wait", waitTime.String()),
-					domain.F("attempt", consecutiveCDNFails),
+		case epRetryable:
+			if pe.attempts >= maxEpisodeAttempts {
+				log.Warn("giving up on episode after repeated transient failures",
+					domain.F("episode", epLabel),
+					domain.F("attempts", pe.attempts),
+					domain.F("error", err.Error()),
 				)
-				select {
-				case <-ctx.Done():
-					return domain.RunResult{Total: len(selected), Succeeded: succeeded, Failed: failed, Skipped: skipped, Outcomes: outcomes}, ctx.Err()
-				case <-time.After(waitTime):
-				}
-				// Retry the same episode — don't advance the loop.
-				// We do this by decrementing the loop counter... but we're using range.
-				// Instead, just re-attempt inline.
-				goto retryEpisode
+				failed++
+				outcomes = append(outcomes, domain.JobOutcome{Key: pe.ep.Key, Err: err, Attempts: pe.attempts})
+				e.deps.ProgressReporter.EpisodeFailed(pe.ep.Key, err)
+				return
 			}
-
-			// Non-CDN error — skip this episode.
-			consecutiveCDNFails = 0
-			outcomes = append(outcomes, domain.JobOutcome{Key: ep.Key, Err: dlErr, Attempts: 1})
-			failed++
-			e.deps.ProgressReporter.EpisodeFailed(ep.Key, dlErr)
-			continue
-		}
-		consecutiveCDNFails = 0
-
-		// Mux downloaded video + audio streams into the final container.
-		log.Info("muxing",
-			domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
-			domain.F("quality", fmt.Sprintf("%s @ %d kbps", hlsResult.Resolution, hlsResult.BitrateKbps)),
-			domain.F("audio_tracks", len(hlsResult.AudioTracks)),
-		)
-
-		muxJob := domain.Job{
-			Episode:     ep,
-			OutPath:     outPath,
-			PosterPath:  posterPath,
-			SeriesTitle: series.Title,
-		}
-
-		var remuxErr error
-		if muxer, ok := e.deps.Downloader.(domain.HLSMuxer); ok {
-			remuxErr = muxer.MuxHLS(ctx, muxJob, hlsResult)
-		} else {
-			remuxErr = fmt.Errorf("downloader does not support HLS muxing")
-		}
-
-		// Clean up temp segment files regardless of mux outcome.
-		if hlsResult.TempDir != "" {
-			os.RemoveAll(hlsResult.TempDir)
-		}
-
-		if remuxErr != nil {
-			log.Warn("remux failed",
-				domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
-				domain.F("error", remuxErr.Error()),
+			wait := e.backoffFor(pe.attempts)
+			pe.lastErr = err
+			pe.nextAt = time.Now().Add(wait)
+			retryQueue = append(retryQueue, pe)
+			log.Info("episode download interrupted, will retry later",
+				domain.F("episode", epLabel),
+				domain.F("attempt", pe.attempts),
+				domain.F("retry_in", wait.Round(time.Second).String()),
+				domain.F("error", err.Error()),
 			)
-			outcomes = append(outcomes, domain.JobOutcome{Key: ep.Key, Err: remuxErr, Attempts: 1})
+			reportEpisodeDeferred(e.deps.ProgressReporter, pe.ep.Key, err, pe.attempts)
+
+		case epFatal:
+			if ctx.Err() != nil {
+				return
+			}
+			log.Warn("episode failed",
+				domain.F("episode", epLabel),
+				domain.F("error", err.Error()),
+			)
 			failed++
-			e.deps.ProgressReporter.EpisodeFailed(ep.Key, remuxErr)
+			outcomes = append(outcomes, domain.JobOutcome{Key: pe.ep.Key, Err: err, Attempts: pe.attempts})
+			e.deps.ProgressReporter.EpisodeFailed(pe.ep.Key, err)
+		}
+	}
+
+	for (len(newQueue) > 0 || len(retryQueue) > 0) && ctx.Err() == nil {
+		// Prefer a fresh episode when one is available.
+		if len(newQueue) > 0 {
+			// Snapshot how many episodes are already parked: only those (which
+			// were deferred in a previous iteration) are eligible to be
+			// interleaved after this new episode. This yields the desired
+			// "new → previously-failed → new → …" cadence instead of retrying
+			// an episode in the same step it just failed.
+			eligible := len(retryQueue)
+
+			pe := newQueue[0]
+			newQueue = newQueue[1:]
+			processOne(pe) // may append the just-failed episode to retryQueue
+
+			// Interleave: give one ready, previously-deferred episode another
+			// shot (e.g. finished E07 → retry E05 → E08 → …).
+			if idx := readyDeferredIndex(retryQueue[:eligible], time.Now()); idx >= 0 {
+				pe2 := retryQueue[idx]
+				retryQueue = append(retryQueue[:idx], retryQueue[idx+1:]...)
+				processOne(pe2)
+			}
 			continue
 		}
 
-		// Mark completed.
-		info, _ := os.Stat(outPath)
-		var fileSize int64
-		if info != nil {
-			fileSize = info.Size()
+		// Only deferred episodes remain — process the earliest-due one,
+		// waiting for its backoff window if necessary.
+		idx := earliestDeferredIndex(retryQueue)
+		pe := retryQueue[idx]
+		retryQueue = append(retryQueue[:idx], retryQueue[idx+1:]...)
+		if wait := time.Until(pe.nextAt); wait > 0 {
+			log.Info("waiting before next retry",
+				domain.F("episode", fmt.Sprintf("S%02dE%02d", pe.ep.Key.Season, pe.ep.Key.Episode)),
+				domain.F("wait", wait.Round(time.Second).String()),
+			)
+			select {
+			case <-ctx.Done():
+				return domain.RunResult{Total: len(selected), Succeeded: succeeded, Failed: failed, Skipped: skipped, Outcomes: outcomes}, ctx.Err()
+			case <-time.After(wait):
+			}
 		}
-		completedInfo := domain.CompletedInfo{
-			Key:        ep.Key,
-			Path:       outPath,
-			Bytes:      fileSize,
-			Title:      ep.Title,
-			Quality:    fmt.Sprintf("%s/%s", hlsResult.Resolution, hlsResult.Codec),
-			Resolution: hlsResult.Resolution,
-			BitRate:    hlsResult.BitrateKbps,
-			PageLink:   ep.PageLink,
-			MediaURL:   manifestURL,
-		}
-		_ = e.deps.StateStore.MarkCompleted(ctx, completedInfo)
+		processOne(pe)
+	}
 
-		outcomes = append(outcomes, domain.JobOutcome{Key: ep.Key, Succeeded: true, Attempts: 1})
-		succeeded++
-		e.deps.ProgressReporter.EpisodeCompleted(ep.Key)
+	// Episodes still parked when interrupted count as failures for the summary.
+	for _, pe := range retryQueue {
+		failed++
+		err := pe.lastErr
+		if err == nil {
+			err = ctx.Err()
+		}
+		outcomes = append(outcomes, domain.JobOutcome{Key: pe.ep.Key, Err: err, Attempts: pe.attempts})
 	}
 
 	return domain.RunResult{
@@ -650,6 +666,286 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 		Skipped:   skipped,
 		Outcomes:  outcomes,
 	}, nil
+}
+
+// maxEpisodeAttempts bounds how many times the engine reattempts a single
+// episode that keeps failing on transient network errors before giving up. The
+// per-segment retry budget is separate and applies within each attempt.
+const maxEpisodeAttempts = 8
+
+// pendingEpisode is a unit of work in the deferred-retry scheduler.
+type pendingEpisode struct {
+	ep       domain.Episode
+	manifest string
+	attempts int       // attempts made so far
+	nextAt   time.Time // earliest time the next attempt may run (backoff)
+	lastErr  error     // error from the most recent attempt
+}
+
+// episodeOutcome classifies the result of a single download+mux attempt.
+type episodeOutcome int
+
+const (
+	epSuccess   episodeOutcome = iota // downloaded and muxed
+	epRetryable                       // transient failure — worth retrying later
+	epFatal                           // permanent failure — do not retry
+)
+
+// episodeRetryBackoff returns how long to wait before the next attempt of an
+// episode that has failed `attempts` times. It grows linearly and is capped so
+// a stuck CDN segment doesn't stall the whole run indefinitely.
+func episodeRetryBackoff(attempts int) time.Duration {
+	wait := time.Duration(attempts) * 20 * time.Second
+	if wait > 3*time.Minute {
+		wait = 3 * time.Minute
+	}
+	return wait
+}
+
+// readyDeferredIndex returns the index of a deferred episode whose backoff
+// window has elapsed (earliest-due first), or -1 if none are ready.
+func readyDeferredIndex(q []*pendingEpisode, now time.Time) int {
+	best := -1
+	for i, pe := range q {
+		if pe.nextAt.After(now) {
+			continue
+		}
+		if best == -1 || pe.nextAt.Before(q[best].nextAt) {
+			best = i
+		}
+	}
+	return best
+}
+
+// earliestDeferredIndex returns the index of the deferred episode due soonest.
+// The queue must be non-empty.
+func earliestDeferredIndex(q []*pendingEpisode) int {
+	best := 0
+	for i, pe := range q {
+		if pe.nextAt.Before(q[best].nextAt) {
+			best = i
+		}
+	}
+	return best
+}
+
+// reportEpisodeDeferred notifies the progress reporter that an episode is
+// parked for a later retry, if the reporter supports it. Reporters without the
+// optional hook simply don't show a distinct "deferred" state.
+func reportEpisodeDeferred(r domain.ProgressReporter, key domain.EpisodeKey, err error, attempts int) {
+	if d, ok := r.(interface {
+		EpisodeDeferred(domain.EpisodeKey, error, int)
+	}); ok {
+		d.EpisodeDeferred(key, err, attempts)
+	}
+}
+
+// attemptHLSEpisode performs one full download+mux attempt for a single
+// episode. It returns epSuccess on completion, epRetryable for transient
+// network failures (the .hls-tmp segments are left in place so the next
+// attempt resumes), or epFatal for permanent errors. The returned error is
+// non-nil for the two failure outcomes.
+func (e *engine) attemptHLSEpisode(
+	ctx context.Context,
+	cfg domain.RunConfig,
+	series domain.Series,
+	ep domain.Episode,
+	manifestURL string,
+	posterPath string,
+) (episodeOutcome, error) {
+	log := e.deps.Logger.Component("engine-hls")
+	epLabel := fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)
+
+	outPath, err := e.deps.OutputLayout.EpisodePath(cfg.OutputPath, series, ep)
+	if err != nil {
+		return epFatal, fmt.Errorf("output path: %w", err)
+	}
+	if err := e.deps.OutputLayout.EnsureDirs(outPath); err != nil {
+		return epFatal, fmt.Errorf("create directory: %w", err)
+	}
+
+	e.deps.ProgressReporter.EpisodeStarted(ep.Key)
+
+	tsPath := outPath + ".ts"
+	hlsResult, dlErr := e.deps.HLSDownloader.DownloadEpisode(ctx, manifestURL, cfg.Quality, tsPath, ep.Key, e.deps.ProgressReporter)
+	if dlErr != nil {
+		if ctx.Err() != nil {
+			return epRetryable, dlErr
+		}
+		if isTransientDownloadError(dlErr) {
+			return epRetryable, dlErr
+		}
+		return epFatal, dlErr
+	}
+
+	// Mux downloaded video + audio streams into the final container.
+	log.Info("muxing",
+		domain.F("episode", epLabel),
+		domain.F("quality", fmt.Sprintf("%s @ %d kbps", hlsResult.Resolution, hlsResult.BitrateKbps)),
+		domain.F("audio_tracks", len(hlsResult.AudioTracks)),
+	)
+
+	muxJob := domain.Job{
+		Episode:     ep,
+		OutPath:     outPath,
+		PosterPath:  posterPath,
+		SeriesTitle: series.Title,
+	}
+
+	var remuxErr error
+	if muxer, ok := e.deps.Downloader.(domain.HLSMuxer); ok {
+		remuxErr = muxer.MuxHLS(ctx, muxJob, hlsResult)
+	} else {
+		remuxErr = fmt.Errorf("downloader does not support HLS muxing")
+	}
+
+	// Clean up temp segment files regardless of mux outcome.
+	if hlsResult.TempDir != "" {
+		os.RemoveAll(hlsResult.TempDir)
+	}
+
+	if remuxErr != nil {
+		log.Warn("remux failed",
+			domain.F("episode", epLabel),
+			domain.F("error", remuxErr.Error()),
+		)
+		return epFatal, remuxErr
+	}
+
+	// Mark completed.
+	info, _ := os.Stat(outPath)
+	var fileSize int64
+	if info != nil {
+		fileSize = info.Size()
+	}
+	completedInfo := domain.CompletedInfo{
+		Key:        ep.Key,
+		Path:       outPath,
+		Bytes:      fileSize,
+		Title:      ep.Title,
+		Quality:    fmt.Sprintf("%s/%s", hlsResult.Resolution, hlsResult.Codec),
+		Resolution: hlsResult.Resolution,
+		BitRate:    hlsResult.BitrateKbps,
+		PageLink:   ep.PageLink,
+		MediaURL:   manifestURL,
+	}
+	_ = e.deps.StateStore.MarkCompleted(ctx, completedInfo)
+
+	return epSuccess, nil
+}
+
+// transientErrorMarkers are substrings identifying recoverable network/CDN
+// failures: the connection or server hiccupped but is likely to recover, so
+// the episode should be retried later rather than abandoned.
+var transientErrorMarkers = []string{
+	"context deadline exceeded", // per-segment timeout
+	"deadline exceeded",
+	"timeout",
+	"timed out",
+	"unexpected eof",
+	"connection reset",
+	"connection refused",
+	"broken pipe",
+	"eof",
+	"no such host",        // transient DNS
+	"temporary failure",   // transient DNS
+	"tls handshake",
+	"http 429", "429",     // rate limited
+	"http 500", "500",
+	"http 502", "502",
+	"http 503", "503",
+	"http 504", "504",
+	"server misbehaving",
+}
+
+// isTransientDownloadError reports whether err looks like a recoverable
+// network/CDN condition (as opposed to a permanent error such as a bad
+// manifest or a 404). The check is substring-based because the underlying
+// errors are wrapped and stringified across several layers.
+func isTransientDownloadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range transientErrorMarkers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+
+//
+// Precedence:
+//  1. An explicit cfg.AudioPref (from the --audio flag) is used as-is, with
+//     Prefer hints enriched from the first episode's tracks so a missing dub
+//     falls back within the desired language.
+//  2. Otherwise, if the interactive menu is enabled and a chooser is wired,
+//     probe the first episode's tracks and prompt the user. The chosen tracks
+//     are generalized into a cross-episode preference.
+//  3. Otherwise, keep all tracks (zero preference).
+func (e *engine) resolveAudioPreference(
+	ctx context.Context,
+	cfg domain.RunConfig,
+	selected []domain.Episode,
+	manifestMap map[domain.EpisodeKey]string,
+) domain.AudioPreference {
+	log := e.deps.Logger.Component("engine")
+
+	// Fast path: no explicit preference and no interactive menu → keep all
+	// tracks without probing the network.
+	menuActive := cfg.AudioMenu && e.deps.AudioChooser != nil
+	if cfg.AudioPref.IsAll() && !menuActive {
+		return domain.AudioPreference{}
+	}
+
+	// Probe the first episode's audio tracks (best-effort) — used for both the
+	// menu and for enriching Prefer hints.
+	var tracks []domain.AudioTrackInfo
+	if len(selected) > 0 {
+		if url, ok := manifestMap[selected[0].Key]; ok && url != "" {
+			if t, err := e.deps.HLSDownloader.ListAudioTracks(ctx, url, cfg.Quality); err != nil {
+				log.Debug("audio track probe failed", domain.F("error", err.Error()))
+			} else {
+				tracks = t
+			}
+		}
+	}
+
+	// 1. Explicit --audio preference.
+	if !cfg.AudioPref.IsAll() {
+		pref := cfg.AudioPref
+		if len(pref.Prefer) == 0 && len(tracks) > 0 {
+			pref.Prefer = domain.DeriveAudioPrefer(tracks, pref.Include)
+		}
+		log.Info("audio preference (explicit)",
+			domain.F("include", strings.Join(pref.Include, ", ")),
+			domain.F("exclude", strings.Join(pref.Exclude, ", ")),
+		)
+		return pref
+	}
+
+	// 2. Interactive menu.
+	if menuActive && len(tracks) > 1 {
+		chosen, err := e.deps.AudioChooser.ChooseAudio(tracks, cfg.AudioMenuTimeout)
+		if err != nil {
+			log.Warn("audio menu failed, keeping all tracks", domain.F("error", err.Error()))
+			return domain.AudioPreference{}
+		}
+		if len(chosen) == 0 {
+			return domain.AudioPreference{}
+		}
+		pref := domain.BuildAudioPreference(tracks, chosen)
+		log.Info("audio preference (interactive)",
+			domain.F("include", strings.Join(pref.Include, ", ")),
+			domain.F("selected", len(chosen)),
+		)
+		return pref
+	}
+
+	// 3. Keep everything.
+	return domain.AudioPreference{}
 }
 
 // buildSeriesFromPlaylist constructs a domain.Series from page playlist data.

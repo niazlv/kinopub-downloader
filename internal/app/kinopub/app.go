@@ -22,6 +22,9 @@ type Dependencies struct {
 	// Optional: HLS pipeline components (nil = HLS pipeline disabled).
 	HLSDownloader domain.HLSDownloader // nil when auth unavailable
 	PageScraper   domain.PageScraper   // nil when auth unavailable
+
+	// Optional: interactive audio-track picker. nil disables the menu.
+	AudioChooser domain.AudioChooser
 }
 
 // App is the composition root that wires all services together and exposes
