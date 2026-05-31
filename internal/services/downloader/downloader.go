@@ -1,11 +1,14 @@
 // Package downloader implements domain.Downloader — it orchestrates ffmpeg
 // invocations to download and mux media for a single episode (Req 7, 8, 9).
+// For progressive MP4 sources, it supports a chunked HTTP download mode with
+// resume capability, falling back to direct ffmpeg streaming on failure.
 package downloader
 
 import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"time"
 
@@ -23,6 +26,14 @@ var (
 // command's stdout (used for -progress pipe:1 output).
 type RunFunc func(ctx context.Context, name string, args, env []string, stdout io.Writer) error
 
+// DownloadMode indicates which download strategy was used.
+type DownloadMode string
+
+const (
+	ModeChunked DownloadMode = "chunked" // HTTP Range-based with resume
+	ModeDirect  DownloadMode = "direct"  // ffmpeg stream copy from URL
+)
+
 // Downloader implements domain.Downloader and domain.JobExecutor.
 type Downloader struct {
 	run        RunFunc
@@ -31,6 +42,8 @@ type Downloader struct {
 	ffmpegPath string
 	auth       domain.RequestAuth
 	extraArgs  []string
+	noChunked  bool
+	httpClient *http.Client
 }
 
 // Option configures the Downloader.
@@ -60,6 +73,21 @@ func WithExtraArgs(args []string) Option {
 	}
 }
 
+// WithNoChunked disables the chunked download mode, forcing all downloads
+// through ffmpeg directly.
+func WithNoChunked(noChunked bool) Option {
+	return func(d *Downloader) {
+		d.noChunked = noChunked
+	}
+}
+
+// WithHTTPClient sets the HTTP client used for chunked downloads.
+func WithHTTPClient(client *http.Client) Option {
+	return func(d *Downloader) {
+		d.httpClient = client
+	}
+}
+
 // New creates a new Downloader.
 //   - run: function to execute ffmpeg, streaming stdout to a writer
 //   - proxy: provides proxy environment for ffmpeg
@@ -77,12 +105,112 @@ func New(run RunFunc, proxy domain.ProxyProvider, logger domain.Logger, opts ...
 	return d
 }
 
-// Download runs ffmpeg for one episode: builds the command, streams -progress
-// to the sink, writes a temp file, verifies size > 0, then atomically renames
-// to the final path (Req 7). Sets audio/subtitle metadata labels (Req 8, 9).
+// Download runs the download for one episode. For progressive MP4 sources
+// (when chunked mode is enabled), it first downloads the raw file via HTTP
+// Range requests with resume capability, then remuxes with ffmpeg to add
+// metadata and labels. For HLS sources or when chunked is disabled, it uses
+// the traditional ffmpeg-based streaming approach.
 func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.ProgressSink) error {
-	d.logger.Info("starting download",
+	// Determine if we can use chunked mode.
+	useChunked := !d.noChunked &&
+		d.httpClient != nil &&
+		job.Media.Source.Kind == domain.MediaProgressive &&
+		len(d.extraArgs) == 0 // extra ffmpeg args imply transcoding, skip chunked
+
+	if useChunked {
+		err := d.downloadChunked(ctx, job, sink)
+		if err == nil {
+			return nil
+		}
+		// Chunked failed — fall back to direct ffmpeg.
+		d.logger.Warn("chunked download failed, falling back to direct ffmpeg",
+			domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+			domain.F("error", err.Error()),
+		)
+	}
+
+	return d.downloadDirect(ctx, job, sink)
+}
+
+// downloadChunked implements the chunked HTTP Range download + ffmpeg remux.
+func (d *Downloader) downloadChunked(ctx context.Context, job domain.Job, sink domain.ProgressSink) error {
+	d.logger.Info("starting chunked download",
 		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+		domain.F("mode", string(ModeChunked)),
+		domain.F("output", job.OutPath),
+	)
+
+	// 1. Download raw file via chunked HTTP.
+	rawPath := job.OutPath + ".raw"
+	chunked := NewChunked(d.httpClient, d.auth, d.logger)
+
+	if err := chunked.Download(ctx, job.Media.Source.URL, rawPath, job.Episode.Key, sink); err != nil {
+		return fmt.Errorf("chunked download: %w", err)
+	}
+
+	// 2. Remux with ffmpeg: local file → final container with metadata.
+	d.logger.Info("remuxing downloaded file",
+		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+	)
+
+	if err := d.remuxLocal(ctx, job, rawPath); err != nil {
+		// Clean up raw file on remux failure.
+		os.Remove(rawPath)
+		return fmt.Errorf("remux: %w", err)
+	}
+
+	// 3. Clean up raw file after successful remux.
+	os.Remove(rawPath)
+
+	d.logger.Info("download completed",
+		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+		domain.F("mode", string(ModeChunked)),
+		domain.F("output", job.OutPath),
+	)
+
+	return nil
+}
+
+// remuxLocal runs ffmpeg to remux a local raw file into the final container
+// with all metadata, poster, and audio/subtitle labels.
+func (d *Downloader) remuxLocal(ctx context.Context, job domain.Job, rawPath string) error {
+	tempPath := job.OutPath + ".tmp"
+
+	// Build a modified job that points to the local file instead of the URL.
+	localJob := job
+	localJob.Media.Source.URL = rawPath
+
+	// Build ffmpeg args using the local file as input (no auth needed).
+	args := BuildFFmpegArgs(localJob, nil, domain.RequestAuth{}, tempPath, d.extraArgs)
+
+	// Run ffmpeg for remux (no progress needed — it's fast for local files).
+	runErr := d.run(ctx, d.ffmpegPath, args, nil, nil)
+	if runErr != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("%w: %v", domain.ErrFFmpegFailed, runErr)
+	}
+
+	// Verify output.
+	info, err := os.Stat(tempPath)
+	if err != nil || info.Size() == 0 {
+		os.Remove(tempPath)
+		return domain.ErrEmptyOutput
+	}
+
+	// Atomic rename.
+	if err := os.Rename(tempPath, job.OutPath); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("rename temp to final: %w", err)
+	}
+
+	return nil
+}
+
+// downloadDirect is the traditional ffmpeg-based download (stream from URL).
+func (d *Downloader) downloadDirect(ctx context.Context, job domain.Job, sink domain.ProgressSink) error {
+	d.logger.Info("starting direct download",
+		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+		domain.F("mode", string(ModeDirect)),
 		domain.F("output", job.OutPath),
 	)
 
@@ -99,16 +227,12 @@ func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.P
 	args := BuildFFmpegArgs(job, proxyEnv, d.auth, tempPath, d.extraArgs)
 
 	// 4. Set up progress parsing.
-	// Compute total duration for percentage. We use the video track's duration
-	// if available from the episode metadata. Since duration comes from ffprobe
-	// and is stored in the job, we pass it to the progress parser.
 	duration := estimateDuration(job)
 
 	var stdout io.Writer
 	var parser *progressParser
 
 	if sink != nil && duration > 0 {
-		// Create a progress parser that writes to the sink.
 		track := domain.TrackRef{Kind: domain.TrackVideo, Index: 0}
 		parser = newProgressParser(sink, job.Episode.Key, track, duration)
 		stdout = parser
@@ -133,28 +257,23 @@ func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.P
 			domain.F("error", runErr.Error()),
 			domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
 		)
-		// Delete temp file on failure (Req 7.4).
 		_ = os.Remove(tempPath)
 		return fmt.Errorf("%w: %v", domain.ErrFFmpegFailed, runErr)
 	}
 
-	// 7. Verify temp file exists and size > 0 (Req 7.5, 7.7).
+	// 7. Verify temp file exists and size > 0.
 	info, err := os.Stat(tempPath)
 	if err != nil || info.Size() == 0 {
 		d.logger.Error("output file missing or empty",
 			domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
 			domain.F("temp_path", tempPath),
 		)
-		// Delete temp file if it exists but is empty.
 		_ = os.Remove(tempPath)
 		return domain.ErrEmptyOutput
 	}
 
 	// 7b. Verify duration: if we know the expected duration, check that the
-	// downloaded file is at least 85% of it. CDN may silently truncate the
-	// stream (especially under parallel load), and ffmpeg exits 0 with a
-	// partial file. We detect this by checking the progress parser's last
-	// reported percentage.
+	// downloaded file is at least 85% of it.
 	if parser != nil && duration > 0 {
 		lastPct := parser.lastPercent()
 		if lastPct < 85 {
@@ -169,7 +288,7 @@ func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.P
 		}
 	}
 
-	// 8. Atomic rename to final path (Req 7.6).
+	// 8. Atomic rename to final path.
 	if err := os.Rename(tempPath, job.OutPath); err != nil {
 		d.logger.Error("rename failed",
 			domain.F("error", err.Error()),
@@ -182,6 +301,7 @@ func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.P
 
 	d.logger.Info("download completed",
 		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+		domain.F("mode", string(ModeDirect)),
 		domain.F("output", job.OutPath),
 		domain.F("size", info.Size()),
 	)

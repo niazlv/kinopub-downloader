@@ -37,3 +37,11 @@ const (
 type ProgressSink interface {
 	TrackProgress(key EpisodeKey, track TrackRef, percent int)
 }
+
+// ByteProgressSink extends ProgressSink with byte-level progress reporting.
+// Implementations that support it can show download speed and file size.
+type ByteProgressSink interface {
+	ProgressSink
+	// ByteProgress reports bytes downloaded out of total for an episode.
+	ByteProgress(key EpisodeKey, downloaded, total int64)
+}

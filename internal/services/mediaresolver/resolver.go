@@ -88,6 +88,7 @@ func (r *Resolver) Resolve(ctx context.Context, ep domain.Episode, pref domain.Q
 
 	r.logger.Info("media resolved",
 		domain.F("video", resolved.Video.Resolution),
+		domain.F("bitrate_kbps", resolved.Video.BitRate),
 		domain.F("audio_tracks", len(resolved.Audio)),
 		domain.F("subtitle_tracks", len(resolved.Subtitles)),
 	)

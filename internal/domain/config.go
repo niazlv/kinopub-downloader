@@ -69,6 +69,11 @@ type RunConfig struct {
 	// path. This allows advanced users to override encoding settings (e.g.
 	// transcode on the fly) or add filters.
 	FFmpegExtraArgs []string
+
+	// NoChunked disables the chunked HTTP download mode. When false (default),
+	// progressive MP4 sources are downloaded via HTTP Range requests with
+	// resume capability. When true, all downloads go through ffmpeg directly.
+	NoChunked bool
 }
 
 // RequestAuth carries credentials and request-shaping headers applied to every

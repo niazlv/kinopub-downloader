@@ -31,6 +31,7 @@ type VideoTrack struct {
 	Index      int
 	Resolution string // e.g. "1920x1080"
 	Bandwidth  int
+	BitRate    int // actual bitrate in kb/s from ffprobe (0 if unknown)
 }
 
 // AudioTrack describes a single audio stream.

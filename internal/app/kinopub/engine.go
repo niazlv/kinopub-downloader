@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"kinopub_downloader/internal/domain"
+	"kinopub_downloader/internal/lib/fsutil"
 )
 
 // engine orchestrates the download workflow using injected dependencies.
@@ -55,6 +56,13 @@ func (e *engine) run(ctx context.Context, cfg domain.RunConfig) (domain.RunResul
 	series, err := e.deps.FeedParser.Parse(ctx, feedSrc)
 	if err != nil {
 		return domain.RunResult{}, err
+	}
+
+	// 2b. Now that we know the series title, point the state store at the
+	// series download directory so the state file lives alongside the media.
+	seriesDir := e.seriesDirPath(cfg.OutputPath, series)
+	if ss, ok := e.deps.StateStore.(interface{ SetSeriesDir(string) }); ok {
+		ss.SetSeriesDir(seriesDir)
 	}
 
 	// 3. Load state for the series
@@ -108,7 +116,7 @@ func (e *engine) run(ctx context.Context, cfg domain.RunConfig) (domain.RunResul
 	// 6. Download series poster for embedding as cover art.
 	var posterPath string
 	if series.PosterURL != "" {
-		p, err := e.downloadPoster(ctx, series.PosterURL, cfg.OutputPath)
+		p, err := e.downloadPoster(ctx, series.PosterURL, seriesDir)
 		if err != nil {
 			log.Debug("poster download failed, skipping cover art embedding",
 				domain.F("error", err.Error()))
@@ -206,6 +214,17 @@ func (e *engine) run(ctx context.Context, cfg domain.RunConfig) (domain.RunResul
 				consecutiveFails = 0
 				mu.Unlock()
 
+				// Log resolved quality info.
+				qualityInfo := media.Video.Resolution
+				if media.Video.BitRate > 0 {
+					qualityInfo = fmt.Sprintf("%s @ %d kbps", media.Video.Resolution, media.Video.BitRate)
+				}
+				log.Info("media resolved",
+					domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
+					domain.F("quality", qualityInfo),
+					domain.F("audio_tracks", len(media.Audio)),
+				)
+
 				// Build output path.
 				outPath, err := e.deps.OutputLayout.EpisodePath(cfg.OutputPath, series, ep)
 				if err != nil {
@@ -288,13 +307,15 @@ func (e *engine) run(ctx context.Context, cfg domain.RunConfig) (domain.RunResul
 					fileSize = info.Size()
 				}
 				completedInfo := domain.CompletedInfo{
-					Key:      ep.Key,
-					Path:     job.OutPath,
-					Bytes:    fileSize,
-					Title:    ep.Title,
-					Quality:  ep.Quality,
-					PageLink: ep.PageLink,
-					MediaURL: job.Media.Source.URL,
+					Key:        ep.Key,
+					Path:       job.OutPath,
+					Bytes:      fileSize,
+					Title:      ep.Title,
+					Quality:    ep.Quality,
+					Resolution: job.Media.Video.Resolution,
+					BitRate:    job.Media.Video.BitRate,
+					PageLink:   ep.PageLink,
+					MediaURL:   job.Media.Source.URL,
 				}
 				if err := e.deps.StateStore.MarkCompleted(ctx, completedInfo); err != nil {
 					log.Warn("failed to persist state",
@@ -422,6 +443,15 @@ type downloadExecutor struct {
 func (d *downloadExecutor) Execute(ctx context.Context, job domain.Job) error {
 	d.reporter.EpisodeStarted(job.Episode.Key)
 	return d.downloader.Download(ctx, job, d.reporter)
+}
+
+// seriesDirPath computes the series download directory path using the same
+// sanitization logic as OutputLayout. This is used to place the state file
+// inside the series folder.
+func (e *engine) seriesDirPath(root string, series domain.Series) string {
+	fallback := fmt.Sprintf("series_%s", string(series.ID))
+	seriesDir := fsutil.SanitizeComponent(series.Title, fallback)
+	return filepath.Join(root, seriesDir)
 }
 
 // downloadPoster downloads the series poster image to a temporary file in outputDir.

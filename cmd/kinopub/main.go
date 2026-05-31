@@ -79,6 +79,7 @@ func run() int {
 		feedFile    string
 		ffmpegArgs  string
 		ffmpegX     ffmpegExtraList
+		noChunked   bool
 	)
 
 	fs := flag.NewFlagSet("kinopub", flag.ContinueOnError)
@@ -110,6 +111,7 @@ func run() int {
 	fs.StringVar(&feedFile, "feed-file", "", "read the RSS feed from a local file instead of fetching it over the network")
 	fs.StringVar(&ffmpegArgs, "ffmpeg-args", "", "extra ffmpeg arguments as a single string (advanced, e.g. \"-c:v libx265 -crf 28\")")
 	fs.Var(&ffmpegX, "x", "extra ffmpeg argument (repeatable, advanced, e.g. --x \"-c:v\" --x libx265)")
+	fs.BoolVar(&noChunked, "no-chunked", false, "disable chunked HTTP download (use ffmpeg streaming for all sources)")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 
 	fs.Usage = func() {
@@ -304,6 +306,7 @@ func run() int {
 		BrowserCookies:  browserCk.value,
 		FeedFile:        feedFile,
 		FFmpegExtraArgs: extraFFmpegArgs,
+		NoChunked:       noChunked,
 	}
 
 	// Apply defaults and validate.
@@ -445,6 +448,8 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 		downloader.WithFFmpegPath(cfg.FFmpegPath),
 		downloader.WithAuth(auth),
 		downloader.WithExtraArgs(cfg.FFmpegExtraArgs),
+		downloader.WithNoChunked(cfg.NoChunked),
+		downloader.WithHTTPClient(httpClient),
 	)
 
 	// Scheduler.
@@ -746,17 +751,29 @@ func runDoctor(args []string) int {
 	fs.SetOutput(os.Stderr)
 
 	var (
-		outputDir string
-		fix       bool
-		cleanTmp  bool
-		verbose   bool
+		outputDir   string
+		fix         bool
+		cleanTmp    bool
+		verbose     bool
+		skipProbe   bool
+		ffprobePath string
+		cookie      string
+		userAgent   string
+		browserCk   browserCookiesFlag
+		proxyURL    string
 	)
 
 	fs.StringVar(&outputDir, "output", "", "output directory to check (default: current directory)")
 	fs.StringVar(&outputDir, "o", "", "output directory to check (shorthand)")
-	fs.BoolVar(&fix, "fix", false, "automatically repair state file (remove broken entries so they get re-downloaded)")
+	fs.BoolVar(&fix, "fix", false, "repair state file (remove broken entries, delete corrupt files)")
 	fs.BoolVar(&cleanTmp, "clean-tmp", false, "delete orphan .tmp files from interrupted downloads")
 	fs.BoolVar(&verbose, "v", false, "verbose output")
+	fs.BoolVar(&skipProbe, "skip-probe", false, "skip duration verification (no network, faster)")
+	fs.StringVar(&ffprobePath, "ffprobe", "", "ffprobe binary path (default: ffprobe on PATH)")
+	fs.StringVar(&cookie, "cookie", "", "Cookie header for resolving source")
+	fs.StringVar(&userAgent, "user-agent", "", "User-Agent for resolving source")
+	fs.Var(&browserCk, "browser-cookies", "auto-load cookies: safari, chrome, firefox, or auto")
+	fs.StringVar(&proxyURL, "proxy", "", "proxy URL (http, https, or socks5)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Verify downloaded files against the state file and repair inconsistencies.\n\n")
@@ -765,10 +782,15 @@ func runDoctor(args []string) int {
 		fmt.Fprintf(os.Stderr, "The doctor checks for:\n")
 		fmt.Fprintf(os.Stderr, "  • Files recorded as completed but missing on disk\n")
 		fmt.Fprintf(os.Stderr, "  • Files that are truncated (smaller than recorded size)\n")
+		fmt.Fprintf(os.Stderr, "  • Files whose duration doesn't match the source\n")
+		fmt.Fprintf(os.Stderr, "    (resolves fresh media URLs via the same pipeline as download)\n")
 		fmt.Fprintf(os.Stderr, "  • State entries with no file path (incomplete records)\n")
 		fmt.Fprintf(os.Stderr, "  • Orphan .tmp files from interrupted downloads\n\n")
-		fmt.Fprintf(os.Stderr, "With --fix, broken state entries are removed so the next download\n")
-		fmt.Fprintf(os.Stderr, "run will re-download the affected episodes.\n\n")
+		fmt.Fprintf(os.Stderr, "Duration verification resolves the series from the source (page_link/feed_url\n")
+		fmt.Fprintf(os.Stderr, "in state metadata), gets fresh media URLs, probes them with ffprobe, and\n")
+		fmt.Fprintf(os.Stderr, "compares with local file duration. No hardcoded thresholds.\n\n")
+		fmt.Fprintf(os.Stderr, "With --fix, broken state entries are removed and corrupt files deleted,\n")
+		fmt.Fprintf(os.Stderr, "so the next download run will re-download the affected episodes.\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fs.PrintDefaults()
 	}
@@ -780,11 +802,48 @@ func runDoctor(args []string) int {
 		return 1
 	}
 
+	// Handle --browser-cookies consuming the next positional arg.
+	posArgs := fs.Args()
+	if browserCk.set && browserCk.value == browsercookies.BrowserAuto && len(posArgs) > 0 {
+		if isKnownBrowser(posArgs[0]) {
+			browserCk.value = strings.ToLower(posArgs[0])
+		}
+	}
+
 	if outputDir == "" {
 		outputDir, _ = os.Getwd()
 	}
 
-	// Set up a minimal logger for doctor output.
+	// Resolve auth (same logic as main download command).
+	resolvedCookie := cookie
+	if resolvedCookie == "" && browserCk.set {
+		ck, cerr := browsercookies.Load(browserCk.value, "kino.pub")
+		if cerr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not load cookies from browser %q: %v\n", browserCk.value, cerr)
+		} else {
+			resolvedCookie = ck
+		}
+	}
+	if resolvedCookie == "" {
+		stored, err := credstore.Load()
+		if err == nil && !stored.IsEmpty() {
+			resolvedCookie = stored.Cookie
+			if userAgent == "" && stored.UserAgent != "" {
+				userAgent = stored.UserAgent
+			}
+		}
+	}
+	if userAgent == "" {
+		userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
+	}
+
+	auth := domain.RequestAuth{
+		Cookie:    resolvedCookie,
+		UserAgent: userAgent,
+		Headers:   map[string]string{"Referer": "https://kino.pub/"},
+	}
+
+	// Set up logger.
 	coord := logx.NewCoordinator(os.Stderr)
 	var handlers []logx.Handler
 	verb := domain.VerbosityNormal
@@ -798,14 +857,44 @@ func runDoctor(args []string) int {
 	}
 	logger := logx.New(handlers)
 
-	opts := doctor.Options{
-		OutputDir: outputDir,
-		Fix:       fix,
-		CleanTmp:  cleanTmp,
-		Verbose:   verbose,
+	// Wire up dependencies — same services as the main download command.
+	proxyProv, err := proxyprovider.New(proxyURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	httpClient := httpx.WithAuth(proxyProv.HTTPClient(), auth)
+
+	var resolverOpts []inputresolver.Option
+	if !auth.IsZero() {
+		scraper := pagescraper.New(httpClient, logger)
+		resolverOpts = append(resolverOpts, inputresolver.WithPageScraper(scraper))
+	}
+	inputRes := inputresolver.New(logger, resolverOpts...)
+	feedPars := feedparser.New(httpClient, logger)
+	mediaRes := mediaresolver.New(
+		httpClient,
+		makeRunOutput(),
+		logger,
+		auth,
+	)
+
+	deps := doctor.Deps{
+		Logger:        logger,
+		InputResolver: inputRes,
+		FeedParser:    feedPars,
+		MediaResolver: mediaRes,
 	}
 
-	report, err := doctor.Run(context.Background(), opts, logger)
+	opts := doctor.Options{
+		OutputDir:   outputDir,
+		Fix:         fix,
+		CleanTmp:    cleanTmp,
+		SkipProbe:   skipProbe,
+		FFprobePath: ffprobePath,
+	}
+
+	report, err := doctor.Run(context.Background(), deps, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
@@ -834,6 +923,9 @@ func printDoctorReport(report *doctor.Report, fixed bool) {
 	}
 	fmt.Fprintf(os.Stderr, "State file: %s\n", report.StateFile)
 	fmt.Fprintf(os.Stderr, "Entries:    %d total, %d healthy\n", report.TotalInState, report.Healthy)
+	if report.Skipped > 0 {
+		fmt.Fprintf(os.Stderr, "Skipped:    %d (remote links expired, could not verify duration)\n", report.Skipped)
+	}
 	fmt.Fprintf(os.Stderr, "\n")
 
 	if !report.HasIssues() {
@@ -850,6 +942,7 @@ func printDoctorReport(report *doctor.Report, fixed bool) {
 	kindOrder := []doctor.IssueKind{
 		doctor.IssueMissing,
 		doctor.IssueTruncated,
+		doctor.IssueDurationMismatch,
 		doctor.IssueSizeMismatch,
 		doctor.IssueNoPath,
 		doctor.IssueOrphanTmp,

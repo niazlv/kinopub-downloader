@@ -30,19 +30,23 @@ type CompletedRec struct {
 	CompletedAt time.Time `json:"completed_at"`
 
 	// Episode metadata for recovery.
-	Title    string `json:"title,omitempty"`
-	Quality  string `json:"quality,omitempty"`
-	PageLink string `json:"page_link,omitempty"`
-	MediaURL string `json:"media_url,omitempty"`
+	Title      string `json:"title,omitempty"`
+	Quality    string `json:"quality,omitempty"`
+	Resolution string `json:"resolution,omitempty"` // actual resolution from ffprobe, e.g. "1920x1072"
+	BitRate    int    `json:"bitrate_kbps,omitempty"` // video bitrate in kb/s from ffprobe
+	PageLink   string `json:"page_link,omitempty"`
+	MediaURL   string `json:"media_url,omitempty"`
 }
 
 // CompletedInfo carries all information needed to record a completed download.
 type CompletedInfo struct {
-	Key      EpisodeKey
-	Path     string
-	Bytes    int64
-	Title    string
-	Quality  string
-	PageLink string
-	MediaURL string
+	Key        EpisodeKey
+	Path       string
+	Bytes      int64
+	Title      string
+	Quality    string
+	Resolution string // actual resolution from ffprobe
+	BitRate    int    // video bitrate in kb/s from ffprobe
+	PageLink   string
+	MediaURL   string
 }

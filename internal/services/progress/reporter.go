@@ -50,7 +50,13 @@ type episodeState struct {
 	startTime        time.Time
 	firstProgressAt  time.Time // when we first received a non-zero progress update
 	firstProgressPct int       // percent at that moment
-	lastBytes        int64     // for speed estimation (future use)
+
+	// Byte-level tracking for speed and size display.
+	totalBytes      int64     // total file size (0 if unknown)
+	downloadedBytes int64     // bytes downloaded so far
+	lastSpeedBytes  int64     // bytes at last speed sample
+	lastSpeedTime   time.Time // time of last speed sample
+	speed           float64   // current speed in bytes/sec (smoothed)
 }
 
 // NewLive creates a LiveReporter that writes to w and coordinates with the
@@ -125,6 +131,44 @@ func (r *LiveReporter) TrackProgress(key domain.EpisodeKey, track domain.TrackRe
 	if now.Sub(r.lastRender) >= 200*time.Millisecond {
 		r.lastRender = now
 		r.render()
+	}
+}
+
+// ByteProgress reports byte-level download progress for speed calculation.
+func (r *LiveReporter) ByteProgress(key domain.EpisodeKey, downloaded, total int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	ep, ok := r.currentEpisodes[key]
+	if !ok {
+		return
+	}
+
+	ep.downloadedBytes = downloaded
+	ep.totalBytes = total
+
+	// Calculate speed using a sliding window approach.
+	now := time.Now()
+	if ep.lastSpeedTime.IsZero() {
+		ep.lastSpeedTime = now
+		ep.lastSpeedBytes = downloaded
+		return
+	}
+
+	elapsed := now.Sub(ep.lastSpeedTime)
+	if elapsed >= 1*time.Second {
+		byteDiff := downloaded - ep.lastSpeedBytes
+		instantSpeed := float64(byteDiff) / elapsed.Seconds()
+
+		// Exponential moving average for smooth speed display.
+		if ep.speed == 0 {
+			ep.speed = instantSpeed
+		} else {
+			ep.speed = ep.speed*0.7 + instantSpeed*0.3
+		}
+
+		ep.lastSpeedTime = now
+		ep.lastSpeedBytes = downloaded
 	}
 }
 
@@ -284,12 +328,29 @@ func (r *LiveReporter) renderFrame() {
 
 			bar := r.progressBar(epPct, 25, termx.Yellow)
 
-			// ETA estimation: use time since first real progress, not since
-			// EpisodeStarted (which includes resolve + ffmpeg startup time).
+			// Speed and size info.
+			speedStr := ""
+			if ep.speed > 0 {
+				speedStr = r.colorize(termx.Cyan, fmt.Sprintf(" %s/s", formatBytesShort(ep.speed)))
+			}
+
+			sizeStr := ""
+			if ep.totalBytes > 0 {
+				sizeStr = r.colorize(termx.Gray, fmt.Sprintf(" %s/%s",
+					formatBytesShort(float64(ep.downloadedBytes)),
+					formatBytesShort(float64(ep.totalBytes))))
+			}
+
+			// ETA estimation: use speed if available (more accurate for chunked),
+			// otherwise fall back to time-based estimation.
 			etaStr := ""
-			if epPct > 2 && epPct < 100 && !ep.firstProgressAt.IsZero() {
+			if ep.speed > 0 && ep.totalBytes > 0 && epPct < 100 {
+				remaining := float64(ep.totalBytes-ep.downloadedBytes) / ep.speed
+				if remaining > 0 {
+					etaStr = r.colorize(termx.Gray, fmt.Sprintf(" ETA %s", formatDuration(time.Duration(remaining*float64(time.Second)))))
+				}
+			} else if epPct > 2 && epPct < 100 && !ep.firstProgressAt.IsZero() {
 				elapsed := time.Since(ep.firstProgressAt)
-				// pctSinceFirst: how much progress was made since we started tracking
 				pctDone := epPct - ep.firstProgressPct
 				if pctDone > 0 {
 					totalEstimate := elapsed * time.Duration(100-ep.firstProgressPct) / time.Duration(pctDone)
@@ -300,9 +361,11 @@ func (r *LiveReporter) renderFrame() {
 				}
 			}
 
-			epLine := fmt.Sprintf("    %s %s%s",
+			epLine := fmt.Sprintf("    %s %s%s%s%s",
 				r.colorize(termx.Bold, fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
 				bar,
+				speedStr,
+				sizeStr,
 				etaStr)
 			lines = append(lines, epLine)
 		}
@@ -477,3 +540,25 @@ func min(a, b int) int {
 
 // Verify that *LiveReporter satisfies domain.ProgressReporter at compile time.
 var _ domain.ProgressReporter = (*LiveReporter)(nil)
+
+// Verify that *LiveReporter satisfies domain.ByteProgressSink at compile time.
+var _ domain.ByteProgressSink = (*LiveReporter)(nil)
+
+// formatBytesShort formats a byte count as a compact human-readable string.
+func formatBytesShort(b float64) string {
+	const (
+		KB = 1024.0
+		MB = 1024.0 * KB
+		GB = 1024.0 * MB
+	)
+	switch {
+	case b >= GB:
+		return fmt.Sprintf("%.1fG", b/GB)
+	case b >= MB:
+		return fmt.Sprintf("%.1fM", b/MB)
+	case b >= KB:
+		return fmt.Sprintf("%.0fK", b/KB)
+	default:
+		return fmt.Sprintf("%.0fB", b)
+	}
+}

@@ -3,14 +3,16 @@
 //
 // It detects:
 //   - Files recorded in state but missing on disk
-//   - Files whose on-disk size doesn't match the recorded bytes (truncated/corrupt)
-//   - State entries with empty path or zero bytes (incomplete records from old versions)
+//   - Files whose on-disk size doesn't match the recorded bytes
+//   - State entries with empty path or zero bytes (incomplete records)
 //   - Orphan .tmp files left from interrupted downloads
+//   - Files whose duration doesn't match the source (resolved via the same
+//     InputResolver → FeedParser → MediaResolver pipeline as the downloader)
 //
 // Repair actions:
-//   - Remove state entries for missing/corrupt files so they get re-downloaded
+//   - Remove state entries for broken files so they get re-downloaded
+//   - Delete truncated/corrupt files from disk
 //   - Delete orphan .tmp files
-//   - Optionally trigger re-download of affected episodes
 package doctor
 
 import (
@@ -18,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -43,16 +46,12 @@ type Issue struct {
 type IssueKind int
 
 const (
-	// IssueMissing — file recorded in state but not found on disk.
-	IssueMissing IssueKind = iota
-	// IssueTruncated — file exists but is smaller than recorded.
-	IssueTruncated
-	// IssueSizeMismatch — file exists but size differs from recorded (larger).
-	IssueSizeMismatch
-	// IssueNoPath — state entry has no path recorded (legacy/broken entry).
-	IssueNoPath
-	// IssueOrphanTmp — a .tmp file exists without a corresponding final file.
-	IssueOrphanTmp
+	IssueMissing          IssueKind = iota // file not found on disk
+	IssueTruncated                         // file smaller than recorded
+	IssueSizeMismatch                      // file size differs (larger)
+	IssueNoPath                            // state entry has no path
+	IssueOrphanTmp                         // orphan .tmp file
+	IssueDurationMismatch                  // local duration < source duration
 )
 
 // String returns a human-readable label for the issue kind.
@@ -68,6 +67,8 @@ func (k IssueKind) String() string {
 		return "NO_PATH"
 	case IssueOrphanTmp:
 		return "ORPHAN_TMP"
+	case IssueDurationMismatch:
+		return "DURATION_MISMATCH"
 	default:
 		return "UNKNOWN"
 	}
@@ -75,13 +76,14 @@ func (k IssueKind) String() string {
 
 // Report is the result of a doctor check.
 type Report struct {
-	StateFile   string
-	SeriesID    string
-	SeriesTitle string
+	StateFile    string
+	SeriesID     string
+	SeriesTitle  string
 	TotalInState int
-	Healthy     int
-	Issues      []Issue
-	OrphanTmps  []string // paths to orphan .tmp files
+	Healthy      int
+	Issues       []Issue
+	OrphanTmps   []string
+	Skipped      int // entries where remote probe was not possible
 }
 
 // HasIssues reports whether any problems were found.
@@ -89,24 +91,44 @@ func (r *Report) HasIssues() bool {
 	return len(r.Issues) > 0 || len(r.OrphanTmps) > 0
 }
 
+// Deps holds the injectable dependencies for the doctor — same interfaces
+// used by the main download engine, enabling full reuse of the resolution pipeline.
+type Deps struct {
+	Logger        domain.Logger
+	InputResolver domain.InputResolver
+	FeedParser    domain.FeedParser
+	MediaResolver domain.MediaResolver
+}
+
 // Options configures the doctor behavior.
 type Options struct {
 	// OutputDir is the directory where downloads are stored and the state file lives.
 	OutputDir string
-	// Fix when true, automatically repairs the state file (removes broken entries).
+	// Fix when true, automatically repairs the state file.
 	Fix bool
 	// CleanTmp when true, deletes orphan .tmp files.
 	CleanTmp bool
-	// Verbose enables detailed output.
-	Verbose bool
+	// SkipProbe disables duration verification (faster, no network).
+	SkipProbe bool
+	// FFprobePath for local file probing (default: "ffprobe").
+	FFprobePath string
+	// DurationTolerance is the acceptable ratio difference (0.0–1.0). Default 0.05.
+	DurationTolerance float64
 }
 
-// stateFileName matches the constant in statestore package.
 const stateFileName = ".kinopub-state.json"
+const defaultDurationTolerance = 0.05
 
 // Run performs the doctor check and optionally repairs issues.
-func Run(_ context.Context, opts Options, logger domain.Logger) (*Report, error) {
-	log := logger.Component("doctor")
+func Run(ctx context.Context, deps Deps, opts Options) (*Report, error) {
+	log := deps.Logger.Component("doctor")
+
+	if opts.FFprobePath == "" {
+		opts.FFprobePath = "ffprobe"
+	}
+	if opts.DurationTolerance == 0 {
+		opts.DurationTolerance = defaultDurationTolerance
+	}
 
 	stateFilePath := filepath.Join(opts.OutputDir, stateFileName)
 
@@ -126,7 +148,6 @@ func Run(_ context.Context, opts Options, logger domain.Logger) (*Report, error)
 			domain.F("error", err.Error()),
 		)
 		if opts.Fix {
-			// Back up the corrupt file and create an empty state.
 			backupPath := stateFilePath + ".corrupt." + time.Now().Format("20060102-150405")
 			if copyErr := copyFile(stateFilePath, backupPath); copyErr == nil {
 				log.Info("backed up corrupt state file", domain.F("backup", backupPath))
@@ -163,14 +184,78 @@ func Run(_ context.Context, opts Options, logger domain.Logger) (*Report, error)
 		report.SeriesTitle = state.Metadata.Title
 	}
 
-	// 2. Check each completed entry.
+	// 2. Resolve the series catalog from the source to get fresh media URLs
+	//    and durations for comparison. This uses the same pipeline as the downloader.
+	var episodeDurations map[string]time.Duration // key = "S{n}E{n}" → expected duration
+
+	hasFFprobe := false
+	if !opts.SkipProbe {
+		if _, err := exec.LookPath(opts.FFprobePath); err == nil {
+			hasFFprobe = true
+		} else {
+			log.Warn("ffprobe not found, skipping duration verification")
+		}
+	}
+
+	if hasFFprobe && !opts.SkipProbe && state.Metadata != nil {
+		episodeDurations = resolveExpectedDurations(ctx, deps, state, log)
+	}
+
+	// 3. Check each completed entry.
 	for key, rec := range state.Completed {
 		issue := checkEntry(key, rec, opts.OutputDir)
 		if issue != nil {
 			report.Issues = append(report.Issues, *issue)
-		} else {
-			report.Healthy++
+			continue
 		}
+
+		// File exists and size matches — verify duration against source.
+		if hasFFprobe && rec.Path != "" && episodeDurations != nil {
+			expectedDur, hasExpected := episodeDurations[key]
+			if !hasExpected {
+				// Could not resolve this episode from the feed — skip.
+				report.Skipped++
+				report.Healthy++
+				continue
+			}
+
+			fullPath := rec.Path
+			if !filepath.IsAbs(fullPath) {
+				fullPath = filepath.Join(opts.OutputDir, fullPath)
+			}
+
+			localDur, err := probeLocalDuration(ctx, opts.FFprobePath, fullPath)
+			if err != nil {
+				log.Debug("ffprobe failed on local file, skipping",
+					domain.F("key", key),
+					domain.F("error", err.Error()),
+				)
+				report.Skipped++
+				report.Healthy++
+				continue
+			}
+
+			if expectedDur > 0 {
+				ratio := float64(localDur) / float64(expectedDur)
+				threshold := 1.0 - opts.DurationTolerance
+
+				if ratio < threshold {
+					report.Issues = append(report.Issues, Issue{
+						Key:         key,
+						Season:      rec.Season,
+						Episode:     rec.Episode,
+						Kind:        IssueDurationMismatch,
+						Detail:      fmt.Sprintf("local %s vs source %s (%.1f%%) — file truncated", localDur, expectedDur, ratio*100),
+						StatePath:   rec.Path,
+						StateBytes:  rec.Bytes,
+						ActualBytes: rec.Bytes,
+					})
+					continue
+				}
+			}
+		}
+
+		report.Healthy++
 	}
 
 	// Sort issues by key for stable output.
@@ -178,7 +263,7 @@ func Run(_ context.Context, opts Options, logger domain.Logger) (*Report, error)
 		return report.Issues[i].Key < report.Issues[j].Key
 	})
 
-	// 3. Scan for orphan .tmp files.
+	// 4. Scan for orphan .tmp files.
 	orphans := findOrphanTmps(opts.OutputDir)
 	report.OrphanTmps = orphans
 	for _, tmp := range orphans {
@@ -189,19 +274,92 @@ func Run(_ context.Context, opts Options, logger domain.Logger) (*Report, error)
 		})
 	}
 
-	// 4. Apply fixes if requested.
+	// 5. Apply fixes if requested.
 	if opts.Fix && len(report.Issues) > 0 {
 		fixed := applyFixes(stateFilePath, &state, report, opts, log)
-		log.Info("fixes applied",
-			domain.F("entries_removed", fixed),
-			domain.F("remaining_issues", len(report.Issues)-fixed),
-		)
+		log.Info("fixes applied", domain.F("entries_removed", fixed))
 	}
 
 	return report, nil
 }
 
-// checkEntry verifies a single completed record against the filesystem.
+// resolveExpectedDurations uses the existing InputResolver → FeedParser →
+// MediaResolver pipeline to obtain the expected duration for each episode
+// from the source. This is the same path the downloader uses — no hardcoded
+// values, the source is the single source of truth.
+func resolveExpectedDurations(ctx context.Context, deps Deps, state domain.DownloadState, log domain.Logger) map[string]time.Duration {
+	result := make(map[string]time.Duration)
+
+	if state.Metadata == nil {
+		return result
+	}
+
+	// Determine the input URL to resolve the feed.
+	inputURL := state.Metadata.InputURL
+	if inputURL == "" {
+		inputURL = state.Metadata.FeedURL
+	}
+	if inputURL == "" {
+		log.Warn("no input_url or feed_url in state metadata, cannot resolve source durations")
+		return result
+	}
+
+	// Resolve input → FeedSource (same as engine step 1).
+	log.Info("resolving source for duration verification", domain.F("url", inputURL))
+	feedSrc, err := deps.InputResolver.Resolve(ctx, inputURL)
+	if err != nil {
+		log.Warn("could not resolve input URL for verification",
+			domain.F("url", inputURL),
+			domain.F("error", err.Error()),
+		)
+		return result
+	}
+
+	// Parse feed → Series (same as engine step 2).
+	series, err := deps.FeedParser.Parse(ctx, feedSrc)
+	if err != nil {
+		log.Warn("could not parse feed for verification",
+			domain.F("error", err.Error()),
+		)
+		return result
+	}
+
+	// For each episode in the series, resolve media to get duration.
+	for _, season := range series.Seasons {
+		for _, ep := range season.Episodes {
+			key := fmt.Sprintf("S%dE%d", ep.Key.Season, ep.Key.Episode)
+
+			// Only resolve episodes that are in our state (no point checking others).
+			if _, inState := state.Completed[key]; !inState {
+				continue
+			}
+
+			log.Debug("resolving media for duration check", domain.F("key", key))
+
+			resolved, err := deps.MediaResolver.Resolve(ctx, ep, "")
+			if err != nil {
+				log.Debug("media resolution failed, skipping duration check",
+					domain.F("key", key),
+					domain.F("error", err.Error()),
+				)
+				continue
+			}
+
+			if resolved.Duration > 0 {
+				result[key] = resolved.Duration
+			}
+		}
+	}
+
+	log.Info("resolved source durations",
+		domain.F("resolved", len(result)),
+		domain.F("total_in_state", len(state.Completed)),
+	)
+
+	return result
+}
+
+// checkEntry verifies a single completed record against the filesystem (size only).
 func checkEntry(key string, rec domain.CompletedRec, outputDir string) *Issue {
 	base := Issue{
 		Key:        key,
@@ -211,24 +369,19 @@ func checkEntry(key string, rec domain.CompletedRec, outputDir string) *Issue {
 		StateBytes: rec.Bytes,
 	}
 
-	// Entry has no path — it was recorded before path tracking was added,
-	// or the download was interrupted before the path was set.
 	if rec.Path == "" {
 		if rec.Bytes == 0 {
-			// Legacy entry with no path and no bytes — likely a placeholder.
 			base.Kind = IssueNoPath
 			base.Detail = "state entry has no file path and zero bytes (incomplete record)"
 			base.ActualBytes = -1
 			return &base
 		}
-		// Has bytes but no path — unusual.
 		base.Kind = IssueNoPath
 		base.Detail = fmt.Sprintf("state entry has no file path but records %d bytes", rec.Bytes)
 		base.ActualBytes = -1
 		return &base
 	}
 
-	// Resolve the full path. If the recorded path is relative, join with outputDir.
 	fullPath := rec.Path
 	if !filepath.IsAbs(fullPath) {
 		fullPath = filepath.Join(outputDir, fullPath)
@@ -242,7 +395,6 @@ func checkEntry(key string, rec domain.CompletedRec, outputDir string) *Issue {
 			base.ActualBytes = -1
 			return &base
 		}
-		// Some other stat error (permissions, etc.)
 		base.Kind = IssueMissing
 		base.Detail = fmt.Sprintf("cannot stat file: %v", err)
 		base.ActualBytes = -1
@@ -252,7 +404,6 @@ func checkEntry(key string, rec domain.CompletedRec, outputDir string) *Issue {
 	actualSize := info.Size()
 	base.ActualBytes = actualSize
 
-	// Compare sizes.
 	if rec.Bytes > 0 && actualSize < rec.Bytes {
 		base.Kind = IssueTruncated
 		base.Detail = fmt.Sprintf("file is truncated: %d bytes on disk vs %d recorded (%.1f%%)",
@@ -267,34 +418,66 @@ func checkEntry(key string, rec domain.CompletedRec, outputDir string) *Issue {
 		return &base
 	}
 
-	// File exists and size matches (or state has 0 bytes which we can't verify).
-	// If state has 0 bytes but file exists, update the state bytes on fix.
-	if rec.Bytes == 0 && actualSize > 0 {
-		// Not really an issue — the file is there, just the state is incomplete.
-		// We'll silently fix this if --fix is set.
-		return nil
-	}
-
 	return nil
 }
 
-// findOrphanTmps walks the output directory looking for .tmp files that don't
-// have a corresponding final file.
+// probeLocalDuration runs ffprobe on a local file and returns its duration.
+func probeLocalDuration(ctx context.Context, ffprobePath, filePath string) (time.Duration, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, ffprobePath,
+		"-v", "quiet",
+		"-print_format", "json",
+		"-show_format",
+		filePath,
+	)
+
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("ffprobe: %w", err)
+	}
+
+	return parseDurationFromJSON(output)
+}
+
+// parseDurationFromJSON extracts duration from ffprobe JSON output.
+func parseDurationFromJSON(data []byte) (time.Duration, error) {
+	var result struct {
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return 0, fmt.Errorf("parse ffprobe output: %w", err)
+	}
+
+	if result.Format.Duration == "" {
+		return 0, fmt.Errorf("no duration in ffprobe output")
+	}
+
+	var secs float64
+	if _, err := fmt.Sscanf(result.Format.Duration, "%f", &secs); err != nil {
+		return 0, fmt.Errorf("parse duration %q: %w", result.Format.Duration, err)
+	}
+
+	return time.Duration(secs * float64(time.Second)), nil
+}
+
+// findOrphanTmps walks the output directory looking for .tmp files.
 func findOrphanTmps(outputDir string) []string {
 	var orphans []string
 	_ = filepath.Walk(outputDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil // skip unreadable entries
+			return nil
 		}
 		if info.IsDir() {
-			// Skip hidden directories (like .git).
 			if strings.HasPrefix(info.Name(), ".") && path != outputDir {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 		if strings.HasSuffix(info.Name(), ".tmp") {
-			// Check if the final file (without .tmp) exists.
 			finalPath := strings.TrimSuffix(path, ".tmp")
 			if _, err := os.Stat(finalPath); os.IsNotExist(err) {
 				orphans = append(orphans, path)
@@ -305,15 +488,13 @@ func findOrphanTmps(outputDir string) []string {
 	return orphans
 }
 
-// applyFixes modifies the state file to remove broken entries and cleans up
-// orphan tmp files. Returns the number of state entries removed.
+// applyFixes modifies the state file to remove broken entries.
 func applyFixes(stateFilePath string, state *domain.DownloadState, report *Report, opts Options, log domain.Logger) int {
 	removed := 0
 
 	for _, issue := range report.Issues {
 		switch issue.Kind {
-		case IssueMissing, IssueTruncated, IssueNoPath:
-			// Remove the entry from state so it gets re-downloaded next run.
+		case IssueMissing, IssueTruncated, IssueNoPath, IssueDurationMismatch:
 			if issue.Key != "" {
 				delete(state.Completed, issue.Key)
 				removed++
@@ -323,14 +504,14 @@ func applyFixes(stateFilePath string, state *domain.DownloadState, report *Repor
 				)
 			}
 
-			// If the file exists but is truncated, delete it.
-			if issue.Kind == IssueTruncated && issue.StatePath != "" {
+			// Delete broken files from disk.
+			if (issue.Kind == IssueTruncated || issue.Kind == IssueDurationMismatch) && issue.StatePath != "" {
 				fullPath := issue.StatePath
 				if !filepath.IsAbs(fullPath) {
 					fullPath = filepath.Join(opts.OutputDir, fullPath)
 				}
 				if err := os.Remove(fullPath); err == nil {
-					log.Info("deleted truncated file", domain.F("path", fullPath))
+					log.Info("deleted broken file", domain.F("path", fullPath))
 				}
 			}
 
@@ -343,7 +524,6 @@ func applyFixes(stateFilePath string, state *domain.DownloadState, report *Repor
 		}
 	}
 
-	// Write the repaired state.
 	if removed > 0 {
 		if err := writeState(stateFilePath, *state); err != nil {
 			log.Error("failed to write repaired state", domain.F("error", err.Error()))

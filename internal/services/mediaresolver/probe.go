@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -175,9 +176,16 @@ func parseFFprobeOutput(data []byte, source domain.MediaSource) (domain.Resolved
 		switch stream.CodecType {
 		case "video":
 			if !hasVideo {
+				bitRate := 0
+				if stream.BitRate != "" {
+					if br, err := strconv.Atoi(stream.BitRate); err == nil {
+						bitRate = br / 1000 // convert bps to kbps
+					}
+				}
 				video = domain.VideoTrack{
 					Index:      stream.Index,
 					Resolution: fmt.Sprintf("%dx%d", stream.Width, stream.Height),
+					BitRate:    bitRate,
 				}
 				hasVideo = true
 			}
