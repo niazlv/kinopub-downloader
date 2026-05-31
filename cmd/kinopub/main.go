@@ -75,8 +75,9 @@ func run() int {
 	fs.StringVar(&proxyURL, "proxy", "", "proxy URL (http, https, or socks5)")
 	fs.StringVar(&quality, "quality", "", "quality preference (e.g. 1080p)")
 	fs.StringVar(&quality, "q", "", "quality preference (shorthand)")
+	var verbose bool
 	fs.StringVar(&verbosity, "verbosity", "normal", "log verbosity: quiet, normal, verbose")
-	fs.StringVar(&verbosity, "v", "normal", "log verbosity (shorthand)")
+	fs.BoolVar(&verbose, "v", false, "enable verbose output")
 	fs.StringVar(&ffmpegPath, "ffmpeg", "", "ffmpeg binary path (default: ffmpeg on PATH)")
 	fs.StringVar(&logFile, "log-file", "", "log file path")
 	fs.StringVar(&container, "container", "mkv", "output container: mkv or mp4")
@@ -172,7 +173,10 @@ func run() int {
 		}
 	}
 
-	// Parse verbosity.
+	// Parse verbosity. The -v flag overrides --verbosity to "verbose".
+	if verbose {
+		verbosity = "verbose"
+	}
 	verb, err := parseVerbosity(verbosity)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -326,6 +330,14 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 		UserAgent: cfg.UserAgent,
 		Headers:   cfg.Headers,
 	}
+	// Always include Referer: https://kino.pub/ — the CDN (digital-cdn.net)
+	// requires it and will hang/timeout without it.
+	if auth.Headers == nil {
+		auth.Headers = make(map[string]string)
+	}
+	if auth.Headers["Referer"] == "" {
+		auth.Headers["Referer"] = "https://kino.pub/"
+	}
 	httpClient := httpx.WithAuth(proxyProv.HTTPClient(), auth)
 
 	// Input resolver.
@@ -339,6 +351,7 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 		httpClient,
 		makeRunOutput(),
 		logger,
+		auth,
 	)
 
 	// Output layout.
@@ -515,13 +528,24 @@ func (realClock) Sleep(d time.Duration)                  { time.Sleep(d) }
 func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 
 // makeRunOutput creates a RunOutputFunc that executes a command and captures stdout.
+// On failure, stderr is included in the error message for diagnostics.
 func makeRunOutput() mediaresolver.RunOutputFunc {
 	return func(ctx context.Context, name string, args, env []string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, name, args...)
 		if len(env) > 0 {
 			cmd.Env = append(os.Environ(), env...)
 		}
-		return cmd.Output()
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			errMsg := stderr.String()
+			if errMsg != "" {
+				return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(errMsg))
+			}
+			return nil, err
+		}
+		return out, nil
 	}
 }
 

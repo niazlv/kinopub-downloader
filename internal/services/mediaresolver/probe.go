@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strings"
+	"time"
 
 	"kinopub_downloader/internal/domain"
 )
@@ -23,6 +26,7 @@ type ffprobeStream struct {
 	Tags      struct {
 		Language string `json:"language"`
 		Title    string `json:"title"`
+		Name     string `json:"name"` // kino.pub uses "name" for studio/track label
 	} `json:"tags"`
 }
 
@@ -31,19 +35,119 @@ type ffprobeStream struct {
 func (r *Resolver) resolveProgressive(ctx context.Context, source domain.MediaSource) (domain.ResolvedMedia, error) {
 	r.logger.Debug("probing progressive stream", domain.F("url", source.URL))
 
-	args := []string{
+	// CDN URLs (digital-cdn.net, cdn2site.com) are redirectors that check TLS
+	// fingerprint and return 403 to non-browser clients (curl, ffprobe). But
+	// they redirect browsers to the real CDN (cdntogo.net). We resolve the
+	// redirect via Go's HTTP client (which passes the TLS check) and give
+	// ffprobe the final URL directly.
+	finalURL := source.URL
+	if r.client != nil {
+		resolved, err := r.resolveRedirect(ctx, source.URL)
+		if err != nil {
+			r.logger.Debug("redirect resolution failed, using original URL",
+				domain.F("error", err.Error()))
+		} else if resolved != source.URL {
+			r.logger.Debug("resolved CDN redirect",
+				domain.F("from", source.URL),
+				domain.F("to", resolved))
+			finalURL = resolved
+		}
+	}
+
+	var args []string
+
+	// Inject auth headers into ffprobe so it can access protected CDN URLs.
+	// IMPORTANT: Do NOT send Cookie to CDN — it causes timeouts. CDN only needs
+	// the Referer header. Cookies are for kino.pub domain only.
+	if r.auth.UserAgent != "" {
+		args = append(args, "-user_agent", r.auth.UserAgent)
+	}
+	if len(r.auth.Headers) > 0 {
+		var lines []string
+		for k, v := range r.auth.Headers {
+			lines = append(lines, k+": "+v)
+		}
+		if len(lines) > 0 {
+			args = append(args, "-headers", strings.Join(lines, "\r\n")+"\r\n")
+		}
+	}
+
+	args = append(args,
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_streams",
-		source.URL,
-	}
+		finalURL,
+	)
+
+	r.logger.Debug("ffprobe command",
+		domain.F("args", fmt.Sprintf("%v", args)),
+	)
 
 	output, err := r.runOutput(ctx, "ffprobe", args, nil)
 	if err != nil {
 		return domain.ResolvedMedia{}, fmt.Errorf("ffprobe: %w", err)
 	}
 
+	// Store the final URL in the source so downstream (ffmpeg) uses it too.
+	source.URL = finalURL
 	return parseFFprobeOutput(output, source)
+}
+
+// resolveRedirect follows HTTP redirects via the Go HTTP client and returns
+// the final URL. This bypasses CDN redirectors (digital-cdn.net, cdn2site.com)
+// that reject non-browser TLS fingerprints with 403, but redirect browsers to
+// the real CDN (cdntogo.net). Go's HTTP client passes the TLS check.
+func (r *Resolver) resolveRedirect(ctx context.Context, rawURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)
+	if err != nil {
+		return rawURL, err
+	}
+
+	// Use a client that does NOT follow redirects — we want to capture the Location.
+	noRedirectClient := &http.Client{
+		Transport: r.client.Transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Timeout: 10 * time.Second,
+	}
+
+	resp, err := noRedirectClient.Do(req)
+	if err != nil {
+		return rawURL, err
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		loc := resp.Header.Get("Location")
+		if loc != "" {
+			return loc, nil
+		}
+	}
+
+	// If no redirect (200 or error), return original URL.
+	// If 403 — the redirector rejected us too. Try with the full client (follows redirects).
+	if resp.StatusCode == 403 {
+		// Try a full GET with redirect-following client to see if it resolves.
+		fullReq, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)
+		if err != nil {
+			return rawURL, err
+		}
+		fullResp, err := r.client.Do(fullReq)
+		if err != nil {
+			return rawURL, err
+		}
+		fullResp.Body.Close()
+		// The final URL after redirects is in fullResp.Request.URL.
+		if fullResp.Request != nil && fullResp.Request.URL != nil {
+			finalURL := fullResp.Request.URL.String()
+			if finalURL != rawURL {
+				return finalURL, nil
+			}
+		}
+	}
+
+	return rawURL, nil
 }
 
 // parseFFprobeOutput parses ffprobe JSON output into a ResolvedMedia.
@@ -70,10 +174,15 @@ func parseFFprobeOutput(data []byte, source domain.MediaSource) (domain.Resolved
 				hasVideo = true
 			}
 		case "audio":
+			// Studio name: prefer "name" tag (kino.pub convention), fall back to "title".
+			studio := stream.Tags.Name
+			if studio == "" {
+				studio = stream.Tags.Title
+			}
 			track := domain.AudioTrack{
 				Index:    audioIndex,
 				Language: stream.Tags.Language,
-				Studio:   stream.Tags.Title,
+				Studio:   studio,
 			}
 			audioTracks = append(audioTracks, track)
 			audioIndex++

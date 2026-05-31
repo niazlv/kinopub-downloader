@@ -2,6 +2,8 @@ package kinopub
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"kinopub_downloader/internal/domain"
 )
@@ -11,15 +13,18 @@ type engine struct {
 	deps Dependencies
 }
 
-// run executes the full download pipeline:
-// classify → parse → load state → filter → resolve media → build jobs → submit → collect outcomes.
+// consecutiveFailLimit is the number of consecutive media resolution failures
+// before the engine stops trying further episodes. This prevents hammering the
+// CDN when links have expired or the server is blocking.
+const consecutiveFailLimit = 3
+
+// run executes the full download pipeline with LAZY resolution:
+// parse feed → filter → for each episode: resolve → download → mark complete.
+// This avoids resolving all episodes upfront (CDN links expire quickly).
 func (e *engine) run(ctx context.Context, cfg domain.RunConfig) (domain.RunResult, error) {
 	log := e.deps.Logger.Component("engine")
 
 	// 1. Resolve input → FeedSource.
-	// When a local feed file is configured, use it directly and only try to
-	// derive the SeriesID from the URL when one is supplied. Otherwise classify
-	// and resolve the URL as usual.
 	var feedSrc domain.FeedSource
 	if cfg.FeedFile != "" {
 		log.Info("using local feed file", domain.F("path", cfg.FeedFile))
@@ -52,118 +57,153 @@ func (e *engine) run(ctx context.Context, cfg domain.RunConfig) (domain.RunResul
 		return domain.RunResult{}, err
 	}
 
-	// 4. Filter episodes by SeasonSel/EpisodeSel, skip completed (unless ForceRedownload)
+	// 4. Filter episodes by SeasonSel/EpisodeSel, skip completed
 	selected := e.selectEpisodes(series, state, cfg)
 	if len(selected) == 0 {
 		log.Info("no episodes to download")
 		return domain.RunResult{Total: 0}, nil
 	}
 
-	// 5. Resolve media for each selected episode
-	type resolvedEpisode struct {
-		episode domain.Episode
-		media   domain.ResolvedMedia
-	}
-	var resolved []resolvedEpisode
-	for _, ep := range selected {
-		log.Debug("resolving media", domain.F("season", ep.Key.Season), domain.F("episode", ep.Key.Episode))
-		media, err := e.deps.MediaResolver.Resolve(ctx, ep, cfg.Quality)
-		if err != nil {
-			log.Warn("media resolution failed, skipping episode",
-				domain.F("season", ep.Key.Season),
-				domain.F("episode", ep.Key.Episode),
-				domain.F("error", err.Error()),
-			)
-			continue
-		}
-		resolved = append(resolved, resolvedEpisode{episode: ep, media: media})
-	}
+	log.Info("episodes selected for download", domain.F("count", len(selected)))
 
-	if len(resolved) == 0 {
-		log.Info("no episodes could be resolved")
-		return domain.RunResult{Total: len(selected), Skipped: len(selected)}, nil
-	}
-
-	// 6. Build jobs (with output paths from OutputLayout)
-	var jobs []domain.Job
-	for _, r := range resolved {
-		outPath, err := e.deps.OutputLayout.EpisodePath(cfg.OutputPath, series, r.episode)
-		if err != nil {
-			log.Warn("output path derivation failed, skipping episode",
-				domain.F("season", r.episode.Key.Season),
-				domain.F("episode", r.episode.Key.Episode),
-				domain.F("error", err.Error()),
-			)
-			continue
-		}
-		if err := e.deps.OutputLayout.EnsureDirs(outPath); err != nil {
-			log.Warn("cannot create output directory, skipping episode",
-				domain.F("path", outPath),
-				domain.F("error", err.Error()),
-			)
-			continue
-		}
-		jobs = append(jobs, domain.Job{
-			Episode: r.episode,
-			Media:   r.media,
-			OutPath: outPath,
-		})
-	}
-
-	// 7. If DryRun: return listing without downloading
+	// 5. DryRun: just list what would be downloaded.
 	if cfg.DryRun {
-		log.Info("dry run — listing jobs without downloading", domain.F("count", len(jobs)))
-		outcomes := make([]domain.JobOutcome, len(jobs))
-		for i, j := range jobs {
-			outcomes[i] = domain.JobOutcome{
-				Key:       j.Episode.Key,
-				Succeeded: false,
-			}
+		log.Info("dry run — listing episodes without downloading")
+		for _, ep := range selected {
+			log.Info(fmt.Sprintf("  S%02dE%02d %s", ep.Key.Season, ep.Key.Episode, ep.Title))
 		}
-		return domain.RunResult{
-			Total:    len(selected),
-			Skipped:  len(selected) - len(jobs),
-			Outcomes: outcomes,
-		}, nil
+		return domain.RunResult{Total: len(selected)}, nil
 	}
 
-	// Start progress reporting
-	plan := buildSeriesPlan(jobs)
+	// 6. Lazy resolve + download: process episodes one by one.
+	// Resolve media immediately before downloading so CDN links are fresh.
+	// If consecutiveFailLimit failures in a row → stop (links expired / blocked).
+	var (
+		succeeded      int
+		failed         int
+		skipped        int
+		consecutiveFails int
+		outcomes       []domain.JobOutcome
+	)
+
+	// Start progress reporting.
+	plan := domain.SeriesPlan{
+		Total:   len(selected),
+		Seasons: countSeasons(selected),
+	}
 	e.deps.ProgressReporter.Start(plan)
 	defer e.deps.ProgressReporter.Stop()
 
-	// 8. Submit jobs to Scheduler with Downloader as executor
-	log.Info("starting downloads", domain.F("jobs", len(jobs)))
-	executor := &downloadExecutor{
-		downloader: e.deps.Downloader,
-		reporter:   e.deps.ProgressReporter,
-	}
-	summary := e.deps.Scheduler.Run(ctx, jobs, executor)
+	for i, ep := range selected {
+		// Check context (SIGINT).
+		if ctx.Err() != nil {
+			log.Info("interrupted, stopping")
+			break
+		}
 
-	// 9. For each succeeded job: mark completed in StateStore
-	for _, outcome := range summary.Outcomes {
-		if outcome.Succeeded {
-			if err := e.deps.StateStore.MarkCompleted(ctx, outcome.Key); err != nil {
-				log.Warn("failed to persist completion state",
-					domain.F("season", outcome.Key.Season),
-					domain.F("episode", outcome.Key.Episode),
-					domain.F("error", err.Error()),
+		log.Info("resolving media",
+			domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
+			domain.F("progress", fmt.Sprintf("%d/%d", i+1, len(selected))),
+		)
+
+		// Resolve media (ffprobe / HLS fetch).
+		media, err := e.deps.MediaResolver.Resolve(ctx, ep, cfg.Quality)
+		if err != nil {
+			consecutiveFails++
+			log.Warn("media resolution failed",
+				domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
+				domain.F("error", err.Error()),
+				domain.F("consecutive_fails", consecutiveFails),
+			)
+			if consecutiveFails >= consecutiveFailLimit {
+				log.Warn("stopping: too many consecutive failures — CDN links may have "+
+					"expired. Try re-fetching the feed for fresh links.",
+					domain.F("succeeded_so_far", succeeded),
+					domain.F("remaining", len(selected)-i-1),
 				)
+				skipped += len(selected) - i - 1
+				outcomes = append(outcomes, domain.JobOutcome{
+					Key: ep.Key, Succeeded: false, Err: err, Attempts: 1,
+				})
+				failed++
+				break
 			}
-			e.deps.ProgressReporter.EpisodeCompleted(outcome.Key)
-		} else {
-			e.deps.ProgressReporter.EpisodeFailed(outcome.Key, outcome.Err)
+			outcomes = append(outcomes, domain.JobOutcome{
+				Key: ep.Key, Succeeded: false, Err: err, Attempts: 1,
+			})
+			failed++
+			e.deps.ProgressReporter.EpisodeFailed(ep.Key, err)
+			continue
+		}
+		// Success resets the counter.
+		consecutiveFails = 0
+
+		// Build output path.
+		outPath, err := e.deps.OutputLayout.EpisodePath(cfg.OutputPath, series, ep)
+		if err != nil {
+			log.Warn("output path failed, skipping",
+				domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
+				domain.F("error", err.Error()),
+			)
+			skipped++
+			continue
+		}
+		if err := e.deps.OutputLayout.EnsureDirs(outPath); err != nil {
+			log.Warn("cannot create directory, skipping",
+				domain.F("path", outPath), domain.F("error", err.Error()),
+			)
+			skipped++
+			continue
+		}
+
+		job := domain.Job{Episode: ep, Media: media, OutPath: outPath}
+
+		// Download.
+		e.deps.ProgressReporter.EpisodeStarted(ep.Key)
+		dlErr := e.deps.Downloader.Download(ctx, job, e.deps.ProgressReporter)
+		if dlErr != nil {
+			log.Warn("download failed",
+				domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
+				domain.F("error", dlErr.Error()),
+			)
+			outcomes = append(outcomes, domain.JobOutcome{
+				Key: ep.Key, Succeeded: false, Err: dlErr, Attempts: 1,
+			})
+			failed++
+			e.deps.ProgressReporter.EpisodeFailed(ep.Key, dlErr)
+			// A download failure is not necessarily a CDN block (could be a
+			// transient network issue), so we don't increment consecutiveFails.
+			continue
+		}
+
+		// Mark completed.
+		if err := e.deps.StateStore.MarkCompleted(ctx, ep.Key); err != nil {
+			log.Warn("failed to persist state",
+				domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
+				domain.F("error", err.Error()),
+			)
+		}
+		outcomes = append(outcomes, domain.JobOutcome{
+			Key: ep.Key, Succeeded: true, Attempts: 1,
+		})
+		succeeded++
+		e.deps.ProgressReporter.EpisodeCompleted(ep.Key)
+
+		// Brief pause between episodes to be gentle on the CDN.
+		if i < len(selected)-1 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(2 * time.Second):
+			}
 		}
 	}
 
-	// 10. Return RunResult
-	skipped := len(selected) - len(jobs)
 	return domain.RunResult{
 		Total:     len(selected),
-		Succeeded: summary.Succeeded,
-		Failed:    summary.Failed,
+		Succeeded: succeeded,
+		Failed:    failed,
 		Skipped:   skipped,
-		Outcomes:  summary.Outcomes,
+		Outcomes:  outcomes,
 	}, nil
 }
 
@@ -178,7 +218,6 @@ func (e *engine) selectEpisodes(series domain.Series, state domain.DownloadState
 			if !cfg.EpisodeSel.Matches(ep.Key.Episode) {
 				continue
 			}
-			// Skip completed unless ForceRedownload
 			if !cfg.ForceRedownload && e.deps.StateStore.IsCompleted(state, ep.Key) {
 				continue
 			}
@@ -188,20 +227,18 @@ func (e *engine) selectEpisodes(series domain.Series, state domain.DownloadState
 	return selected
 }
 
-// buildSeriesPlan constructs a SeriesPlan from the set of jobs to execute.
-func buildSeriesPlan(jobs []domain.Job) domain.SeriesPlan {
-	seasons := make(map[int]int)
-	for _, j := range jobs {
-		seasons[j.Episode.Key.Season]++
+// countSeasons counts episodes per season for the progress plan.
+func countSeasons(episodes []domain.Episode) map[int]int {
+	m := make(map[int]int)
+	for _, ep := range episodes {
+		m[ep.Key.Season]++
 	}
-	return domain.SeriesPlan{
-		Total:   len(jobs),
-		Seasons: seasons,
-	}
+	return m
 }
 
 // downloadExecutor adapts the Downloader interface to the JobExecutor interface
-// expected by the Scheduler.
+// expected by the Scheduler. Kept for compatibility but the lazy engine no
+// longer uses the Scheduler for orchestration.
 type downloadExecutor struct {
 	downloader domain.Downloader
 	reporter   domain.ProgressReporter

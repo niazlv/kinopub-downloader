@@ -10,7 +10,8 @@ import (
 
 // buildInputAuthOpts returns ffmpeg input options that inject authentication
 // into HTTP(S) requests: -user_agent for the User-Agent and -headers for the
-// Cookie header plus any extra headers. The returned options must be placed
+// Referer and extra headers (but NOT Cookie — CDN rejects requests with
+// kino.pub cookies, causing timeouts). The returned options must be placed
 // immediately before an -i so they apply to that input.
 //
 // ffmpeg's -headers option takes a single string of CRLF-separated header
@@ -26,11 +27,8 @@ func buildInputAuthOpts(auth domain.RequestAuth) []string {
 		opts = append(opts, "-user_agent", auth.UserAgent)
 	}
 
-	// Collect header lines (Cookie + extra headers), sorted for determinism.
+	// Collect header lines (extra headers only — NOT Cookie, which breaks CDN).
 	var lines []string
-	if auth.Cookie != "" {
-		lines = append(lines, "Cookie: "+auth.Cookie)
-	}
 	if len(auth.Headers) > 0 {
 		keys := make([]string, 0, len(auth.Headers))
 		for k := range auth.Headers {
@@ -290,6 +288,14 @@ func BuildFFmpegArgs(job domain.Job, proxyEnv []string, auth domain.RequestAuth,
 
 	// Progress reporting to stdout pipe.
 	args = append(args, "-progress", "pipe:1")
+
+	// Output format must be specified explicitly because the temp file extension
+	// (.mkv.tmp) is not recognized by ffmpeg's format auto-detection.
+	outFormat := "matroska"
+	if strings.HasSuffix(strings.TrimSuffix(tempPath, ".tmp"), ".mp4") {
+		outFormat = "mp4"
+	}
+	args = append(args, "-f", outFormat)
 
 	// Output path (temp file).
 	args = append(args, tempPath)

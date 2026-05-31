@@ -28,18 +28,24 @@ type Resolver struct {
 	client    *http.Client
 	runOutput RunOutputFunc
 	logger    domain.Logger
+	auth      domain.RequestAuth
 }
 
 // New creates a new Resolver.
-//   - client: HTTP client for fetching HLS playlists
+//   - client: HTTP client for fetching HLS playlists (should already carry auth)
 //   - runOutput: function to run ffprobe and capture stdout
 //   - logger: structured logger
-func New(client *http.Client, runOutput RunOutputFunc, logger domain.Logger) *Resolver {
-	return &Resolver{
+//   - auth: request auth to pass to ffprobe via -headers/-user_agent
+func New(client *http.Client, runOutput RunOutputFunc, logger domain.Logger, auth ...domain.RequestAuth) *Resolver {
+	r := &Resolver{
 		client:    client,
 		runOutput: runOutput,
 		logger:    logger.Component("mediaresolver"),
 	}
+	if len(auth) > 0 {
+		r.auth = auth[0]
+	}
+	return r
 }
 
 // Resolve enumerates tracks for an episode within a 30s timeout (Req 3.8).
