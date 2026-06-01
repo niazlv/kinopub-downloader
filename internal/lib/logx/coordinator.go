@@ -23,6 +23,7 @@ type Coordinator struct {
 	mu     sync.Mutex
 	w      io.Writer
 	redraw func() // callback to redraw progress display; nil if no live display
+	clear  func() // callback to clear progress display before a log line
 }
 
 // NewCoordinator creates a Coordinator that writes to w.
@@ -39,6 +40,15 @@ func (c *Coordinator) SetRedraw(fn func()) {
 	c.redraw = fn
 }
 
+// SetClear registers a callback that the coordinator calls before writing a
+// log line to erase the progress display. The progress reporter sets this
+// when it starts and clears it when it stops.
+func (c *Coordinator) SetClear(fn func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.clear = fn
+}
+
 // WriteLog writes a log line while coordinating with the progress display.
 // If a progress display is active, it is temporarily cleared and then redrawn
 // after the log line is written.
@@ -47,8 +57,10 @@ func (c *Coordinator) WriteLog(line string) {
 	defer c.mu.Unlock()
 
 	if c.redraw != nil {
-		// Clear progress region before writing log.
-		// The progress reporter's redraw callback handles cursor positioning.
+		// Clear the progress region, write the log line, then redraw progress.
+		if c.clear != nil {
+			c.clear()
+		}
 		fmt.Fprint(c.w, line)
 		c.redraw()
 	} else {

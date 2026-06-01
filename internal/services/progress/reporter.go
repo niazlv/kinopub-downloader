@@ -112,6 +112,7 @@ func (r *LiveReporter) Start(plan domain.SeriesPlan) {
 
 	// Register redraw callback with coordinator so log writes trigger a
 	// repaint of the progress region.
+	r.coord.SetClear(r.clearForLog)
 	r.coord.SetRedraw(r.redraw)
 
 	// Start the 1-second refresh ticker.
@@ -324,6 +325,7 @@ func (r *LiveReporter) Stop() {
 
 	// Unregister redraw callback.
 	r.coord.SetRedraw(nil)
+	r.coord.SetClear(nil)
 
 	// Final render to show completion state, then leave cursor below.
 	r.mu.Lock()
@@ -375,10 +377,19 @@ func (r *LiveReporter) render() {
 func (r *LiveReporter) redraw() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// After a log line, our previous display was implicitly scrolled away.
-	// Reset lastLines since the log write already moved the cursor.
-	r.lastLines = 0
+	// After a log line, our previous display was already cleared by clearForLog.
+	// lastLines is already 0, just redraw the frame.
 	r.renderFrame()
+}
+
+// clearForLog is the callback registered with the coordinator. It is called
+// (with the coordinator mutex held) before a log line is written, to erase
+// the progress display so the log line appears cleanly above it.
+func (r *LiveReporter) clearForLog() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.clearLines()
+	r.lastLines = 0
 }
 
 // clearLines moves the cursor up and clears each line of the previous frame.

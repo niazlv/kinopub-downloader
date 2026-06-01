@@ -27,8 +27,11 @@ func buildInputAuthOpts(auth domain.RequestAuth) []string {
 		opts = append(opts, "-user_agent", auth.UserAgent)
 	}
 
-	// Collect header lines (extra headers only — NOT Cookie, which breaks CDN).
+	// Collect header lines: Cookie first, then extra headers in sorted order.
 	var lines []string
+	if auth.Cookie != "" {
+		lines = append(lines, "Cookie: "+auth.Cookie)
+	}
 	if len(auth.Headers) > 0 {
 		keys := make([]string, 0, len(auth.Headers))
 		for k := range auth.Headers {
