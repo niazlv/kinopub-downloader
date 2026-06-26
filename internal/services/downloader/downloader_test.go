@@ -17,12 +17,12 @@ import (
 // testLogger is a no-op logger for tests.
 type testLogger struct{}
 
-func (testLogger) Debug(_ string, _ ...domain.Field) {}
-func (testLogger) Info(_ string, _ ...domain.Field)  {}
-func (testLogger) Warn(_ string, _ ...domain.Field)  {}
-func (testLogger) Error(_ string, _ ...domain.Field) {}
-func (l testLogger) With(_ ...domain.Field) domain.Logger  { return l }
-func (l testLogger) Component(_ string) domain.Logger      { return l }
+func (testLogger) Debug(_ string, _ ...domain.Field)      {}
+func (testLogger) Info(_ string, _ ...domain.Field)       {}
+func (testLogger) Warn(_ string, _ ...domain.Field)       {}
+func (testLogger) Error(_ string, _ ...domain.Field)      {}
+func (l testLogger) With(_ ...domain.Field) domain.Logger { return l }
+func (l testLogger) Component(_ string) domain.Logger     { return l }
 
 // testProxy is a minimal ProxyProvider for tests.
 type testProxy struct {
@@ -30,9 +30,9 @@ type testProxy struct {
 	err error
 }
 
-func (p *testProxy) HTTPClient() *http.Client      { return nil }
-func (p *testProxy) FFmpegEnv() ([]string, error)  { return p.env, p.err }
-func (p *testProxy) Mode() domain.ProxyMode        { return domain.ProxyDirect }
+func (p *testProxy) HTTPClient() *http.Client     { return nil }
+func (p *testProxy) FFmpegEnv() ([]string, error) { return p.env, p.err }
+func (p *testProxy) Mode() domain.ProxyMode       { return domain.ProxyDirect }
 
 // testProgressSink records progress updates.
 type testProgressSink struct {
@@ -299,45 +299,6 @@ func TestDownloader_Download_ProxyError(t *testing.T) {
 	}
 }
 
-func TestDownloader_Execute_DelegatesToDownload(t *testing.T) {
-	tmpDir := t.TempDir()
-	outPath := filepath.Join(tmpDir, "S01E01.mkv")
-
-	run := func(_ context.Context, name string, args, env []string, stdout io.Writer) error {
-		tempPath := args[len(args)-1]
-		return os.WriteFile(tempPath, []byte("content"), 0644)
-	}
-
-	proxy := &testProxy{}
-	logger := testLogger{}
-
-	d := New(run, proxy, logger)
-
-	job := domain.Job{
-		Episode: domain.Episode{
-			Key: domain.EpisodeKey{Series: "test", Season: 1, Episode: 1},
-		},
-		Media: domain.ResolvedMedia{
-			Source: domain.MediaSource{
-				Kind: domain.MediaProgressive,
-				URL:  "https://cdn.example.com/video.mp4",
-			},
-			Video: domain.VideoTrack{Index: 0},
-		},
-		OutPath: outPath,
-	}
-
-	err := d.Execute(context.Background(), job)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-
-	// Verify file was created.
-	if _, err := os.Stat(outPath); err != nil {
-		t.Fatalf("output file not found: %v", err)
-	}
-}
-
 func TestDownloader_WithFFmpegPath(t *testing.T) {
 	var capturedName string
 	run := func(_ context.Context, name string, args, env []string, stdout io.Writer) error {
@@ -368,7 +329,7 @@ func TestDownloader_WithFFmpegPath(t *testing.T) {
 		OutPath: outPath,
 	}
 
-	_ = d.Execute(context.Background(), job)
+	_ = d.Download(context.Background(), job, nil)
 
 	if capturedName != "/usr/local/bin/ffmpeg" {
 		t.Errorf("expected ffmpeg path /usr/local/bin/ffmpeg, got %q", capturedName)

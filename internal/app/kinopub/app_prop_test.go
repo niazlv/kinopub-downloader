@@ -14,7 +14,7 @@ import (
 // Property 44: Missing dependency is detected before any work
 //
 // For any single nil dependency field in the Dependencies struct (chosen
-// randomly from the 10 fields), New() returns an error that wraps
+// randomly from the 9 required fields), New() returns an error that wraps
 // ErrMissingDependency.
 
 func TestProperty44_MissingDependencyDetectedBeforeWork(t *testing.T) {
@@ -22,8 +22,8 @@ func TestProperty44_MissingDependencyDetectedBeforeWork(t *testing.T) {
 		// Start with a fully valid Dependencies struct (all fields non-nil)
 		deps := validDeps()
 
-		// Randomly select one of the 10 dependency fields to set to nil
-		fieldIndex := rapid.IntRange(0, 9).Draw(t, "fieldIndex")
+		// Randomly select one of the 9 required dependency fields to set to nil
+		fieldIndex := rapid.IntRange(0, 8).Draw(t, "fieldIndex")
 
 		switch fieldIndex {
 		case 0:
@@ -35,16 +35,14 @@ func TestProperty44_MissingDependencyDetectedBeforeWork(t *testing.T) {
 		case 3:
 			deps.MediaResolver = nil
 		case 4:
-			deps.Scheduler = nil
-		case 5:
 			deps.Downloader = nil
-		case 6:
+		case 5:
 			deps.ProxyProvider = nil
-		case 7:
+		case 6:
 			deps.ProgressReporter = nil
-		case 8:
+		case 7:
 			deps.StateStore = nil
-		case 9:
+		case 8:
 			deps.OutputLayout = nil
 		}
 

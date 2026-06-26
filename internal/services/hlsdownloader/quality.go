@@ -189,7 +189,9 @@ func closestToBitrate(variants []Variant, targetKbps int) Variant {
 	bestDiff := abs(best.BitrateKbps() - targetKbps)
 	for _, v := range variants[1:] {
 		diff := abs(v.BitrateKbps() - targetKbps)
-		if diff < bestDiff {
+		// On a tie, prefer the higher bandwidth so selection is deterministic
+		// across CDN orderings and consistent with closestToHeight.
+		if diff < bestDiff || (diff == bestDiff && v.Bandwidth > best.Bandwidth) {
 			best = v
 			bestDiff = diff
 		}

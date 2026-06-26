@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
@@ -13,10 +14,10 @@ import (
 
 type mockLogger struct{}
 
-func (m *mockLogger) Debug(msg string, fields ...domain.Field) {}
-func (m *mockLogger) Info(msg string, fields ...domain.Field)  {}
-func (m *mockLogger) Warn(msg string, fields ...domain.Field)  {}
-func (m *mockLogger) Error(msg string, fields ...domain.Field) {}
+func (m *mockLogger) Debug(msg string, fields ...domain.Field)  {}
+func (m *mockLogger) Info(msg string, fields ...domain.Field)   {}
+func (m *mockLogger) Warn(msg string, fields ...domain.Field)   {}
+func (m *mockLogger) Error(msg string, fields ...domain.Field)  {}
 func (m *mockLogger) With(fields ...domain.Field) domain.Logger { return m }
 func (m *mockLogger) Component(name string) domain.Logger       { return m }
 
@@ -50,14 +51,6 @@ func (m *mockMediaResolver) Resolve(ctx context.Context, ep domain.Episode, pref
 	return m.media, m.err
 }
 
-type mockScheduler struct {
-	summary domain.RunSummary
-}
-
-func (m *mockScheduler) Run(ctx context.Context, jobs []domain.Job, exec domain.JobExecutor) domain.RunSummary {
-	return m.summary
-}
-
 type mockDownloader struct{}
 
 func (m *mockDownloader) Download(ctx context.Context, job domain.Job, sink domain.ProgressSink) error {
@@ -73,25 +66,35 @@ func (m *mockProxyProvider) FFmpegEnv() ([]string, error) {
 func (m *mockProxyProvider) Mode() domain.ProxyMode { return domain.ProxyDirect }
 
 type mockProgressReporter struct {
+	// mu guards the fields below: the engine invokes the reporter concurrently
+	// from its download workers.
+	mu        sync.Mutex
 	started   bool
 	stopped   bool
 	completed []domain.EpisodeKey
 	failed    []domain.EpisodeKey
 }
 
-func (m *mockProgressReporter) Start(plan domain.SeriesPlan)              { m.started = true }
-func (m *mockProgressReporter) EpisodeStarted(key domain.EpisodeKey)      {}
+func (m *mockProgressReporter) Start(plan domain.SeriesPlan)         { m.started = true }
+func (m *mockProgressReporter) EpisodeStarted(key domain.EpisodeKey) {}
 func (m *mockProgressReporter) TrackProgress(key domain.EpisodeKey, track domain.TrackRef, percent int) {
 }
 func (m *mockProgressReporter) EpisodeCompleted(key domain.EpisodeKey) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.completed = append(m.completed, key)
 }
 func (m *mockProgressReporter) EpisodeFailed(key domain.EpisodeKey, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.failed = append(m.failed, key)
 }
 func (m *mockProgressReporter) Stop() { m.stopped = true }
 
 type mockStateStore struct {
+	// mu guards completed: the engine marks episodes completed concurrently from
+	// its download workers (the real JSONStore is likewise mutex-protected).
+	mu        sync.Mutex
 	state     domain.DownloadState
 	completed map[domain.EpisodeKey]bool
 }
@@ -100,6 +103,8 @@ func (m *mockStateStore) Load(ctx context.Context, series domain.SeriesID) (doma
 	return m.state, nil
 }
 func (m *mockStateStore) MarkCompleted(ctx context.Context, info domain.CompletedInfo) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.completed == nil {
 		m.completed = make(map[domain.EpisodeKey]bool)
 	}
@@ -166,18 +171,6 @@ func TestNew_NilInputResolver(t *testing.T) {
 	}
 }
 
-func TestNew_NilScheduler(t *testing.T) {
-	deps := validDeps()
-	deps.Scheduler = nil
-	_, err := New(deps)
-	if err == nil {
-		t.Fatal("expected error for nil Scheduler")
-	}
-	if !errors.Is(err, domain.ErrMissingDependency) {
-		t.Fatalf("expected ErrMissingDependency, got: %v", err)
-	}
-}
-
 func TestRun_DryRun(t *testing.T) {
 	deps := validDeps()
 	deps.InputResolver = &mockInputResolver{source: domain.FeedSource{ID: "123", Token: "abc"}}
@@ -216,15 +209,6 @@ func TestRun_FullDownload(t *testing.T) {
 	deps.FeedParser = &mockFeedParser{series: testSeries()}
 	deps.MediaResolver = &mockMediaResolver{media: domain.ResolvedMedia{
 		Video: domain.VideoTrack{Index: 0, Resolution: "1920x1080"},
-	}}
-	deps.Scheduler = &mockScheduler{summary: domain.RunSummary{
-		Total:     2,
-		Succeeded: 2,
-		Failed:    0,
-		Outcomes: []domain.JobOutcome{
-			{Key: domain.EpisodeKey{Series: "test", Season: 1, Episode: 1}, Succeeded: true},
-			{Key: domain.EpisodeKey{Series: "test", Season: 1, Episode: 2}, Succeeded: true},
-		},
 	}}
 	deps.ProgressReporter = reporter
 	deps.StateStore = stateStore
@@ -290,7 +274,6 @@ func validDeps() Dependencies {
 		InputResolver:    &mockInputResolver{},
 		FeedParser:       &mockFeedParser{},
 		MediaResolver:    &mockMediaResolver{},
-		Scheduler:        &mockScheduler{},
 		Downloader:       &mockDownloader{},
 		ProxyProvider:    &mockProxyProvider{},
 		ProgressReporter: &mockProgressReporter{},

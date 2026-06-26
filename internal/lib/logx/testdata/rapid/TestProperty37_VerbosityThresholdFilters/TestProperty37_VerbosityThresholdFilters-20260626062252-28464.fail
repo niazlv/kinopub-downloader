@@ -1,0 +1,11 @@
+# 2026/06/26 06:22:52.398544 [TestProperty37_VerbosityThresholdFilters] [rapid] draw level: 1
+# 2026/06/26 06:22:52.398553 [TestProperty37_VerbosityThresholdFilters] [rapid] draw verbosity: 0
+# 2026/06/26 06:22:52.398554 [TestProperty37_VerbosityThresholdFilters] ShouldDisplay(level=1, verbosity=0) = true, want false
+# 
+v0.4.8#3807344063385299366
+0x0
+0x0
+0x1
+0x0
+0x0
+0x0

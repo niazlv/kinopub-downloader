@@ -128,8 +128,13 @@ func (r *Resolver) resolveRedirect(ctx context.Context, rawURL string) (string, 
 	resp.Body.Close()
 
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		loc := resp.Header.Get("Location")
-		if loc != "" {
+		if loc := resp.Header.Get("Location"); loc != "" {
+			// Resolve the Location against the request URL so a relative redirect
+			// becomes absolute. For an already-absolute Location this returns the
+			// same URL unchanged.
+			if u, perr := req.URL.Parse(loc); perr == nil {
+				return u.String(), nil
+			}
 			return loc, nil
 		}
 	}
@@ -222,7 +227,7 @@ func parseFFprobeOutput(data []byte, source domain.MediaSource) (domain.Resolved
 	}
 
 	return domain.ResolvedMedia{
-		Source:    source,
+		Source:   source,
 		Video:    video,
 		Audio:    audioTracks,
 		Duration: duration,

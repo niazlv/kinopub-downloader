@@ -3,7 +3,6 @@ package kinopub
 import (
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
 
@@ -14,9 +13,8 @@ import (
 
 // Property 40: Invalid flag values are rejected before any work
 //
-// For any config with MaxConcurrency outside [1,16], or MinIntervalMS outside
-// [0,60000], or invalid Verbosity, or invalid Container, ValidateConfig returns
-// ErrInvalidFlag.
+// For any config with MaxConcurrency outside [1,16], or invalid Verbosity, or
+// invalid Container, ValidateConfig returns ErrInvalidFlag.
 
 func TestProperty40_InvalidMaxConcurrencyRejected(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
@@ -28,8 +26,6 @@ func TestProperty40_InvalidMaxConcurrencyRejected(t *testing.T) {
 
 		cfg := &domain.RunConfig{
 			MaxConcurrency: conc,
-			MaxRetries:     5,
-			MinIntervalMS:  1000,
 			Verbosity:      domain.VerbosityNormal,
 			Container:      domain.ContainerMKV,
 		}
@@ -44,44 +40,18 @@ func TestProperty40_InvalidMaxConcurrencyRejected(t *testing.T) {
 	})
 }
 
-func TestProperty40_InvalidMinIntervalMSRejected(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		// Generate an interval value outside [0,60000]
-		interval := rapid.OneOf(
-			rapid.IntRange(-10000, -1),
-			rapid.IntRange(60001, 200000),
-		).Draw(t, "interval")
-
-		cfg := &domain.RunConfig{
-			MaxConcurrency: 2,
-			MaxRetries:     5,
-			MinIntervalMS:  interval,
-			Verbosity:      domain.VerbosityNormal,
-			Container:      domain.ContainerMKV,
-		}
-
-		err := ValidateConfig(cfg)
-		if err == nil {
-			t.Fatalf("expected ErrInvalidFlag for MinIntervalMS=%d, got nil", interval)
-		}
-		if !errors.Is(err, domain.ErrInvalidFlag) {
-			t.Fatalf("expected ErrInvalidFlag for MinIntervalMS=%d, got %v", interval, err)
-		}
-	})
-}
-
 func TestProperty40_InvalidVerbosityRejected(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
-		// Generate a verbosity value that is not one of the valid enum values (0, 1, 2)
+		// Generate a verbosity value that is not one of the valid enum values
+		// (VerbosityQuiet=1, VerbosityNormal=2, VerbosityVerbose=3). The zero
+		// value VerbosityUnset=0 is intentionally not a valid run verbosity.
 		verb := rapid.OneOf(
-			rapid.IntRange(-100, -1),
-			rapid.IntRange(3, 100),
+			rapid.IntRange(-100, 0),
+			rapid.IntRange(4, 100),
 		).Draw(t, "verbosity")
 
 		cfg := &domain.RunConfig{
 			MaxConcurrency: 2,
-			MaxRetries:     5,
-			MinIntervalMS:  1000,
 			Verbosity:      domain.Verbosity(verb),
 			Container:      domain.ContainerMKV,
 		}
@@ -106,8 +76,6 @@ func TestProperty40_InvalidContainerRejected(t *testing.T) {
 
 		cfg := &domain.RunConfig{
 			MaxConcurrency: 2,
-			MaxRetries:     5,
-			MinIntervalMS:  1000,
 			Verbosity:      domain.VerbosityNormal,
 			Container:      domain.Container(cont),
 		}
@@ -291,17 +259,11 @@ func TestProperty43_ApplyDefaultsFillsZeroFields(t *testing.T) {
 		if cfg.MaxConcurrency == 0 {
 			t.Fatal("MaxConcurrency should be non-zero after ApplyDefaults")
 		}
-		if cfg.MaxRetries == 0 {
-			t.Fatal("MaxRetries should be non-zero after ApplyDefaults")
-		}
 		if cfg.Verbosity == 0 {
 			t.Fatal("Verbosity should be non-zero after ApplyDefaults")
 		}
 		if cfg.FFmpegPath == "" {
 			t.Fatal("FFmpegPath should be non-empty after ApplyDefaults")
-		}
-		if cfg.GracePeriod == 0 {
-			t.Fatal("GracePeriod should be non-zero after ApplyDefaults")
 		}
 		if !cfg.SeasonSel.All {
 			t.Fatal("SeasonSel.All should be true after ApplyDefaults on zero config")
@@ -315,20 +277,19 @@ func TestProperty43_ApplyDefaultsFillsZeroFields(t *testing.T) {
 func TestProperty43_ApplyDefaultsDoesNotOverrideExplicit(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		// Generate non-zero values for all defaultable fields.
-		// Note: ApplyDefaults uses zero-value detection, so we only test with
-		// non-zero values (VerbosityQuiet=0 and ContainerMKV=0 are zero values
-		// and would be treated as "not set" by ApplyDefaults — this is by design).
+		// Note: ApplyDefaults uses zero-value detection. With VerbosityUnset=0 as
+		// the zero value, every real verbosity (quiet/normal/verbose) is non-zero
+		// and must survive ApplyDefaults unchanged — including quiet, which used
+		// to be clobbered when it shared the zero value. ContainerMKV=0 is still a
+		// zero value, so only MP4 is exercised here.
 		conc := rapid.IntRange(1, 16).Draw(t, "concurrency")
-		retries := rapid.IntRange(1, 20).Draw(t, "retries")
 		verbosity := rapid.SampledFrom([]domain.Verbosity{
-			domain.VerbosityNormal, domain.VerbosityVerbose,
+			domain.VerbosityQuiet, domain.VerbosityNormal, domain.VerbosityVerbose,
 		}).Draw(t, "verbosity")
 		ffmpegPath := rapid.StringMatching(`/[a-z]+/[a-z]+`).Draw(t, "ffmpegPath")
 		container := rapid.SampledFrom([]domain.Container{
 			domain.ContainerMP4,
 		}).Draw(t, "container")
-		graceSec := rapid.IntRange(1, 120).Draw(t, "graceSec")
-		gracePeriod := time.Duration(graceSec) * time.Second
 
 		// Generate a non-empty selection for seasons
 		seasonVal := rapid.IntRange(1, 50).Draw(t, "seasonVal")
@@ -341,11 +302,9 @@ func TestProperty43_ApplyDefaultsDoesNotOverrideExplicit(t *testing.T) {
 
 		cfg := &domain.RunConfig{
 			MaxConcurrency: conc,
-			MaxRetries:     retries,
 			Verbosity:      verbosity,
 			FFmpegPath:     ffmpegPath,
 			Container:      container,
-			GracePeriod:    gracePeriod,
 			SeasonSel:      seasonSel,
 			EpisodeSel:     episodeSel,
 		}
@@ -356,9 +315,6 @@ func TestProperty43_ApplyDefaultsDoesNotOverrideExplicit(t *testing.T) {
 		if cfg.MaxConcurrency != conc {
 			t.Fatalf("MaxConcurrency changed from %d to %d", conc, cfg.MaxConcurrency)
 		}
-		if cfg.MaxRetries != retries {
-			t.Fatalf("MaxRetries changed from %d to %d", retries, cfg.MaxRetries)
-		}
 		if cfg.Verbosity != verbosity {
 			t.Fatalf("Verbosity changed from %d to %d", verbosity, cfg.Verbosity)
 		}
@@ -367,9 +323,6 @@ func TestProperty43_ApplyDefaultsDoesNotOverrideExplicit(t *testing.T) {
 		}
 		if cfg.Container != container {
 			t.Fatalf("Container changed from %d to %d", container, cfg.Container)
-		}
-		if cfg.GracePeriod != gracePeriod {
-			t.Fatalf("GracePeriod changed from %v to %v", gracePeriod, cfg.GracePeriod)
 		}
 		if cfg.SeasonSel.All {
 			t.Fatal("SeasonSel was overridden to All=true")

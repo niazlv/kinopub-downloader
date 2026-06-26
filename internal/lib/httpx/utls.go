@@ -46,7 +46,29 @@ func (t *browserTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		return http.DefaultTransport.RoundTrip(req)
 	}
 
-	// Establish TLS connection with Chrome fingerprint.
+	// Fast path: reuse a pooled HTTP/2 connection to this host without paying
+	// for a fresh TLS handshake (and proxy CONNECT) that would otherwise be
+	// thrown away. An entry exists here only after a previous request to this
+	// host negotiated h2 via ALPN, so the h1 / first-connection paths are
+	// unaffected. This is the hot path for per-segment HLS downloads.
+	host := req.URL.Host
+	t.mu.Lock()
+	cc := t.h2Clients[host]
+	t.mu.Unlock()
+	if cc != nil {
+		if resp, err := cc.RoundTrip(req); err == nil {
+			return resp, nil
+		}
+		// Stale connection — drop and close it, then fall through to redial.
+		t.mu.Lock()
+		if old, ok := t.h2Clients[host]; ok && old == cc {
+			old.Close()
+			delete(t.h2Clients, host)
+		}
+		t.mu.Unlock()
+	}
+
+	// Establish a fresh TLS connection with the Chrome fingerprint.
 	addr := req.URL.Host
 	if !hasPort(addr) {
 		addr += ":443"
@@ -60,7 +82,7 @@ func (t *browserTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	if alpn == "h2" {
 		// HTTP/2
-		return t.roundTripH2(req, tlsConn, addr)
+		return t.roundTripH2(req, tlsConn)
 	}
 
 	// HTTP/1.1
@@ -103,10 +125,8 @@ func (t *browserTransport) dialProxy(ctx context.Context, addr string) (net.Conn
 		req, _ := http.NewRequestWithContext(ctx, http.MethodConnect, "http://"+addr, nil)
 		req.Host = addr
 		if t.proxyURL.User != nil {
-			req.SetBasicAuth(t.proxyURL.User.Username(), func() string {
-				p, _ := t.proxyURL.User.Password()
-				return p
-			}())
+			pass, _ := t.proxyURL.User.Password()
+			req.SetBasicAuth(t.proxyURL.User.Username(), pass)
 		}
 		if err := req.Write(conn); err != nil {
 			conn.Close()
@@ -148,31 +168,15 @@ func (t *browserTransport) dialTLS(ctx context.Context, addr string) (net.Conn, 
 	return tlsConn, alpn, nil
 }
 
-func (t *browserTransport) roundTripH2(req *http.Request, conn net.Conn, addr string) (*http.Response, error) {
-	t.mu.Lock()
-	if t.h2Clients == nil {
-		t.h2Clients = make(map[string]*http2.ClientConn)
-	}
-
-	// Check for existing h2 connection to this host.
+// roundTripH2 wraps a freshly-dialed h2-negotiated conn in an http2.ClientConn,
+// pools it for reuse, and issues the request. The fast path in RoundTrip has
+// already established there was no usable pooled connection when we started
+// dialing; a concurrent request may nonetheless have pooled one in the
+// meantime, in which case we reuse it and discard the connection we just dialed
+// rather than overwriting (and leaking) the pooled one.
+func (t *browserTransport) roundTripH2(req *http.Request, conn net.Conn) (*http.Response, error) {
 	host := req.URL.Host
-	if cc, ok := t.h2Clients[host]; ok {
-		t.mu.Unlock()
-		// Try existing connection first.
-		resp, err := cc.RoundTrip(req)
-		if err == nil {
-			conn.Close() // don't need the new connection
-			return resp, nil
-		}
-		// Connection stale — remove and use new one.
-		t.mu.Lock()
-		delete(t.h2Clients, host)
-		t.mu.Unlock()
-	} else {
-		t.mu.Unlock()
-	}
 
-	// Create new HTTP/2 client connection.
 	tr := &http2.Transport{}
 	cc, err := tr.NewClientConn(conn)
 	if err != nil {
@@ -181,6 +185,17 @@ func (t *browserTransport) roundTripH2(req *http.Request, conn net.Conn, addr st
 	}
 
 	t.mu.Lock()
+	if t.h2Clients == nil {
+		t.h2Clients = make(map[string]*http2.ClientConn)
+	}
+	if existing, ok := t.h2Clients[host]; ok {
+		// A concurrent request pooled a connection first — use it and close the
+		// one we just dialed so it isn't leaked. Closing the ClientConn closes
+		// its underlying net.Conn too.
+		t.mu.Unlock()
+		cc.Close()
+		return existing.RoundTrip(req)
+	}
 	t.h2Clients[host] = cc
 	t.mu.Unlock()
 

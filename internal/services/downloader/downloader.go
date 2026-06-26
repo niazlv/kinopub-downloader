@@ -18,9 +18,8 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ domain.Downloader  = (*Downloader)(nil)
-	_ domain.JobExecutor = (*Downloader)(nil)
-	_ domain.HLSMuxer    = (*Downloader)(nil)
+	_ domain.Downloader = (*Downloader)(nil)
+	_ domain.HLSMuxer   = (*Downloader)(nil)
 )
 
 // RunFunc is a function that runs a command, streaming stdout to the provided
@@ -36,7 +35,7 @@ const (
 	ModeDirect  DownloadMode = "direct"  // ffmpeg stream copy from URL
 )
 
-// Downloader implements domain.Downloader and domain.JobExecutor.
+// Downloader implements domain.Downloader.
 type Downloader struct {
 	run        RunFunc
 	proxy      domain.ProxyProvider
@@ -114,7 +113,6 @@ func New(run RunFunc, proxy domain.ProxyProvider, logger domain.Logger, opts ...
 // the traditional ffmpeg-based streaming approach.
 func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.ProgressSink) error {
 	// Determine if we can use chunked mode.
-	// Determine if we can use chunked mode.
 	// Skip chunked for local files (no http:// prefix) — they're already on disk.
 	isRemoteURL := strings.HasPrefix(job.Media.Source.URL, "http://") ||
 		strings.HasPrefix(job.Media.Source.URL, "https://")
@@ -132,7 +130,7 @@ func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.P
 		}
 		// Chunked failed — fall back to direct ffmpeg.
 		d.logger.Warn("chunked download failed, falling back to direct ffmpeg",
-			domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+			domain.F("episode", job.Episode.Key.Label()),
 			domain.F("error", err.Error()),
 		)
 	}
@@ -143,7 +141,7 @@ func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.P
 // downloadChunked implements the chunked HTTP Range download + ffmpeg remux.
 func (d *Downloader) downloadChunked(ctx context.Context, job domain.Job, sink domain.ProgressSink) error {
 	d.logger.Info("starting chunked download",
-		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+		domain.F("episode", job.Episode.Key.Label()),
 		domain.F("mode", string(ModeChunked)),
 		domain.F("output", job.OutPath),
 	)
@@ -158,7 +156,7 @@ func (d *Downloader) downloadChunked(ctx context.Context, job domain.Job, sink d
 
 	// 2. Remux with ffmpeg: local file → final container with metadata.
 	d.logger.Info("remuxing downloaded file",
-		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+		domain.F("episode", job.Episode.Key.Label()),
 	)
 
 	if err := d.remuxLocal(ctx, job, rawPath); err != nil {
@@ -171,7 +169,7 @@ func (d *Downloader) downloadChunked(ctx context.Context, job domain.Job, sink d
 	os.Remove(rawPath)
 
 	d.logger.Info("download completed",
-		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+		domain.F("episode", job.Episode.Key.Label()),
 		domain.F("mode", string(ModeChunked)),
 		domain.F("output", job.OutPath),
 	)
@@ -191,7 +189,7 @@ func (d *Downloader) remuxLocal(ctx context.Context, job domain.Job, rawPath str
 // per-track labels/languages.
 func (d *Downloader) MuxHLS(ctx context.Context, job domain.Job, hls *domain.HLSDownloadResult) error {
 	d.logger.Info("muxing HLS streams",
-		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+		domain.F("episode", job.Episode.Key.Label()),
 		domain.F("audio_tracks", len(hls.AudioTracks)),
 		domain.F("output", job.OutPath),
 	)
@@ -225,7 +223,7 @@ func (d *Downloader) MuxHLS(ctx context.Context, job domain.Job, hls *domain.HLS
 // does NOT inject any HTTP auth options (the input is a local file).
 func (d *Downloader) RemuxLocal(ctx context.Context, job domain.Job, localPath string) error {
 	d.logger.Info("remuxing local file",
-		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+		domain.F("episode", job.Episode.Key.Label()),
 		domain.F("input", localPath),
 		domain.F("output", job.OutPath),
 	)
@@ -257,7 +255,7 @@ func (d *Downloader) RemuxLocal(ctx context.Context, job domain.Job, localPath s
 // downloadDirect is the traditional ffmpeg-based download (stream from URL).
 func (d *Downloader) downloadDirect(ctx context.Context, job domain.Job, sink domain.ProgressSink) error {
 	d.logger.Info("starting direct download",
-		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+		domain.F("episode", job.Episode.Key.Label()),
 		domain.F("mode", string(ModeDirect)),
 		domain.F("output", job.OutPath),
 	)
@@ -303,7 +301,7 @@ func (d *Downloader) downloadDirect(ctx context.Context, job domain.Job, sink do
 	if runErr != nil {
 		d.logger.Error("ffmpeg failed",
 			domain.F("error", runErr.Error()),
-			domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+			domain.F("episode", job.Episode.Key.Label()),
 		)
 		_ = os.Remove(tempPath)
 		return fmt.Errorf("%w: %v", domain.ErrFFmpegFailed, runErr)
@@ -313,7 +311,7 @@ func (d *Downloader) downloadDirect(ctx context.Context, job domain.Job, sink do
 	info, err := os.Stat(tempPath)
 	if err != nil || info.Size() == 0 {
 		d.logger.Error("output file missing or empty",
-			domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+			domain.F("episode", job.Episode.Key.Label()),
 			domain.F("temp_path", tempPath),
 		)
 		_ = os.Remove(tempPath)
@@ -326,7 +324,7 @@ func (d *Downloader) downloadDirect(ctx context.Context, job domain.Job, sink do
 		lastPct := parser.lastPercent()
 		if lastPct < 85 {
 			d.logger.Error("download appears truncated",
-				domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+				domain.F("episode", job.Episode.Key.Label()),
 				domain.F("last_progress_percent", lastPct),
 				domain.F("expected_duration", duration.String()),
 				domain.F("file_size", info.Size()),
@@ -348,7 +346,7 @@ func (d *Downloader) downloadDirect(ctx context.Context, job domain.Job, sink do
 	}
 
 	d.logger.Info("download completed",
-		domain.F("episode", fmt.Sprintf("S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode)),
+		domain.F("episode", job.Episode.Key.Label()),
 		domain.F("mode", string(ModeDirect)),
 		domain.F("output", job.OutPath),
 		domain.F("size", info.Size()),
@@ -357,20 +355,9 @@ func (d *Downloader) downloadDirect(ctx context.Context, job domain.Job, sink do
 	return nil
 }
 
-// Execute implements domain.JobExecutor. It delegates to Download with a no-op
-// ProgressSink.
-func (d *Downloader) Execute(ctx context.Context, job domain.Job) error {
-	return d.Download(ctx, job, nil)
-}
-
 // estimateDuration returns the expected duration of the media for progress
 // computation. It uses the resolved media's duration field obtained from ffprobe.
 // Returns 0 if duration cannot be determined.
 func estimateDuration(job domain.Job) time.Duration {
 	return job.Media.Duration
 }
-
-// noopSink is a ProgressSink that discards all updates.
-type noopSink struct{}
-
-func (noopSink) TrackProgress(_ domain.EpisodeKey, _ domain.TrackRef, _ int) {}

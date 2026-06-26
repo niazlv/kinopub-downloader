@@ -170,6 +170,40 @@ func makeUnique(labels []string) []string {
 	return result
 }
 
+// outputFormat returns the ffmpeg container format implied by the final output
+// extension. The temp suffix is stripped first because the temp file (e.g.
+// ".mkv.tmp") would otherwise defeat ffmpeg's extension-based format detection.
+func outputFormat(tempPath string) string {
+	if strings.HasSuffix(strings.TrimSuffix(tempPath, ".tmp"), ".mp4") {
+		return "mp4"
+	}
+	return "matroska"
+}
+
+// appendContainerMetadata appends the container-level metadata shared by every
+// muxing path: episode/series titles, season/episode numbers (so players like
+// Plex/Kodi/VLC display them), and — for Matroska only — the poster cover-art
+// attachment.
+func appendContainerMetadata(args []string, job domain.Job, outFormat string) []string {
+	if job.Episode.Title != "" {
+		args = append(args, "-metadata", fmt.Sprintf("title=%s", job.Episode.Title))
+	}
+	if job.SeriesTitle != "" {
+		args = append(args, "-metadata", fmt.Sprintf("SHOW=%s", job.SeriesTitle))
+	}
+	args = append(args, "-metadata", fmt.Sprintf("episode_sort=%d", job.Episode.Key.Episode))
+	args = append(args, "-metadata", fmt.Sprintf("season_number=%d", job.Episode.Key.Season))
+	args = append(args, "-metadata", "episode_id="+job.Episode.Key.Label())
+
+	// Attach poster image as cover art (MKV only — -attach is a Matroska feature).
+	if job.PosterPath != "" && outFormat == "matroska" {
+		args = append(args, "-attach", job.PosterPath)
+		args = append(args, "-metadata:s:t:0", "mimetype=image/jpeg")
+		args = append(args, "-metadata:s:t:0", "filename=cover.jpg")
+	}
+	return args
+}
+
 // BuildFFmpegArgs constructs the full ffmpeg argument list for a download job.
 // It is a pure function with no side effects.
 //
@@ -294,30 +328,9 @@ func BuildFFmpegArgs(job domain.Job, proxyEnv []string, auth domain.RequestAuth,
 
 	// Output format must be specified explicitly because the temp file extension
 	// (.mkv.tmp) is not recognized by ffmpeg's format auto-detection.
-	outFormat := "matroska"
-	if strings.HasSuffix(strings.TrimSuffix(tempPath, ".tmp"), ".mp4") {
-		outFormat = "mp4"
-	}
+	outFormat := outputFormat(tempPath)
 
-	// Container-level metadata (title, show, season/episode for media players).
-	if job.Episode.Title != "" {
-		args = append(args, "-metadata", fmt.Sprintf("title=%s", job.Episode.Title))
-	}
-	if job.SeriesTitle != "" {
-		args = append(args, "-metadata", fmt.Sprintf("SHOW=%s", job.SeriesTitle))
-	}
-	// Series title from the episode key's context — we embed season/episode info
-	// so media players (Plex, Kodi, VLC) can display it properly.
-	args = append(args, "-metadata", fmt.Sprintf("episode_sort=%d", job.Episode.Key.Episode))
-	args = append(args, "-metadata", fmt.Sprintf("season_number=%d", job.Episode.Key.Season))
-	args = append(args, "-metadata", fmt.Sprintf("episode_id=S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode))
-
-	// Attach poster image as cover art (MKV only — -attach is a Matroska feature).
-	if job.PosterPath != "" && outFormat == "matroska" {
-		args = append(args, "-attach", job.PosterPath)
-		args = append(args, "-metadata:s:t:0", "mimetype=image/jpeg")
-		args = append(args, "-metadata:s:t:0", "filename=cover.jpg")
-	}
+	args = appendContainerMetadata(args, job, outFormat)
 
 	// Extra user-supplied ffmpeg arguments (advanced: --ffmpeg-args / --x).
 	// Inserted before -f and output path so they can override -c copy or add
@@ -359,29 +372,9 @@ func BuildRemuxArgs(job domain.Job, localInput, tempPath string) []string {
 	args = append(args, "-c", "copy")
 
 	// Determine output format from the final extension.
-	outFormat := "matroska"
-	finalPath := strings.TrimSuffix(tempPath, ".tmp")
-	if strings.HasSuffix(finalPath, ".mp4") {
-		outFormat = "mp4"
-	}
+	outFormat := outputFormat(tempPath)
 
-	// Container-level metadata.
-	if job.Episode.Title != "" {
-		args = append(args, "-metadata", fmt.Sprintf("title=%s", job.Episode.Title))
-	}
-	if job.SeriesTitle != "" {
-		args = append(args, "-metadata", fmt.Sprintf("SHOW=%s", job.SeriesTitle))
-	}
-	args = append(args, "-metadata", fmt.Sprintf("episode_sort=%d", job.Episode.Key.Episode))
-	args = append(args, "-metadata", fmt.Sprintf("season_number=%d", job.Episode.Key.Season))
-	args = append(args, "-metadata", fmt.Sprintf("episode_id=S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode))
-
-	// Attach poster as cover art (MKV only).
-	if job.PosterPath != "" && outFormat == "matroska" {
-		args = append(args, "-attach", job.PosterPath)
-		args = append(args, "-metadata:s:t:0", "mimetype=image/jpeg")
-		args = append(args, "-metadata:s:t:0", "filename=cover.jpg")
-	}
+	args = appendContainerMetadata(args, job, outFormat)
 
 	args = append(args, "-f", outFormat)
 	args = append(args, tempPath)
@@ -394,10 +387,11 @@ func BuildRemuxArgs(job domain.Job, localInput, tempPath string) []string {
 // container. Each audio file is a separate input; -c copy avoids re-encoding.
 //
 // Layout:
-//   -i video.ts -i audio_0.ts -i audio_1.ts ...
-//   -map 0:v -map 1:a -map 2:a ...
-//   -c copy
-//   -metadata:s:a:N title=... language=...
+//
+//	-i video.ts -i audio_0.ts -i audio_1.ts ...
+//	-map 0:v -map 1:a -map 2:a ...
+//	-c copy
+//	-metadata:s:a:N title=... language=...
 func BuildHLSMuxArgs(job domain.Job, hls *domain.HLSDownloadResult, tempPath string) []string {
 	var args []string
 
@@ -448,29 +442,9 @@ func BuildHLSMuxArgs(job domain.Job, hls *domain.HLSDownloadResult, tempPath str
 	}
 
 	// Output format.
-	outFormat := "matroska"
-	finalPath := strings.TrimSuffix(tempPath, ".tmp")
-	if strings.HasSuffix(finalPath, ".mp4") {
-		outFormat = "mp4"
-	}
+	outFormat := outputFormat(tempPath)
 
-	// Container metadata.
-	if job.Episode.Title != "" {
-		args = append(args, "-metadata", fmt.Sprintf("title=%s", job.Episode.Title))
-	}
-	if job.SeriesTitle != "" {
-		args = append(args, "-metadata", fmt.Sprintf("SHOW=%s", job.SeriesTitle))
-	}
-	args = append(args, "-metadata", fmt.Sprintf("episode_sort=%d", job.Episode.Key.Episode))
-	args = append(args, "-metadata", fmt.Sprintf("season_number=%d", job.Episode.Key.Season))
-	args = append(args, "-metadata", fmt.Sprintf("episode_id=S%02dE%02d", job.Episode.Key.Season, job.Episode.Key.Episode))
-
-	// Poster as cover art (MKV only).
-	if job.PosterPath != "" && outFormat == "matroska" {
-		args = append(args, "-attach", job.PosterPath)
-		args = append(args, "-metadata:s:t:0", "mimetype=image/jpeg")
-		args = append(args, "-metadata:s:t:0", "filename=cover.jpg")
-	}
+	args = appendContainerMetadata(args, job, outFormat)
 
 	args = append(args, "-f", outFormat)
 	args = append(args, tempPath)

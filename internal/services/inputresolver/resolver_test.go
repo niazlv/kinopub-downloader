@@ -11,12 +11,12 @@ import (
 // stubLogger is a minimal logger for tests.
 type stubLogger struct{}
 
-func (stubLogger) Debug(string, ...domain.Field) {}
-func (stubLogger) Info(string, ...domain.Field)  {}
-func (stubLogger) Warn(string, ...domain.Field)  {}
-func (stubLogger) Error(string, ...domain.Field) {}
-func (l stubLogger) With(...domain.Field) domain.Logger   { return l }
-func (l stubLogger) Component(string) domain.Logger       { return l }
+func (stubLogger) Debug(string, ...domain.Field)        {}
+func (stubLogger) Info(string, ...domain.Field)         {}
+func (stubLogger) Warn(string, ...domain.Field)         {}
+func (stubLogger) Error(string, ...domain.Field)        {}
+func (l stubLogger) With(...domain.Field) domain.Logger { return l }
+func (l stubLogger) Component(string) domain.Logger     { return l }
 
 func TestClassify_PodcastFeed(t *testing.T) {
 	r := New(stubLogger{})

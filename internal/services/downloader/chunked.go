@@ -76,7 +76,7 @@ func (c *ChunkedDownloader) Download(ctx context.Context, url string, outPath st
 	}
 
 	c.logger.Info("streaming download starting",
-		domain.F("episode", fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
+		domain.F("episode", key.Label()),
 		domain.F("total_size", formatBytes(totalSize)),
 	)
 
@@ -88,7 +88,7 @@ func (c *ChunkedDownloader) Download(ctx context.Context, url string, outPath st
 	// Already complete?
 	if offset >= totalSize && totalSize > 0 {
 		c.logger.Info("file already complete, renaming",
-			domain.F("episode", fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
+			domain.F("episode", key.Label()),
 		)
 		if sink != nil {
 			sink.TrackProgress(key, track, 100)
@@ -102,7 +102,7 @@ func (c *ChunkedDownloader) Download(ctx context.Context, url string, outPath st
 	// Report initial progress if resuming.
 	if offset > 0 && sink != nil && totalSize > 0 {
 		c.logger.Info("resuming download",
-			domain.F("episode", fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
+			domain.F("episode", key.Label()),
 			domain.F("offset", formatBytes(offset)),
 			domain.F("remaining", formatBytes(totalSize-offset)),
 		)
@@ -142,7 +142,7 @@ func (c *ChunkedDownloader) Download(ctx context.Context, url string, outPath st
 			}
 
 			c.logger.Warn("connection lost, resuming",
-				domain.F("episode", fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
+				domain.F("episode", key.Label()),
 				domain.F("downloaded", formatBytes(offset)),
 				domain.F("attempt", consecutiveFailures),
 				domain.F("error", err.Error()),
@@ -179,7 +179,7 @@ func (c *ChunkedDownloader) Download(ctx context.Context, url string, outPath st
 	}
 
 	c.logger.Info("download complete",
-		domain.F("episode", fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)),
+		domain.F("episode", key.Label()),
 		domain.F("size", formatBytes(totalSize)),
 	)
 
@@ -378,15 +378,4 @@ func formatBytes(b int64) string {
 	default:
 		return fmt.Sprintf("%d B", b)
 	}
-}
-
-// truncateURL shortens a URL for logging (removes query params).
-func truncateURL(url string) string {
-	if idx := strings.Index(url, "?"); idx > 0 {
-		return url[:idx] + "?..."
-	}
-	if len(url) > 80 {
-		return url[:77] + "..."
-	}
-	return url
 }

@@ -17,11 +17,11 @@ func (nopLog) Debug(m string, f ...domain.Field) {
 	}
 	fmt.Println()
 }
-func (nopLog) Info(m string, f ...domain.Field)  {}
-func (nopLog) Warn(m string, f ...domain.Field)  {}
-func (nopLog) Error(m string, f ...domain.Field) {}
-func (l nopLog) With(f ...domain.Field) domain.Logger   { return l }
-func (l nopLog) Component(s string) domain.Logger       { return l }
+func (nopLog) Info(m string, f ...domain.Field)       {}
+func (nopLog) Warn(m string, f ...domain.Field)       {}
+func (nopLog) Error(m string, f ...domain.Field)      {}
+func (l nopLog) With(f ...domain.Field) domain.Logger { return l }
+func (l nopLog) Component(s string) domain.Logger     { return l }
 
 func main() {
 	auth := domain.RequestAuth{

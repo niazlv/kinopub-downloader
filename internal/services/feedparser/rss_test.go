@@ -17,11 +17,11 @@ func testLogger() domain.Logger {
 
 func TestParseSeasonEpisode_TitlePrimary(t *testing.T) {
 	tests := []struct {
-		title    string
-		link     string
-		wantS    int
-		wantE    int
-		wantOK   bool
+		title  string
+		link   string
+		wantS  int
+		wantE  int
+		wantOK bool
 	}{
 		{"s04e08 - Серия 8", "", 4, 8, true},
 		{"S01E01 - Pilot", "", 1, 1, true},

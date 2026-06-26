@@ -56,7 +56,7 @@ func (r *Resolver) Resolve(ctx context.Context, ep domain.Episode, pref domain.Q
 	defer cancel()
 
 	r.logger.Info("resolving media",
-		domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
+		domain.F("episode", ep.Key.Label()),
 	)
 
 	if len(ep.MediaSources) == 0 {

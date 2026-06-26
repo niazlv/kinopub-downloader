@@ -69,8 +69,8 @@ func (f *fakePageScraper) ExtractAllSeasons(context.Context, string) (*domain.Pa
 
 func makePlaylist(episodes int) *domain.PagePlaylist {
 	pl := &domain.PagePlaylist{
-		ItemID: 42,
-		Title:  "Test Series",
+		ItemID:  42,
+		Title:   "Test Series",
 		Seasons: []domain.PageSeason{{Season: 1, Count: episodes}},
 	}
 	for i := 1; i <= episodes; i++ {
@@ -93,7 +93,6 @@ func newRetryTestEngine(hls domain.HLSDownloader, scraper domain.PageScraper) (*
 		InputResolver:    &mockInputResolver{},
 		FeedParser:       &mockFeedParser{},
 		MediaResolver:    &mockMediaResolver{},
-		Scheduler:        &mockScheduler{},
 		Downloader:       &muxingDownloader{},
 		ProxyProvider:    &mockProxyProvider{},
 		ProgressReporter: rec,

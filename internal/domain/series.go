@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // SeriesID is a stable identifier derived from the feed (e.g., podcast numeric id).
 type SeriesID string
@@ -25,7 +28,7 @@ type Season struct {
 type Episode struct {
 	Key          EpisodeKey
 	Title        string
-	Quality      string        // declared quality, e.g. "1080p"
+	Quality      string // declared quality, e.g. "1080p"
 	PageLink     string
 	Duration     time.Duration // media duration for progress computation
 	MediaSources []MediaSource // at least one (Req 2.3)
@@ -36,4 +39,10 @@ type EpisodeKey struct {
 	Series  SeriesID
 	Season  int
 	Episode int
+}
+
+// Label returns the canonical short identifier for the episode, e.g. "S01E03".
+// It is the single source for the "S%02dE%02d" form used in logs and progress.
+func (k EpisodeKey) Label() string {
+	return fmt.Sprintf("S%02dE%02d", k.Season, k.Episode)
 }

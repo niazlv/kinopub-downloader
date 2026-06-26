@@ -8,13 +8,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"math/rand"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/app/kinopub"
 	"github.com/niazlv/kinopub-downloader/internal/domain"
@@ -23,6 +21,7 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/lib/credstore"
 	"github.com/niazlv/kinopub-downloader/internal/lib/httpx"
 	"github.com/niazlv/kinopub-downloader/internal/lib/logx"
+	"github.com/niazlv/kinopub-downloader/internal/lib/termuxapi"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termx"
 	"github.com/niazlv/kinopub-downloader/internal/services/doctor"
 	"github.com/niazlv/kinopub-downloader/internal/services/downloader"
@@ -32,17 +31,66 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/services/mediaresolver"
 	"github.com/niazlv/kinopub-downloader/internal/services/outputlayout"
 	"github.com/niazlv/kinopub-downloader/internal/services/pagescraper"
-	"github.com/niazlv/kinopub-downloader/internal/lib/termuxapi"
 	"github.com/niazlv/kinopub-downloader/internal/services/progress"
 	"github.com/niazlv/kinopub-downloader/internal/services/proxyprovider"
-	"github.com/niazlv/kinopub-downloader/internal/services/scheduler"
 	"github.com/niazlv/kinopub-downloader/internal/services/statestore"
 )
 
 var version = "dev"
 
+// defaultUserAgent is a realistic Safari User-Agent used when the user supplies
+// none. It serves two purposes: Cloudflare binds cf_clearance to the UA that
+// solved the challenge (a mismatched UA is rejected with 403), and even without
+// cookies Go's default "Go-http-client/1.1" looks suspicious to Cloudflare. The
+// user can override it with --user-agent to match the browser that issued the
+// cookies.
+const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
+
 func main() {
 	os.Exit(run())
+}
+
+// resolveAuth resolves the Cookie header and User-Agent for an outbound
+// session, following the precedence: explicit --cookie > --browser-cookies >
+// stored credentials from `kinopub login`, with defaultUserAgent as the final
+// UA fallback. A failed browser load is fatal when browserLoadFatal is set (the
+// download path cannot proceed without the requested cookies); otherwise it
+// degrades to a warning (doctor can still run read-only checks). The returned
+// fatal flag tells the caller to abort.
+func resolveAuth(cookie, userAgent string, browserCk browserCookiesFlag, browserLoadFatal bool) (resolvedCookie, resolvedUA string, fatal bool) {
+	resolvedCookie = cookie
+	resolvedUA = userAgent
+
+	if resolvedCookie == "" && browserCk.set {
+		ck, err := browsercookies.Load(browserCk.value, "kino.pub")
+		if err != nil {
+			if browserLoadFatal {
+				fmt.Fprintf(os.Stderr, "Error: could not load cookies from browser %q: %v\n", browserCk.value, err)
+				return "", resolvedUA, true
+			}
+			fmt.Fprintf(os.Stderr, "Warning: could not load cookies from browser %q: %v\n", browserCk.value, err)
+		} else {
+			resolvedCookie = ck
+		}
+	}
+
+	// Fall back to stored credentials if nothing was provided explicitly.
+	if resolvedCookie == "" {
+		stored, err := credstore.Load()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not load stored credentials: %v\n", err)
+		} else if !stored.IsEmpty() {
+			resolvedCookie = stored.Cookie
+			if resolvedUA == "" && stored.UserAgent != "" {
+				resolvedUA = stored.UserAgent
+			}
+		}
+	}
+
+	if resolvedUA == "" {
+		resolvedUA = defaultUserAgent
+	}
+	return resolvedCookie, resolvedUA, false
 }
 
 func run() int {
@@ -64,7 +112,6 @@ func run() int {
 	var (
 		output      string
 		concurrency int
-		retries     int
 		proxyURL    string
 		quality     string
 		verbosity   string
@@ -75,7 +122,6 @@ func run() int {
 		seasons     string
 		episodes    string
 		dryRun      bool
-		minInterval int
 		showVersion bool
 		cookie      string
 		userAgent   string
@@ -96,7 +142,6 @@ func run() int {
 	fs.StringVar(&output, "o", "", "output directory path (shorthand)")
 	fs.IntVar(&concurrency, "concurrency", 0, "max concurrent downloads (default: 2)")
 	fs.IntVar(&concurrency, "c", 0, "max concurrent downloads (shorthand)")
-	fs.IntVar(&retries, "retries", 0, "max retry count (default: 5)")
 	fs.StringVar(&proxyURL, "proxy", "", "proxy URL (http, https, or socks5)")
 	fs.StringVar(&quality, "quality", "", "quality preference (e.g. 1080p)")
 	fs.StringVar(&quality, "q", "", "quality preference (shorthand)")
@@ -110,7 +155,6 @@ func run() int {
 	fs.StringVar(&seasons, "seasons", "", "season selection (e.g. 1,3-5)")
 	fs.StringVar(&episodes, "episodes", "", "episode selection (e.g. 1,3-5)")
 	fs.BoolVar(&dryRun, "dry-run", false, "list episodes without downloading")
-	fs.IntVar(&minInterval, "min-interval", 0, "minimum interval between requests in ms")
 	fs.StringVar(&cookie, "cookie", "", "raw Cookie header value sent with every request (and to ffmpeg)")
 	fs.StringVar(&userAgent, "user-agent", "", "User-Agent sent with every request (must match the browser that issued the cookies)")
 	fs.Var(&headerVals, "header", "extra HTTP header 'Name: Value' (repeatable)")
@@ -259,42 +303,11 @@ func run() int {
 		return 1
 	}
 
-	// Resolve the Cookie header: an explicit --cookie wins; otherwise try to
-	// auto-load cookies from the named browser; finally fall back to stored
-	// credentials from `kinopub login`.
-	resolvedCookie := cookie
-	if resolvedCookie == "" && browserCk.set {
-		ck, cerr := browsercookies.Load(browserCk.value, "kino.pub")
-		if cerr != nil {
-			fmt.Fprintf(os.Stderr, "Error: could not load cookies from browser %q: %v\n", browserCk.value, cerr)
-			return 1
-		}
-		resolvedCookie = ck
-	}
-
-	// Fall back to stored credentials if nothing was provided explicitly.
-	if resolvedCookie == "" {
-		stored, err := credstore.Load()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not load stored credentials: %v\n", err)
-		} else if !stored.IsEmpty() {
-			resolvedCookie = stored.Cookie
-			if userAgent == "" && stored.UserAgent != "" {
-				userAgent = stored.UserAgent
-			}
-		}
-	}
-
-	// Default User-Agent: if no explicit --user-agent was given, use a
-	// realistic Safari UA. This serves two purposes:
-	//  1. Cloudflare's cf_clearance is bound to the UA that solved the
-	//     challenge — without a matching UA the cookie is rejected with 403.
-	//  2. Even without cookies, Go's default "Go-http-client/1.1" looks
-	//     suspicious to Cloudflare and may trigger challenges.
-	// The user can always override with --user-agent if their cookies were
-	// issued under a different browser.
-	if userAgent == "" {
-		userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
+	// Resolve the Cookie header and User-Agent. A browser-load failure is fatal
+	// here: the download cannot proceed without the cookies the user requested.
+	resolvedCookie, userAgent, fatal := resolveAuth(cookie, userAgent, browserCk, true)
+	if fatal {
+		return 1
 	}
 
 	// Build RunConfig.
@@ -309,8 +322,6 @@ func run() int {
 		InputURL:        inputURL,
 		OutputPath:      output,
 		MaxConcurrency:  concurrency,
-		MaxRetries:      retries,
-		MinIntervalMS:   minInterval,
 		ProxyURL:        proxyURL,
 		Quality:         domain.Quality(quality),
 		Verbosity:       verb,
@@ -348,16 +359,10 @@ func run() int {
 		}
 	}
 
-	// Set up signal-driven context for graceful shutdown.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		cancel()
-	}()
+	// Set up a signal-driven context for graceful shutdown. NotifyContext
+	// cancels ctx on the first SIGINT/SIGTERM; stop() restores default handling.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// Wire up services.
 	deps, cleanup, err := buildDependencies(cfg)
@@ -436,7 +441,7 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 
 	// Input resolver — with page scraper when auth is available.
 	var resolverOpts []inputresolver.Option
-	if !auth.IsZero() {
+	if auth.HasCredentials() {
 		scraper := pagescraper.New(httpClient, logger)
 		resolverOpts = append(resolverOpts, inputresolver.WithPageScraper(scraper))
 	}
@@ -475,20 +480,6 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 		downloader.WithHTTPClient(httpClient),
 	)
 
-	// Scheduler.
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	sched := scheduler.New(
-		scheduler.Config{
-			MaxConcurrency: cfg.MaxConcurrency,
-			MaxRetries:     cfg.MaxRetries,
-			MinIntervalMS:  cfg.MinIntervalMS,
-			GracePeriod:    cfg.GracePeriod,
-		},
-		&realClock{},
-		logger,
-		rng,
-	)
-
 	// Progress reporter — choose live or log based on TTY.
 	var progReporter domain.ProgressReporter
 	if termx.IsTTY(os.Stderr) {
@@ -504,7 +495,6 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 		InputResolver:    inputRes,
 		FeedParser:       feedPars,
 		MediaResolver:    mediaRes,
-		Scheduler:        sched,
 		Downloader:       dl,
 		ProxyProvider:    proxyProv,
 		ProgressReporter: progReporter,
@@ -514,7 +504,7 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 
 	// Optional HLS pipeline: only available when auth is present (page scraping
 	// requires cookies to access the player page).
-	if !auth.IsZero() {
+	if auth.HasCredentials() {
 		scraper := pagescraper.New(httpClient, logger)
 		hlsDl := hlsdownloader.New(httpClient, auth, logger,
 			hlsdownloader.WithConcurrency(cfg.MaxConcurrency),
@@ -575,10 +565,15 @@ func (h *headerList) String() string {
 	return strings.Join(*h, ", ")
 }
 
-// Set implements flag.Value, appending each --header occurrence.
+// Set implements flag.Value, appending each --header occurrence after checking
+// it has a non-empty name (toMap would otherwise silently drop it).
 func (h *headerList) Set(v string) error {
-	if !strings.Contains(v, ":") {
+	name, _, ok := strings.Cut(v, ":")
+	if !ok {
 		return fmt.Errorf("%w: header must be in 'Name: Value' form, got %q", domain.ErrInvalidFlag, v)
+	}
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("%w: header name must not be empty, got %q", domain.ErrInvalidFlag, v)
 	}
 	*h = append(*h, v)
 	return nil
@@ -641,13 +636,6 @@ func isKnownBrowser(s string) bool {
 	}
 }
 
-// realClock implements domain.Clock using the real system clock.
-type realClock struct{}
-
-func (realClock) Now() time.Time                         { return time.Now() }
-func (realClock) Sleep(d time.Duration)                  { time.Sleep(d) }
-func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
-
 // makeRunOutput creates a RunOutputFunc that executes a command and captures stdout.
 // On failure, stderr is included in the error message for diagnostics.
 func makeRunOutput() mediaresolver.RunOutputFunc {
@@ -694,7 +682,8 @@ func makeRunFunc() downloader.RunFunc {
 
 // runLogin saves authentication credentials encrypted to disk.
 // Usage: kinopub login --cookie "..." [--user-agent "..."]
-//        kinopub login --browser-cookies [safari|chrome|firefox|auto]
+//
+//	kinopub login --browser-cookies [safari|chrome|firefox|auto]
 func runLogin(args []string) int {
 	fs := flag.NewFlagSet("kinopub login", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -754,7 +743,7 @@ func runLogin(args []string) int {
 
 	// Default UA.
 	if userAgent == "" {
-		userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
+		userAgent = defaultUserAgent
 	}
 
 	creds := credstore.Credentials{
@@ -856,28 +845,10 @@ func runDoctor(args []string) int {
 		outputDir, _ = os.Getwd()
 	}
 
-	// Resolve auth (same logic as main download command).
-	resolvedCookie := cookie
-	if resolvedCookie == "" && browserCk.set {
-		ck, cerr := browsercookies.Load(browserCk.value, "kino.pub")
-		if cerr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not load cookies from browser %q: %v\n", browserCk.value, cerr)
-		} else {
-			resolvedCookie = ck
-		}
-	}
-	if resolvedCookie == "" {
-		stored, err := credstore.Load()
-		if err == nil && !stored.IsEmpty() {
-			resolvedCookie = stored.Cookie
-			if userAgent == "" && stored.UserAgent != "" {
-				userAgent = stored.UserAgent
-			}
-		}
-	}
-	if userAgent == "" {
-		userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
-	}
+	// Resolve auth (same precedence as the main download command). A browser-load
+	// failure is non-fatal here — doctor can still run read-only checks without
+	// fresh source resolution.
+	resolvedCookie, userAgent, _ := resolveAuth(cookie, userAgent, browserCk, false)
 
 	auth := domain.RequestAuth{
 		Cookie:    resolvedCookie,
@@ -908,7 +879,7 @@ func runDoctor(args []string) int {
 	httpClient := httpx.WithAuth(proxyProv.HTTPClient(), auth)
 
 	var resolverOpts []inputresolver.Option
-	if !auth.IsZero() {
+	if auth.HasCredentials() {
 		scraper := pagescraper.New(httpClient, logger)
 		resolverOpts = append(resolverOpts, inputresolver.WithPageScraper(scraper))
 	}
@@ -1077,7 +1048,6 @@ complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a comp
 # Main command flags
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s o -l output        -d "Output directory path" -r -F
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s c -l concurrency   -d "Max concurrent downloads" -r
-complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l retries        -d "Max retry count" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l proxy          -d "Proxy URL (http, https, socks5)" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s q -l quality       -d "Quality preference" -r -a "4k 2160p 1080p 720p 480p 360p"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l verbosity      -d "Log verbosity" -r -a "quiet\t'Suppress output' normal\t'Default' verbose\t'All messages'"
@@ -1089,7 +1059,6 @@ complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l fo
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l seasons        -d "Season selection (e.g. 1,3-5)" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l episodes       -d "Episode selection (e.g. 1,3-5)" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l dry-run        -d "List episodes without downloading"
-complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l min-interval   -d "Min interval between requests (ms)" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l cookie         -d "Raw Cookie header value" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l user-agent     -d "User-Agent header" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l header         -d "Extra HTTP header 'Name: Value'" -r
@@ -1132,9 +1101,9 @@ _kinopub_completion() {
     _init_completion || return
 
     local subcommands="login logout doctor completion"
-    local main_flags="-o --output -c --concurrency --retries --proxy -q --quality
+    local main_flags="-o --output -c --concurrency --proxy -q --quality
         --verbosity -v --ffmpeg --log-file --container --force --seasons --episodes
-        --dry-run --min-interval --cookie --user-agent --header --browser-cookies
+        --dry-run --cookie --user-agent --header --browser-cookies
         --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu --version"
 
     # Detect which subcommand is active
@@ -1185,7 +1154,7 @@ _kinopub_completion() {
                     --browser-cookies)
                         COMPREPLY=($(compgen -W "safari chrome firefox auto" -- "$cur")); return ;;
                     --cookie|--user-agent|--proxy|--header|--seasons|--episodes| \
-                    --min-interval|--retries|--ffmpeg-args|-x|-c|--concurrency|--audio)
+                    --ffmpeg-args|-x|-c|--concurrency|--audio)
                         return ;;
                 esac
                 COMPREPLY=($(compgen -W "$main_flags" -- "$cur"))

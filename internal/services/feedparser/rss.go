@@ -152,13 +152,12 @@ func (p *Parser) parseRSS(data []byte, src domain.FeedSource) (domain.Series, er
 		return domain.Series{}, domain.ErrEmptyFeed
 	}
 
-	// Count total episodes.
+	// Count total episodes for the summary log. Each seasonMap entry holds at
+	// least one episode, so the len(seasonMap)==0 guard above already covers the
+	// empty-feed case.
 	totalEpisodes := 0
 	for _, eps := range seasonMap {
 		totalEpisodes += len(eps)
-	}
-	if totalEpisodes == 0 {
-		return domain.Series{}, domain.ErrEmptyFeed
 	}
 
 	// Build sorted seasons (Req 2.4).

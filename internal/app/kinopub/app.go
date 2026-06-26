@@ -12,7 +12,6 @@ type Dependencies struct {
 	InputResolver    domain.InputResolver
 	FeedParser       domain.FeedParser
 	MediaResolver    domain.MediaResolver
-	Scheduler        domain.Scheduler
 	Downloader       domain.Downloader
 	ProxyProvider    domain.ProxyProvider
 	ProgressReporter domain.ProgressReporter

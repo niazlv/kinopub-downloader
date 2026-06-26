@@ -17,14 +17,6 @@ func ValidateConfig(cfg *domain.RunConfig) error {
 		return fmt.Errorf("%w: max concurrency must be in [1,16], got %d", domain.ErrInvalidFlag, cfg.MaxConcurrency)
 	}
 
-	if cfg.MaxRetries < 0 {
-		return fmt.Errorf("%w: max retries must be >= 0, got %d", domain.ErrInvalidFlag, cfg.MaxRetries)
-	}
-
-	if cfg.MinIntervalMS < 0 || cfg.MinIntervalMS > 60000 {
-		return fmt.Errorf("%w: min interval must be in [0,60000] ms, got %d", domain.ErrInvalidFlag, cfg.MinIntervalMS)
-	}
-
 	switch cfg.Verbosity {
 	case domain.VerbosityQuiet, domain.VerbosityNormal, domain.VerbosityVerbose:
 		// valid
@@ -71,10 +63,7 @@ func ApplyDefaults(cfg *domain.RunConfig) {
 	if cfg.MaxConcurrency == 0 {
 		cfg.MaxConcurrency = 2
 	}
-	if cfg.MaxRetries == 0 {
-		cfg.MaxRetries = 5
-	}
-	if cfg.Verbosity == 0 {
+	if cfg.Verbosity == domain.VerbosityUnset {
 		cfg.Verbosity = domain.VerbosityNormal
 	}
 	if cfg.FFmpegPath == "" {
@@ -82,9 +71,6 @@ func ApplyDefaults(cfg *domain.RunConfig) {
 	}
 	if cfg.Container == 0 {
 		cfg.Container = domain.ContainerMKV
-	}
-	if cfg.GracePeriod == 0 {
-		cfg.GracePeriod = 30 * time.Second
 	}
 	if !cfg.SeasonSel.All && len(cfg.SeasonSel.Values) == 0 && len(cfg.SeasonSel.Ranges) == 0 {
 		cfg.SeasonSel = domain.Selection{All: true}

@@ -10,7 +10,8 @@ type Quality string
 type Verbosity int
 
 const (
-	VerbosityQuiet   Verbosity = iota // show only warn/error
+	VerbosityUnset   Verbosity = iota // no explicit choice yet — ApplyDefaults fills Normal
+	VerbosityQuiet                    // show only warn/error
 	VerbosityNormal                   // show info/warn/error (default)
 	VerbosityVerbose                  // show debug/info/warn/error
 )
@@ -35,21 +36,18 @@ const (
 // RunConfig holds all configuration for a single download run.
 type RunConfig struct {
 	InputURL        string
-	OutputPath      string        // "" → cwd (Req 11.1)
-	MaxConcurrency  int           // [1,16], default 2 (Req 4.1, 4.2)
-	MaxRetries      int           // default 5 (Req 5.6)
-	MinIntervalMS   int           // [0,60000] (Req 4.5)
-	ProxyURL        string        // explicit proxy; "" → system/direct
+	OutputPath      string // "" → cwd (Req 11.1)
+	MaxConcurrency  int    // [1,16], default 2 (Req 4.1, 4.2)
+	ProxyURL        string // explicit proxy; "" → system/direct
 	Quality         Quality
-	Verbosity       Verbosity     // default Normal (Req 14.1)
-	FFmpegPath      string        // default "ffmpeg" on PATH (Req 7.3)
-	LogFilePath     string        // "" → no file sink (Req 13.7)
+	Verbosity       Verbosity // default Normal (Req 14.1)
+	FFmpegPath      string    // default "ffmpeg" on PATH (Req 7.3)
+	LogFilePath     string    // "" → no file sink (Req 13.7)
 	Container       Container
-	ForceRedownload bool          // (Req 12.4)
-	SeasonSel       Selection     // (Req 15.5)
-	EpisodeSel      Selection     // (Req 15.5)
-	DryRun          bool          // (Req 15.6)
-	GracePeriod     time.Duration // default 30s (Req 4.7)
+	ForceRedownload bool      // (Req 12.4)
+	SeasonSel       Selection // (Req 15.5)
+	EpisodeSel      Selection // (Req 15.5)
+	DryRun          bool      // (Req 15.6)
 
 	// Authentication / request shaping. kino.pub sits behind Cloudflare and may
 	// return HTTP 403 for unauthenticated requests. These fields let the user
@@ -100,6 +98,14 @@ type RequestAuth struct {
 // IsZero reports whether the auth carries no information.
 func (a RequestAuth) IsZero() bool {
 	return a.Cookie == "" && a.UserAgent == "" && len(a.Headers) == 0
+}
+
+// HasCredentials reports whether the auth actually authenticates a request,
+// i.e. carries a Cookie. UserAgent and Headers (e.g. a default Referer) are
+// always populated by the CLI, so IsZero is effectively never true there and
+// cannot be used to gate cookie-only features like page scraping.
+func (a RequestAuth) HasCredentials() bool {
+	return a.Cookie != ""
 }
 
 // Selection is a parsed set/range expression over season or episode numbers.

@@ -37,6 +37,7 @@ type Notifier struct {
 	seriesTitle string
 	completed   int
 	total       int
+	stopped     bool // guarded by mu; once true, refresh() posts nothing more
 
 	// current episode state (updated concurrently by TrackProgress)
 	currentEp  atomic.Value // string
@@ -44,6 +45,9 @@ type Notifier struct {
 
 	// throttle: skip notification if previous goroutine is still running
 	notifying atomic.Bool
+	// wg tracks in-flight refresh goroutines so Stop() can wait for them before
+	// posting the final notification.
+	wg sync.WaitGroup
 }
 
 // Wrap returns a new Notifier that delegates to inner and adds Termux
@@ -71,7 +75,7 @@ func (n *Notifier) Start(plan domain.SeriesPlan) {
 }
 
 func (n *Notifier) EpisodeStarted(key domain.EpisodeKey) {
-	label := fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)
+	label := key.Label()
 	n.currentEp.Store(label)
 	n.currentPct.Store(0)
 	n.inner.EpisodeStarted(key)
@@ -98,7 +102,7 @@ func (n *Notifier) EpisodeCompleted(key domain.EpisodeKey) {
 	if total > 0 {
 		pct = done * 100 / total
 	}
-	ep := fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)
+	ep := key.Label()
 	n.notify(
 		fmt.Sprintf("kinopub %d%% — %s", pct, title),
 		fmt.Sprintf("%s готово · %d/%d эп.", ep, done, total),
@@ -114,10 +118,15 @@ func (n *Notifier) Stop() {
 	n.inner.Stop()
 
 	n.mu.Lock()
+	n.stopped = true
 	done := n.completed
 	total := n.total
 	title := n.seriesTitle
 	n.mu.Unlock()
+
+	// Wait for any in-flight ongoing-notification post to finish so the final
+	// notification/removal below is the last thing the user sees.
+	n.wg.Wait()
 
 	if done > 0 && done >= total {
 		exec.Command("termux-notification", //nolint:errcheck
@@ -169,6 +178,14 @@ func (n *Notifier) refresh() {
 	pct := int(n.currentPct.Load())
 
 	n.mu.Lock()
+	if n.stopped {
+		// Stop() has run (or is running) — don't launch a post that could land
+		// after the final notification. Releasing the throttle is enough.
+		n.mu.Unlock()
+		n.notifying.Store(false)
+		return
+	}
+	n.wg.Add(1)
 	done := n.completed
 	total := n.total
 	title := n.seriesTitle
@@ -182,6 +199,7 @@ func (n *Notifier) refresh() {
 	content := fmt.Sprintf("%s · %d/%d эп.  %d%%", ep, done, total, pct)
 
 	go func() {
+		defer n.wg.Done()
 		defer n.notifying.Store(false)
 		exec.Command("termux-notification", //nolint:errcheck
 			"--id", notificationID,

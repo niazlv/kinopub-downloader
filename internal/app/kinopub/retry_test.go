@@ -37,6 +37,10 @@ func TestIsTransientDownloadError(t *testing.T) {
 		"HTTP 404",
 		"HTTP 403",
 		"invalid manifest",
+		// A segment index that happens to contain a 5xx-looking number must not
+		// flip a permanent error to retryable (regression: bare numeric markers).
+		"segment 500 failed: invalid manifest",
+		"segment 429 failed: no variants found",
 	}
 	for _, msg := range permanent {
 		if isTransientDownloadError(errors.New(msg)) {
@@ -115,10 +119,12 @@ type recordingReporter struct {
 	deferred  []domain.EpisodeKey
 }
 
-func (r *recordingReporter) Start(domain.SeriesPlan)                 {}
-func (r *recordingReporter) EpisodeStarted(k domain.EpisodeKey)      { r.started = append(r.started, k) }
+func (r *recordingReporter) Start(domain.SeriesPlan)                               {}
+func (r *recordingReporter) EpisodeStarted(k domain.EpisodeKey)                    { r.started = append(r.started, k) }
 func (r *recordingReporter) TrackProgress(domain.EpisodeKey, domain.TrackRef, int) {}
-func (r *recordingReporter) EpisodeCompleted(k domain.EpisodeKey)    { r.completed = append(r.completed, k) }
+func (r *recordingReporter) EpisodeCompleted(k domain.EpisodeKey) {
+	r.completed = append(r.completed, k)
+}
 func (r *recordingReporter) EpisodeFailed(k domain.EpisodeKey, _ error) {
 	r.failed = append(r.failed, k)
 }

@@ -54,7 +54,7 @@ type SubtitleTrack struct {
 type TrackKind int
 
 const (
-	TrackVideo    TrackKind = iota
+	TrackVideo TrackKind = iota
 	TrackAudio
 	TrackSubtitle
 )

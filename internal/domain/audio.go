@@ -142,7 +142,6 @@ func SelectAudio(tracks []AudioTrackInfo, pref AudioPreference) []int {
 	}
 	if len(remaining) == 0 {
 		// Excludes nuked everything — keep all so the output still has audio.
-		remaining = remaining[:0]
 		for i := range tracks {
 			remaining = append(remaining, i)
 		}

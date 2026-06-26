@@ -124,7 +124,7 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 	if cfg.DryRun {
 		log.Info("dry run — listing episodes without downloading")
 		for _, ep := range selected {
-			log.Info(fmt.Sprintf("  S%02dE%02d %s", ep.Key.Season, ep.Key.Episode, ep.Title))
+			log.Info(fmt.Sprintf("  %s %s", ep.Key.Label(), ep.Title))
 		}
 		return domain.RunResult{Total: len(selected)}, nil
 	}
@@ -214,7 +214,7 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 				}
 
 				log.Info("resolving media",
-					domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
+					domain.F("episode", ep.Key.Label()),
 				)
 
 				// Resolve media (ffprobe / HLS fetch).
@@ -224,7 +224,7 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 					consecutiveFails++
 					cf := consecutiveFails
 					log.Warn("media resolution failed",
-						domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
+						domain.F("episode", ep.Key.Label()),
 						domain.F("error", err.Error()),
 						domain.F("consecutive_fails", cf),
 					)
@@ -255,7 +255,7 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 					qualityInfo = fmt.Sprintf("%s @ %d kbps", media.Video.Resolution, media.Video.BitRate)
 				}
 				log.Info("media resolved",
-					domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
+					domain.F("episode", ep.Key.Label()),
 					domain.F("quality", qualityInfo),
 					domain.F("audio_tracks", len(media.Audio)),
 				)
@@ -264,7 +264,7 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 				outPath, err := e.deps.OutputLayout.EpisodePath(cfg.OutputPath, series, ep)
 				if err != nil {
 					log.Warn("output path failed, skipping",
-						domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
+						domain.F("episode", ep.Key.Label()),
 						domain.F("error", err.Error()),
 					)
 					mu.Lock()
@@ -307,7 +307,7 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 					}
 
 					log.Warn("download attempt failed",
-						domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
+						domain.F("episode", ep.Key.Label()),
 						domain.F("attempt", attempt),
 						domain.F("max_attempts", maxDownloadAttempts),
 						domain.F("error", dlErr.Error()),
@@ -354,7 +354,7 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 				}
 				if err := e.deps.StateStore.MarkCompleted(ctx, completedInfo); err != nil {
 					log.Warn("failed to persist state",
-						domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
+						domain.F("episode", ep.Key.Label()),
 						domain.F("error", err.Error()),
 					)
 				}
@@ -469,7 +469,7 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 	if cfg.DryRun {
 		log.Info("dry run — listing episodes")
 		for _, ep := range selected {
-			log.Info(fmt.Sprintf("  S%02dE%02d %s", ep.Key.Season, ep.Key.Episode, ep.Title))
+			log.Info(fmt.Sprintf("  %s %s", ep.Key.Label(), ep.Title))
 		}
 		return domain.RunResult{Total: len(selected)}, nil
 	}
@@ -543,7 +543,7 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 		manifestURL, ok := manifestMap[ep.Key]
 		if !ok {
 			log.Warn("no manifest URL for episode, skipping",
-				domain.F("episode", fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)),
+				domain.F("episode", ep.Key.Label()),
 			)
 			skipped++
 			continue
@@ -561,7 +561,7 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 			return
 		}
 		pe.attempts++
-		epLabel := fmt.Sprintf("S%02dE%02d", pe.ep.Key.Season, pe.ep.Key.Episode)
+		epLabel := pe.ep.Key.Label()
 
 		res, err := e.attemptHLSEpisode(ctx, cfg, series, pe.ep, pe.manifest, posterPath)
 		switch res {
@@ -639,7 +639,7 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 		retryQueue = append(retryQueue[:idx], retryQueue[idx+1:]...)
 		if wait := time.Until(pe.nextAt); wait > 0 {
 			log.Info("waiting before next retry",
-				domain.F("episode", fmt.Sprintf("S%02dE%02d", pe.ep.Key.Season, pe.ep.Key.Episode)),
+				domain.F("episode", pe.ep.Key.Label()),
 				domain.F("wait", wait.Round(time.Second).String()),
 			)
 			select {
@@ -756,7 +756,7 @@ func (e *engine) attemptHLSEpisode(
 	posterPath string,
 ) (episodeOutcome, error) {
 	log := e.deps.Logger.Component("engine-hls")
-	epLabel := fmt.Sprintf("S%02dE%02d", ep.Key.Season, ep.Key.Episode)
+	epLabel := ep.Key.Label()
 
 	outPath, err := e.deps.OutputLayout.EpisodePath(cfg.OutputPath, series, ep)
 	if err != nil {
@@ -849,14 +849,18 @@ var transientErrorMarkers = []string{
 	"connection refused",
 	"broken pipe",
 	"eof",
-	"no such host",        // transient DNS
-	"temporary failure",   // transient DNS
+	"no such host",      // transient DNS
+	"temporary failure", // transient DNS
 	"tls handshake",
-	"http 429", "429",     // rate limited
-	"http 500", "500",
-	"http 502", "502",
-	"http 503", "503",
-	"http 504", "504",
+	// HTTP status markers are matched in their "http NNN" form only. Bare
+	// numbers ("500", "429", …) were removed because a segment index or byte
+	// count in an otherwise-permanent error (e.g. "segment 500: invalid
+	// manifest") would falsely flip it to retryable.
+	"http 429", // rate limited
+	"http 500",
+	"http 502",
+	"http 503",
+	"http 504",
 	"server misbehaving",
 }
 
@@ -877,8 +881,6 @@ func isTransientDownloadError(err error) bool {
 	return false
 }
 
-
-//
 // Precedence:
 //  1. An explicit cfg.AudioPref (from the --audio flag) is used as-is, with
 //     Prefer hints enriched from the first episode's tracks so a missing dub
@@ -1033,11 +1035,6 @@ func (e *engine) filterCompleted(episodes []domain.Episode, state domain.Downloa
 	return selected
 }
 
-// selectEpisodes filters episodes by season/episode selection and completion state.
-func (e *engine) selectEpisodes(series domain.Series, state domain.DownloadState, cfg domain.RunConfig) []domain.Episode {
-	return e.filterCompleted(e.matchingEpisodes(series, cfg), state, cfg)
-}
-
 // countSeasons counts episodes per season for the progress plan.
 func countSeasons(episodes []domain.Episode) map[int]int {
 	m := make(map[int]int)
@@ -1056,19 +1053,6 @@ func countCompletedPerSeason(allEpisodes []domain.Episode, state domain.Download
 		}
 	}
 	return m
-}
-
-// downloadExecutor adapts the Downloader interface to the JobExecutor interface
-// expected by the Scheduler. Kept for compatibility.
-type downloadExecutor struct {
-	downloader domain.Downloader
-	reporter   domain.ProgressReporter
-}
-
-// Execute implements domain.JobExecutor.
-func (d *downloadExecutor) Execute(ctx context.Context, job domain.Job) error {
-	d.reporter.EpisodeStarted(job.Episode.Key)
-	return d.downloader.Download(ctx, job, d.reporter)
 }
 
 // seriesDirPath computes the series download directory path using the same

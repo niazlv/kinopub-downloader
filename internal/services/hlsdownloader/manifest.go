@@ -123,9 +123,18 @@ func FetchMediaPlaylist(ctx context.Context, client *http.Client, playlistURL st
 	return nil, fmt.Errorf("fetch media playlist: %w", lastErr)
 }
 
+// newPlaylistScanner returns a line scanner with a raised max token size so a
+// very long m3u8 line (e.g. a segment URL with a large signed query string)
+// doesn't trip bufio.Scanner's default 64KB limit. Normal input is unaffected.
+func newPlaylistScanner(r io.Reader) *bufio.Scanner {
+	s := bufio.NewScanner(r)
+	s.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	return s
+}
+
 // parseMasterPlaylist parses an m3u8 master playlist.
 func parseMasterPlaylist(r io.Reader, baseURL string) (*MasterPlaylist, error) {
-	scanner := bufio.NewScanner(r)
+	scanner := newPlaylistScanner(r)
 	result := &MasterPlaylist{}
 
 	var pendingVariant *Variant
@@ -164,10 +173,15 @@ func parseMasterPlaylist(r io.Reader, baseURL string) (*MasterPlaylist, error) {
 
 // parseMediaPlaylist parses an m3u8 media playlist (segment list).
 func parseMediaPlaylist(r io.Reader, baseURL string) (*MediaPlaylist, error) {
-	scanner := bufio.NewScanner(r)
+	scanner := newPlaylistScanner(r)
 	result := &MediaPlaylist{}
 
 	var pendingDuration float64
+	// havePending tracks whether the most recent line was an #EXTINF tag, so
+	// the next URI is captured as a segment. This must be independent of the
+	// duration value: a valid #EXTINF:0 segment would otherwise be silently
+	// dropped, truncating the stream.
+	var havePending bool
 	index := 0
 
 	for scanner.Scan() {
@@ -180,8 +194,14 @@ func parseMediaPlaylist(r io.Reader, baseURL string) (*MediaPlaylist, error) {
 				durStr = durStr[:idx]
 			}
 			dur, _ := strconv.ParseFloat(strings.TrimSpace(durStr), 64)
+			// A malformed (negative) duration must not corrupt the running
+			// total or progress estimates; clamp it. Zero is preserved.
+			if dur < 0 {
+				dur = 0
+			}
 			pendingDuration = dur
-		} else if !strings.HasPrefix(line, "#") && line != "" && pendingDuration > 0 {
+			havePending = true
+		} else if havePending && !strings.HasPrefix(line, "#") && line != "" {
 			seg := Segment{
 				URL:      resolveURL(baseURL, line),
 				Duration: pendingDuration,
@@ -190,6 +210,7 @@ func parseMediaPlaylist(r io.Reader, baseURL string) (*MediaPlaylist, error) {
 			result.Segments = append(result.Segments, seg)
 			result.TotalDuration += pendingDuration
 			pendingDuration = 0
+			havePending = false
 			index++
 		}
 	}
@@ -234,7 +255,9 @@ func parseHLSAttributes(s string) map[string]string {
 			break
 		}
 		key := strings.TrimSpace(s[:eqIdx])
-		s = s[eqIdx+1:]
+		// Trim whitespace after '=' so a quoted value with a leading space
+		// (KEY = "val") is recognized as quoted rather than kept literal.
+		s = strings.TrimLeft(s[eqIdx+1:], " \t")
 
 		var value string
 		if len(s) > 0 && s[0] == '"' {

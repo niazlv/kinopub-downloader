@@ -3,7 +3,6 @@ package kinopub
 import (
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
@@ -11,8 +10,6 @@ import (
 func validConfig() *domain.RunConfig {
 	return &domain.RunConfig{
 		MaxConcurrency: 2,
-		MaxRetries:     5,
-		MinIntervalMS:  1000,
 		Verbosity:      domain.VerbosityNormal,
 		Container:      domain.ContainerMKV,
 	}
@@ -44,68 +41,6 @@ func TestValidateConfig_MaxConcurrency(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := validConfig()
 			cfg.MaxConcurrency = tc.value
-			err := ValidateConfig(cfg)
-			if tc.valid && err != nil {
-				t.Errorf("expected valid, got error: %v", err)
-			}
-			if !tc.valid {
-				if err == nil {
-					t.Error("expected error, got nil")
-				} else if !errors.Is(err, domain.ErrInvalidFlag) {
-					t.Errorf("expected ErrInvalidFlag, got %v", err)
-				}
-			}
-		})
-	}
-}
-
-func TestValidateConfig_MaxRetries(t *testing.T) {
-	tests := []struct {
-		name  string
-		value int
-		valid bool
-	}{
-		{"zero", 0, true},
-		{"positive", 10, true},
-		{"negative", -1, false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := validConfig()
-			cfg.MaxRetries = tc.value
-			err := ValidateConfig(cfg)
-			if tc.valid && err != nil {
-				t.Errorf("expected valid, got error: %v", err)
-			}
-			if !tc.valid {
-				if err == nil {
-					t.Error("expected error, got nil")
-				} else if !errors.Is(err, domain.ErrInvalidFlag) {
-					t.Errorf("expected ErrInvalidFlag, got %v", err)
-				}
-			}
-		})
-	}
-}
-
-func TestValidateConfig_MinIntervalMS(t *testing.T) {
-	tests := []struct {
-		name  string
-		value int
-		valid bool
-	}{
-		{"zero", 0, true},
-		{"mid", 5000, true},
-		{"max", 60000, true},
-		{"over_max", 60001, false},
-		{"negative", -1, false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := validConfig()
-			cfg.MinIntervalMS = tc.value
 			err := ValidateConfig(cfg)
 			if tc.valid && err != nil {
 				t.Errorf("expected valid, got error: %v", err)
@@ -226,9 +161,6 @@ func TestApplyDefaults_FillsAllDefaults(t *testing.T) {
 	if cfg.MaxConcurrency != 2 {
 		t.Errorf("MaxConcurrency = %d, want 2", cfg.MaxConcurrency)
 	}
-	if cfg.MaxRetries != 5 {
-		t.Errorf("MaxRetries = %d, want 5", cfg.MaxRetries)
-	}
 	if cfg.Verbosity != domain.VerbosityNormal {
 		t.Errorf("Verbosity = %d, want VerbosityNormal", cfg.Verbosity)
 	}
@@ -237,9 +169,6 @@ func TestApplyDefaults_FillsAllDefaults(t *testing.T) {
 	}
 	if cfg.Container != domain.ContainerMKV {
 		t.Errorf("Container = %d, want ContainerMKV", cfg.Container)
-	}
-	if cfg.GracePeriod != 30*time.Second {
-		t.Errorf("GracePeriod = %v, want 30s", cfg.GracePeriod)
 	}
 	if !cfg.SeasonSel.All {
 		t.Error("SeasonSel.All = false, want true")
@@ -252,11 +181,9 @@ func TestApplyDefaults_FillsAllDefaults(t *testing.T) {
 func TestApplyDefaults_DoesNotOverrideExisting(t *testing.T) {
 	cfg := &domain.RunConfig{
 		MaxConcurrency: 8,
-		MaxRetries:     3,
 		Verbosity:      domain.VerbosityVerbose,
 		FFmpegPath:     "/usr/local/bin/ffmpeg",
 		Container:      domain.ContainerMP4,
-		GracePeriod:    10 * time.Second,
 		SeasonSel:      domain.Selection{Values: map[int]bool{1: true}},
 		EpisodeSel:     domain.Selection{Ranges: []domain.SelectionRange{{Lo: 1, Hi: 5}}},
 	}
@@ -264,9 +191,6 @@ func TestApplyDefaults_DoesNotOverrideExisting(t *testing.T) {
 
 	if cfg.MaxConcurrency != 8 {
 		t.Errorf("MaxConcurrency = %d, want 8", cfg.MaxConcurrency)
-	}
-	if cfg.MaxRetries != 3 {
-		t.Errorf("MaxRetries = %d, want 3", cfg.MaxRetries)
 	}
 	if cfg.Verbosity != domain.VerbosityVerbose {
 		t.Errorf("Verbosity = %d, want VerbosityVerbose", cfg.Verbosity)
@@ -276,9 +200,6 @@ func TestApplyDefaults_DoesNotOverrideExisting(t *testing.T) {
 	}
 	if cfg.Container != domain.ContainerMP4 {
 		t.Errorf("Container = %d, want ContainerMP4", cfg.Container)
-	}
-	if cfg.GracePeriod != 10*time.Second {
-		t.Errorf("GracePeriod = %v, want 10s", cfg.GracePeriod)
 	}
 	if cfg.SeasonSel.All {
 		t.Error("SeasonSel.All = true, want false (should not override)")

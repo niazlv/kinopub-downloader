@@ -33,14 +33,6 @@ func F(key string, value any) Field { return Field{Key: key, Value: value} }
 // Injectable infrastructure interfaces
 // ---------------------------------------------------------------------------
 
-// Clock abstracts time for deterministic testing of backoff, rate limiting,
-// and grace periods.
-type Clock interface {
-	Now() time.Time
-	Sleep(d time.Duration)
-	After(d time.Duration) <-chan time.Time
-}
-
 // Runner abstracts command execution so ffmpeg/ffprobe calls are testable
 // without real binaries.
 type Runner interface {
@@ -122,19 +114,6 @@ type MediaResolver interface {
 	// (Req 3.6, 3.7). Returns ErrNoVideoTrack if no video track resolves
 	// (Req 3.5).
 	Resolve(ctx context.Context, ep Episode, pref QualityPref) (ResolvedMedia, error)
-}
-
-// Scheduler executes download jobs with bounded concurrency, rate limiting,
-// retry and backoff, and graceful shutdown (Req 4, 5).
-type Scheduler interface {
-	// Run executes all jobs with bounded concurrency, rate limiting, retry
-	// and backoff, and graceful shutdown on ctx cancellation (Req 4, 5).
-	Run(ctx context.Context, jobs []Job, exec JobExecutor) RunSummary
-}
-
-// JobExecutor performs a single attempt of a job (the Downloader supplies this).
-type JobExecutor interface {
-	Execute(ctx context.Context, job Job) error
 }
 
 // Downloader runs ffmpeg for one episode (Req 7, 8, 9).

@@ -22,10 +22,12 @@ func genLevel() *rapid.Generator[domain.Level] {
 	})
 }
 
-// genVerbosity generates a valid domain.Verbosity (Quiet, Normal, Verbose).
+// genVerbosity generates a valid run domain.Verbosity (Quiet, Normal, Verbose).
+// It samples the named constants rather than an ordinal range so it stays
+// correct regardless of the enum's underlying values.
 func genVerbosity() *rapid.Generator[domain.Verbosity] {
-	return rapid.Map(rapid.IntRange(0, 2), func(i int) domain.Verbosity {
-		return domain.Verbosity(i)
+	return rapid.SampledFrom([]domain.Verbosity{
+		domain.VerbosityQuiet, domain.VerbosityNormal, domain.VerbosityVerbose,
 	})
 }
 

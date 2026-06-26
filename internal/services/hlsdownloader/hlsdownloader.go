@@ -168,7 +168,7 @@ func (d *Downloader) downloadEpisodeInternal(
 	key domain.EpisodeKey,
 	sink domain.ProgressSink,
 ) (*domain.HLSDownloadResult, error) {
-	epLabel := fmt.Sprintf("S%02dE%02d", key.Season, key.Episode)
+	epLabel := key.Label()
 
 	// 1. Fetch and parse master playlist.
 	d.logger.Info("fetching HLS master playlist", domain.F("episode", epLabel))
@@ -456,6 +456,12 @@ func (d *Downloader) downloadEpisodeInternal(
 	videoPath := filepath.Join(tmpDir, "video.ts")
 	resultAudio := make([]domain.HLSAudioTrack, len(audioJobs))
 
+	// A failing track cancels its siblings so a doomed episode aborts promptly
+	// instead of letting the other tracks finish downloading wastefully. The
+	// real first error still wins via errOnce; siblings just see context cancel.
+	tracksCtx, cancelTracks := context.WithCancel(ctx)
+	defer cancelTracks()
+
 	var (
 		trackWG  sync.WaitGroup
 		trackErr error
@@ -463,7 +469,10 @@ func (d *Downloader) downloadEpisodeInternal(
 	)
 	recordErr := func(err error) {
 		if err != nil {
-			errOnce.Do(func() { trackErr = err })
+			errOnce.Do(func() {
+				trackErr = err
+				cancelTracks()
+			})
 		}
 	}
 
@@ -471,7 +480,7 @@ func (d *Downloader) downloadEpisodeInternal(
 	trackWG.Add(1)
 	go func() {
 		defer trackWG.Done()
-		if err := downloadTrack(ctx, 0, videoPlaylist.Segments, videoDir, videoPath); err != nil {
+		if err := downloadTrack(tracksCtx, 0, videoPlaylist.Segments, videoDir, videoPath); err != nil {
 			recordErr(fmt.Errorf("video track: %w", err))
 		}
 	}()
@@ -482,7 +491,7 @@ func (d *Downloader) downloadEpisodeInternal(
 		go func(ai int, aj audioJob) {
 			defer trackWG.Done()
 			audioDir := filepath.Join(tmpDir, fmt.Sprintf("audio_%d", ai))
-			if err := downloadTrack(ctx, 1+ai, aj.playlist.Segments, audioDir, aj.outFile); err != nil {
+			if err := downloadTrack(tracksCtx, 1+ai, aj.playlist.Segments, audioDir, aj.outFile); err != nil {
 				recordErr(fmt.Errorf("audio track %d: %w", ai, err))
 				return
 			}

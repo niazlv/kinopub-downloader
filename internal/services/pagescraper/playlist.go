@@ -11,10 +11,13 @@ import (
 )
 
 // playerPlaylistRe extracts the PLAYER_PLAYLIST JSON array from the page HTML.
-var playerPlaylistRe = regexp.MustCompile(`window\.PLAYER_PLAYLIST\s*=\s*(\[.*?\]);`)
+// The (?s) flag lets `.` span newlines so the scrape still works if kino.pub
+// ever emits the assignment across multiple lines; the match stays non-greedy
+// so it stops at the first `];` and never swallows the adjacent PLAYER_SEASONS.
+var playerPlaylistRe = regexp.MustCompile(`(?s)window\.PLAYER_PLAYLIST\s*=\s*(\[.*?\]);`)
 
 // playerSeasonsRe extracts the PLAYER_SEASONS JSON array from the page HTML.
-var playerSeasonsRe = regexp.MustCompile(`window\.PLAYER_SEASONS\s*=\s*(\[.*?\]);`)
+var playerSeasonsRe = regexp.MustCompile(`(?s)window\.PLAYER_SEASONS\s*=\s*(\[.*?\]);`)
 
 // playerItemIDRe extracts the PLAYER_ITEM_ID from the page HTML.
 var playerItemIDRe = regexp.MustCompile(`window\.PLAYER_ITEM_ID\s*=\s*(\d+);`)
@@ -45,9 +48,8 @@ type PlayerEpisode struct {
 
 // PlayerSeason represents a season entry from PLAYER_SEASONS.
 type PlayerSeason struct {
-	Season   int  `json:"season"`
-	SeasonID int  `json:"season_id"`
-	Count    int  `json:"count"`
+	Season int `json:"season"`
+	Count  int `json:"count"`
 }
 
 // PagePlaylist holds the full extracted playlist data from a kino.pub page.
@@ -93,8 +95,9 @@ func (p *PagePlaylist) toDomain() *domain.PagePlaylist {
 // in the current season, plus season metadata for navigating to other seasons.
 //
 // The pageURL should be a kino.pub item page, e.g.:
-//   https://kino.pub/item/view/38290
-//   https://kino.pub/item/view/38290/s1e1
+//
+//	https://kino.pub/item/view/38290
+//	https://kino.pub/item/view/38290/s1e1
 func (s *Scraper) ExtractPlaylist(ctx context.Context, pageURL string) (*PagePlaylist, error) {
 	return s.extractPlaylistInternal(ctx, pageURL)
 }

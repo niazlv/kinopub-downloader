@@ -76,14 +76,3 @@ func (c *Coordinator) WriteProgress(fn func()) {
 	defer c.mu.Unlock()
 	fn()
 }
-
-// Lock acquires the coordinator mutex directly. Use sparingly — prefer
-// WriteLog and WriteProgress for structured access.
-func (c *Coordinator) Lock() {
-	c.mu.Lock()
-}
-
-// Unlock releases the coordinator mutex.
-func (c *Coordinator) Unlock() {
-	c.mu.Unlock()
-}

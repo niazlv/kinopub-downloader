@@ -197,7 +197,8 @@ func (p *Provider) buildHTTPProxyClient() *http.Client {
 	proxyFunc := p.httpProxyFunc()
 
 	transport := &http.Transport{
-		Proxy: proxyFunc,
+		Proxy:       proxyFunc,
+		DialContext: httpx.NewDialer().DialContext,
 	}
 
 	return &http.Client{
@@ -236,21 +237,28 @@ func (p *Provider) buildSOCKS5Client() *http.Client {
 		}
 	}
 
-	dialer, err := proxy.SOCKS5("tcp", addr, auth, proxy.Direct)
+	// Reach the SOCKS5 server through the platform-aware dialer so the
+	// Android/Termux DNS workaround applies to the proxy connection too.
+	dialer, err := proxy.SOCKS5("tcp", addr, auth, httpx.NewDialer())
 	if err != nil {
 		// Fallback to direct if SOCKS5 setup fails (shouldn't happen with valid URL).
 		return &http.Client{Timeout: 30 * time.Second}
 	}
 
 	transport := &http.Transport{
-		DialContext: func(_ context.Context, network, address string) (net.Conn, error) {
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			host, _, _ := net.SplitHostPort(address)
 			if host == "" {
 				host = address
 			}
 			if p.isExcluded(host, noProxyHosts) {
-				// Direct connection for excluded hosts.
-				return net.Dial(network, address)
+				// Direct connection for excluded hosts (platform-aware, ctx-honoring).
+				return httpx.NewDialer().DialContext(ctx, network, address)
+			}
+			// Honor cancellation/timeout by threading ctx when the SOCKS5 dialer
+			// supports it (x/net's dialer implements proxy.ContextDialer).
+			if cd, ok := dialer.(proxy.ContextDialer); ok {
+				return cd.DialContext(ctx, network, address)
 			}
 			return dialer.Dial(network, address)
 		},

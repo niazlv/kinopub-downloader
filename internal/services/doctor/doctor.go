@@ -149,9 +149,12 @@ func Run(ctx context.Context, deps Deps, opts Options) (*Report, error) {
 		)
 		if opts.Fix {
 			backupPath := stateFilePath + ".corrupt." + time.Now().Format("20060102-150405")
-			if copyErr := copyFile(stateFilePath, backupPath); copyErr == nil {
-				log.Info("backed up corrupt state file", domain.F("backup", backupPath))
+			// Never overwrite the only copy of corrupt-but-recoverable state if we
+			// couldn't back it up first.
+			if copyErr := copyFile(stateFilePath, backupPath); copyErr != nil {
+				return nil, fmt.Errorf("refusing to reset corrupt state: backup to %s failed: %w", backupPath, copyErr)
 			}
+			log.Info("backed up corrupt state file", domain.F("backup", backupPath))
 			emptyState := domain.DownloadState{
 				Series:    "",
 				Completed: make(map[string]domain.CompletedRec),
@@ -215,7 +218,6 @@ func Run(ctx context.Context, deps Deps, opts Options) (*Report, error) {
 			if !hasExpected {
 				// Could not resolve this episode from the feed — skip.
 				report.Skipped++
-				report.Healthy++
 				continue
 			}
 
@@ -231,7 +233,6 @@ func Run(ctx context.Context, deps Deps, opts Options) (*Report, error) {
 					domain.F("error", err.Error()),
 				)
 				report.Skipped++
-				report.Healthy++
 				continue
 			}
 

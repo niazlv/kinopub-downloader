@@ -50,6 +50,16 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("fsutil: rename temp to target: %w", err)
 	}
 
+	// Best-effort: fsync the parent directory so the rename itself survives a
+	// crash. The temp file's contents were already synced above; without syncing
+	// the directory, the rename's metadata update can still be lost on power
+	// loss. The error is swallowed (some platforms, e.g. Windows, don't support
+	// directory fsync) so a durable write never degrades into a failure.
+	if d, derr := os.Open(dir); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+
 	success = true
 	return nil
 }

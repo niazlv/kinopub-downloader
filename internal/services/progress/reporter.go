@@ -38,10 +38,10 @@ type LiveReporter struct {
 	plan domain.SeriesPlan
 
 	// Tracking state
-	completedTotal  int            // total completed episodes across all seasons
-	completedSeason map[int]int    // season → completed count
-	currentEpisodes map[domain.EpisodeKey]*episodeState
-	failedEpisodes  map[domain.EpisodeKey]error
+	completedTotal   int         // total completed episodes across all seasons
+	completedSeason  map[int]int // season → completed count
+	currentEpisodes  map[domain.EpisodeKey]*episodeState
+	failedEpisodes   map[domain.EpisodeKey]error
 	deferredEpisodes map[domain.EpisodeKey]deferredInfo // parked for later retry
 
 	// Display state
@@ -177,6 +177,44 @@ func (r *LiveReporter) TrackProgress(key domain.EpisodeKey, track domain.TrackRe
 	}
 }
 
+// sampleSpeed updates the smoothed download speed from a new cumulative byte
+// count, using a one-second sliding window and an exponential moving average.
+// The first call seeds the window without producing a sample. Must be called
+// with r.mu held (it mutates ep in place).
+func (ep *episodeState) sampleSpeed(downloaded int64, now time.Time) {
+	if ep.lastSpeedTime.IsZero() {
+		ep.lastSpeedTime = now
+		ep.lastSpeedBytes = downloaded
+		return
+	}
+
+	elapsed := now.Sub(ep.lastSpeedTime)
+	if elapsed < 1*time.Second {
+		return
+	}
+
+	byteDiff := downloaded - ep.lastSpeedBytes
+	instantSpeed := float64(byteDiff) / elapsed.Seconds()
+
+	// Exponential moving average for smooth speed display.
+	if ep.speed == 0 {
+		ep.speed = instantSpeed
+	} else {
+		ep.speed = ep.speed*0.7 + instantSpeed*0.3
+	}
+
+	// If no bytes were transferred, decay speed toward zero quickly.
+	if byteDiff == 0 {
+		ep.speed *= 0.3
+		if ep.speed < 1024 {
+			ep.speed = 0
+		}
+	}
+
+	ep.lastSpeedTime = now
+	ep.lastSpeedBytes = downloaded
+}
+
 // ByteProgress reports byte-level download progress for speed calculation.
 func (r *LiveReporter) ByteProgress(key domain.EpisodeKey, downloaded, total int64) {
 	r.mu.Lock()
@@ -189,38 +227,7 @@ func (r *LiveReporter) ByteProgress(key domain.EpisodeKey, downloaded, total int
 
 	ep.downloadedBytes = downloaded
 	ep.totalBytes = total
-
-	// Calculate speed using a sliding window approach.
-	now := time.Now()
-	if ep.lastSpeedTime.IsZero() {
-		ep.lastSpeedTime = now
-		ep.lastSpeedBytes = downloaded
-		return
-	}
-
-	elapsed := now.Sub(ep.lastSpeedTime)
-	if elapsed >= 1*time.Second {
-		byteDiff := downloaded - ep.lastSpeedBytes
-		instantSpeed := float64(byteDiff) / elapsed.Seconds()
-
-		// Exponential moving average for smooth speed display.
-		if ep.speed == 0 {
-			ep.speed = instantSpeed
-		} else {
-			ep.speed = ep.speed*0.7 + instantSpeed*0.3
-		}
-
-		// If no bytes were transferred, decay speed toward zero quickly.
-		if byteDiff == 0 {
-			ep.speed *= 0.3
-			if ep.speed < 1024 {
-				ep.speed = 0
-			}
-		}
-
-		ep.lastSpeedTime = now
-		ep.lastSpeedBytes = downloaded
-	}
+	ep.sampleSpeed(downloaded, time.Now())
 }
 
 // SegmentProgress reports HLS segment-level progress with an approximate total
@@ -242,36 +249,7 @@ func (r *LiveReporter) SegmentProgress(key domain.EpisodeKey, doneSegments, tota
 	// downloaded and estimated-total byte counts.
 	ep.downloadedBytes = downloadedBytes
 	ep.totalBytes = approxTotalBytes
-
-	// Calculate speed using a sliding window (same approach as ByteProgress).
-	now := time.Now()
-	if ep.lastSpeedTime.IsZero() {
-		ep.lastSpeedTime = now
-		ep.lastSpeedBytes = downloadedBytes
-		return
-	}
-
-	elapsed := now.Sub(ep.lastSpeedTime)
-	if elapsed >= 1*time.Second {
-		byteDiff := downloadedBytes - ep.lastSpeedBytes
-		instantSpeed := float64(byteDiff) / elapsed.Seconds()
-
-		if ep.speed == 0 {
-			ep.speed = instantSpeed
-		} else {
-			ep.speed = ep.speed*0.7 + instantSpeed*0.3
-		}
-
-		if byteDiff == 0 {
-			ep.speed *= 0.3
-			if ep.speed < 1024 {
-				ep.speed = 0
-			}
-		}
-
-		ep.lastSpeedTime = now
-		ep.lastSpeedBytes = downloadedBytes
-	}
+	ep.sampleSpeed(downloadedBytes, time.Now())
 }
 
 // HLSProgress reports the per-track breakdown (video + audio tracks) so the
@@ -477,7 +455,7 @@ func (r *LiveReporter) renderFrame() {
 			epPct := r.episodePercent(ep)
 
 			lines = append(lines, r.barRow(lay, indentEpisode,
-				fmt.Sprintf("S%02dE%02d", key.Season, key.Episode), termx.Bold,
+				key.Label(), termx.Bold,
 				epPct, termx.Yellow, r.episodeStats(ep, epPct)))
 
 			// Nested per-track breakdown (video + each audio track).
@@ -508,7 +486,7 @@ func (r *LiveReporter) renderFrame() {
 
 		for _, key := range deferredKeys {
 			di := r.deferredEpisodes[key]
-			label := fmt.Sprintf("⟳ S%02dE%02d ", key.Season, key.Episode)
+			label := fmt.Sprintf("⟳ %s ", key.Label())
 			note := fmt.Sprintf("retry pending (attempt %d)", di.attempts)
 			if di.err != nil {
 				note = fmt.Sprintf("retry pending (attempt %d): %s", di.attempts, di.err.Error())
@@ -538,7 +516,7 @@ func (r *LiveReporter) renderFrame() {
 		})
 
 		for _, key := range failedKeys {
-			label := fmt.Sprintf("✗ S%02dE%02d ", key.Season, key.Episode)
+			label := fmt.Sprintf("✗ %s ", key.Label())
 			// Truncate the error so the whole line fits the terminal width.
 			budget := lay.width - displayWidth(label) - indentEpisode - 1
 			errMsg := truncateText(r.failedEpisodes[key].Error(), budget)
@@ -801,20 +779,6 @@ func clampPercent(pct int) int {
 	return pct
 }
 
-// trackLabel returns a human-readable label for a track reference.
-func trackLabel(ref domain.TrackRef) string {
-	switch ref.Kind {
-	case domain.TrackVideo:
-		return "Video"
-	case domain.TrackAudio:
-		return fmt.Sprintf("Audio[%d]", ref.Index)
-	case domain.TrackSubtitle:
-		return fmt.Sprintf("Sub[%d]", ref.Index)
-	default:
-		return fmt.Sprintf("Track[%d]", ref.Index)
-	}
-}
-
 // formatDuration formats a duration as a human-readable string (e.g. "2m30s", "45s").
 func formatDuration(d time.Duration) string {
 	if d < 0 {
@@ -835,14 +799,6 @@ func formatDuration(d time.Duration) string {
 	h := int(d.Hours())
 	m := int(d.Minutes()) - h*60
 	return fmt.Sprintf("%dh%dm", h, m)
-}
-
-// min returns the smaller of two ints.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // Verify that *LiveReporter satisfies domain.ProgressReporter at compile time.
