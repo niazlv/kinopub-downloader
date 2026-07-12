@@ -26,82 +26,111 @@ const (
 	BrowserFirefox = "firefox"
 )
 
-// Load reads cookies whose domain matches domainSuffix from the named browser
-// and returns a Cookie header value of the form "name1=value1; name2=value2".
+// Load reads cookies from the named browser for the first of domainSuffixes
+// that has any, and returns a Cookie header value of the form
+// "name1=value1; name2=value2" together with the domain it came from.
+//
+// Several suffixes may be passed because the site is reachable under more than
+// one domain (a rename or a mirror): they are tried in order, so put the most
+// likely one first. Cookies are never merged across domains — a session belongs
+// to exactly one of them.
 //
 // browser may be one of "safari", "chrome", "firefox", or "auto" (try all
 // registered browsers). An empty browser string is treated as "auto".
 // Returns an error if no cookies are found or the store cannot be read.
-func Load(browser, domainSuffix string) (string, error) {
+func Load(browser string, domainSuffixes ...string) (cookie, domain string, err error) {
 	if browser == "" {
 		browser = BrowserAuto
 	}
 	browser = strings.ToLower(strings.TrimSpace(browser))
-	suffix := strings.ToLower(strings.TrimPrefix(domainSuffix, "."))
+
+	suffixes := make([]string, 0, len(domainSuffixes))
+	for _, d := range domainSuffixes {
+		d = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(d), "."))
+		if d != "" {
+			suffixes = append(suffixes, d)
+		}
+	}
+	if len(suffixes) == 0 {
+		return "", "", fmt.Errorf("no cookie domain given")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	// Traverse all valid cookies (no domain filter) so we can tell apart two
 	// failure modes: a store we could not read at all (zero cookies seen) vs a
-	// store we read that simply has no cookie for the target domain.
+	// store we read that simply has no cookie for the target domains. The
+	// traversal is slow, so all suffixes are matched in this single pass.
 	type entry struct {
 		value   string
 		expires time.Time
 	}
-	collected := make(map[string]entry)
+	collected := make(map[string]map[string]entry, len(suffixes))
 
 	var totalSeen, browserSeen int
 
 	seq := kooky.TraverseCookies(ctx, kooky.Valid).OnlyCookies()
-	for cookie := range seq {
+	for ck := range seq {
 		totalSeen++
-		if browser != BrowserAuto && !browserMatches(browser, cookie) {
+		if browser != BrowserAuto && !browserMatches(browser, ck) {
 			continue
 		}
 		browserSeen++
 
-		dom := strings.ToLower(strings.TrimPrefix(cookie.Domain, "."))
-		if dom != suffix && !strings.HasSuffix(dom, "."+suffix) {
+		if ck.Name == "" {
 			continue
 		}
-		name := cookie.Name
-		if name == "" {
+		dom := strings.ToLower(strings.TrimPrefix(ck.Domain, "."))
+		for _, suffix := range suffixes {
+			if dom != suffix && !strings.HasSuffix(dom, "."+suffix) {
+				continue
+			}
+			forSuffix := collected[suffix]
+			if forSuffix == nil {
+				forSuffix = make(map[string]entry)
+				collected[suffix] = forSuffix
+			}
+			prev, ok := forSuffix[ck.Name]
+			// Prefer the cookie with the later expiry (more recently issued).
+			if !ok || ck.Expires.After(prev.expires) {
+				forSuffix[ck.Name] = entry{value: ck.Value, expires: ck.Expires}
+			}
+		}
+	}
+
+	// First suffix with a session wins, so callers can express a preference.
+	for _, suffix := range suffixes {
+		found := collected[suffix]
+		if len(found) == 0 {
 			continue
 		}
-		prev, ok := collected[name]
-		// Prefer the cookie with the later expiry (more recently issued).
-		if !ok || cookie.Expires.After(prev.expires) {
-			collected[name] = entry{value: cookie.Value, expires: cookie.Expires}
+		// Build a deterministic Cookie header (sorted by name).
+		names := make([]string, 0, len(found))
+		for n := range found {
+			names = append(names, n)
 		}
-	}
+		sort.Strings(names)
 
-	if len(collected) == 0 {
-		return "", notFoundError(browser, suffix, totalSeen, browserSeen)
-	}
-
-	// Build a deterministic Cookie header (sorted by name).
-	names := make([]string, 0, len(collected))
-	for n := range collected {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-
-	var b strings.Builder
-	for i, n := range names {
-		if i > 0 {
-			b.WriteString("; ")
+		var b strings.Builder
+		for i, n := range names {
+			if i > 0 {
+				b.WriteString("; ")
+			}
+			b.WriteString(n)
+			b.WriteByte('=')
+			b.WriteString(found[n].value)
 		}
-		b.WriteString(n)
-		b.WriteByte('=')
-		b.WriteString(collected[n].value)
+		return b.String(), suffix, nil
 	}
-	return b.String(), nil
+
+	return "", "", notFoundError(browser, suffixes, totalSeen, browserSeen)
 }
 
 // notFoundError builds a descriptive error explaining why no cookies were found,
 // including a macOS Full Disk Access hint when no store could be read at all.
-func notFoundError(browser, suffix string, totalSeen, browserSeen int) error {
+func notFoundError(browser string, suffixes []string, totalSeen, browserSeen int) error {
+	domains := strings.Join(suffixes, ", ")
 	switch {
 	case totalSeen == 0:
 		return fmt.Errorf(
@@ -116,8 +145,9 @@ func notFoundError(browser, suffix string, totalSeen, browserSeen int) error {
 				"without a value to search all browsers, or pass --cookie manually", browser)
 	default:
 		return fmt.Errorf(
-			"no cookies for domain %q found in browser %q \u2014 make sure you are logged "+
-				"in to kino.pub in that browser, or pass --cookie manually", suffix, browser)
+			"no cookies for %s found in browser %q \u2014 make sure you are logged in to "+
+				"the site in that browser. If it now serves from another domain, name it "+
+				"with --site, or pass --cookie manually", domains, browser)
 	}
 }
 

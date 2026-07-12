@@ -34,7 +34,7 @@ type ffprobeStream struct {
 	Tags      struct {
 		Language string `json:"language"`
 		Title    string `json:"title"`
-		Name     string `json:"name"` // kino.pub uses "name" for studio/track label
+		Name     string `json:"name"` // the site uses "name" for studio/track label
 	} `json:"tags"`
 }
 
@@ -66,7 +66,7 @@ func (r *Resolver) resolveProgressive(ctx context.Context, source domain.MediaSo
 
 	// Inject auth headers into ffprobe so it can access protected CDN URLs.
 	// IMPORTANT: Do NOT send Cookie to CDN — it causes timeouts. CDN only needs
-	// the Referer header. Cookies are for kino.pub domain only.
+	// the Referer header. Cookies are for the site's own domain only.
 	if r.auth.UserAgent != "" {
 		args = append(args, "-user_agent", r.auth.UserAgent)
 	}
@@ -195,7 +195,7 @@ func parseFFprobeOutput(data []byte, source domain.MediaSource) (domain.Resolved
 				hasVideo = true
 			}
 		case "audio":
-			// Studio name: prefer "name" tag (kino.pub convention), fall back to "title".
+			// Studio name: prefer "name" tag (site convention), fall back to "title".
 			studio := stream.Tags.Name
 			if studio == "" {
 				studio = stream.Tags.Title

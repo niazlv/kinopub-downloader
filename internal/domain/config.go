@@ -49,14 +49,19 @@ type RunConfig struct {
 	EpisodeSel      Selection // (Req 15.5)
 	DryRun          bool      // (Req 15.6)
 
-	// Authentication / request shaping. kino.pub sits behind Cloudflare and may
+	// Site is the origin the run targets, derived from InputURL so any mirror
+	// works, or set explicitly via --site when there is no URL to derive it
+	// from. The zero value means DefaultSiteHost.
+	Site Site
+
+	// Authentication / request shaping. The site sits behind Cloudflare and may
 	// return HTTP 403 for unauthenticated requests. These fields let the user
 	// supply credentials captured from a logged-in browser session so the tool
-	// and ffmpeg can issue requests that pass Cloudflare and kino.pub auth.
+	// and ffmpeg can issue requests that pass Cloudflare and the site's auth.
 	Cookie         string            // raw Cookie header value applied to all requests
 	UserAgent      string            // User-Agent applied to all requests (must match the cf_clearance UA)
 	Headers        map[string]string // extra HTTP headers applied to all requests
-	BrowserCookies string            // browser name to auto-load kino.pub cookies from ("", "safari", "chrome", "firefox", "auto")
+	BrowserCookies string            // browser name to auto-load site cookies from ("", "safari", "chrome", "firefox", "auto")
 
 	// FeedFile, when set, is a path to a locally saved RSS feed file. It is used
 	// instead of fetching the feed over the network — useful when the feed URL
@@ -88,11 +93,17 @@ type RunConfig struct {
 
 // RequestAuth carries credentials and request-shaping headers applied to every
 // outbound HTTP request (and propagated to ffmpeg). It exists so the tool can
-// reuse a logged-in browser session to pass Cloudflare and kino.pub auth.
+// reuse a logged-in browser session to pass Cloudflare and the site's auth.
 type RequestAuth struct {
 	Cookie    string            // raw Cookie header value
 	UserAgent string            // User-Agent (must match the cf_clearance UA)
 	Headers   map[string]string // extra headers
+
+	// Site scopes the Cookie: it is only ever sent to hosts the site owns, and
+	// never to the CDN, which throttles requests carrying it. The zero value
+	// leaves the site unknown, in which case callers fall back to
+	// AnyKnownSiteOwns.
+	Site Site
 }
 
 // IsZero reports whether the auth carries no information.

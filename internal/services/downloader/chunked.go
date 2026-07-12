@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
@@ -347,18 +346,28 @@ func (c *ChunkedDownloader) probeSize(ctx context.Context, url string) (int64, e
 // applyAuth sets authentication headers on the request.
 // NOTE: Cookie is NOT sent to CDN hosts (cdntogo.net, etc.) — it causes
 // throttling and timeouts. Only User-Agent and extra headers (Referer) are sent.
-// Cookie is only needed for kino.pub domain requests.
+// Cookie is only needed for requests back to the site itself.
 func (c *ChunkedDownloader) applyAuth(req *http.Request) {
 	if c.auth.UserAgent != "" {
 		req.Header.Set("User-Agent", c.auth.UserAgent)
 	}
-	// Only send Cookie to kino.pub, not to CDN hosts.
-	if c.auth.Cookie != "" && strings.Contains(req.URL.Host, "kino.pub") {
+	if c.auth.Cookie != "" && c.cookieAllowed(req.URL.Host) {
 		req.Header.Set("Cookie", c.auth.Cookie)
 	}
 	for k, v := range c.auth.Headers {
 		req.Header.Set(k, v)
 	}
+}
+
+// cookieAllowed reports whether host is the site the run targets (or one of its
+// subdomains) and may therefore receive the session Cookie. When the caller
+// never told us which site is in play, any known site host is accepted so a
+// mirror is still authenticated rather than silently downgraded.
+func (c *ChunkedDownloader) cookieAllowed(host string) bool {
+	if c.auth.Site.IsZero() {
+		return domain.AnyKnownSiteOwns(host)
+	}
+	return c.auth.Site.Owns(host)
 }
 
 // formatBytes formats a byte count as a human-readable string.

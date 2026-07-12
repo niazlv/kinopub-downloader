@@ -11,7 +11,7 @@ import (
 )
 
 // playerPlaylistRe extracts the PLAYER_PLAYLIST JSON array from the page HTML.
-// The (?s) flag lets `.` span newlines so the scrape still works if kino.pub
+// The (?s) flag lets `.` span newlines so the scrape still works if the site
 // ever emits the assignment across multiple lines; the match stays non-greedy
 // so it stops at the first `];` and never swallows the adjacent PLAYER_SEASONS.
 var playerPlaylistRe = regexp.MustCompile(`(?s)window\.PLAYER_PLAYLIST\s*=\s*(\[.*?\]);`)
@@ -25,9 +25,10 @@ var playerItemIDRe = regexp.MustCompile(`window\.PLAYER_ITEM_ID\s*=\s*(\d+);`)
 // itemSeasonEpisodeSuffixRe matches a trailing /sNeM segment in an item URL.
 var itemSeasonEpisodeSuffixRe = regexp.MustCompile(`(?i)/s\d+e\d+/?$`)
 
-// normalizeItemURL strips a trailing /sNeM episode segment from a kino.pub
-// item URL so clean season URLs can be constructed.
-// e.g. https://kino.pub/item/view/38290/s1e1 → https://kino.pub/item/view/38290
+// normalizeItemURL strips a trailing /sNeM episode segment from an item URL so
+// clean season URLs can be constructed. The host is left untouched, so season
+// URLs stay on whatever site the input came from.
+// e.g. https://kino.watch/item/view/38290/s1e1 → https://kino.watch/item/view/38290
 func normalizeItemURL(rawURL string) string {
 	return itemSeasonEpisodeSuffixRe.ReplaceAllString(rawURL, "")
 }
@@ -52,7 +53,7 @@ type PlayerSeason struct {
 	Count  int `json:"count"`
 }
 
-// PagePlaylist holds the full extracted playlist data from a kino.pub page.
+// PagePlaylist holds the full extracted playlist data from a site page.
 type PagePlaylist struct {
 	ItemID   int
 	Title    string // series title (from first episode)
@@ -90,14 +91,14 @@ func (p *PagePlaylist) toDomain() *domain.PagePlaylist {
 	return result
 }
 
-// ExtractPlaylist fetches a kino.pub page and extracts the PLAYER_PLAYLIST
+// ExtractPlaylist fetches a site page and extracts the PLAYER_PLAYLIST
 // and PLAYER_SEASONS data. This provides HLS manifest URLs for all episodes
 // in the current season, plus season metadata for navigating to other seasons.
 //
-// The pageURL should be a kino.pub item page, e.g.:
+// The pageURL should be an item page on any host, e.g.:
 //
-//	https://kino.pub/item/view/38290
-//	https://kino.pub/item/view/38290/s1e1
+//	https://kino.watch/item/view/38290
+//	https://kino.watch/item/view/38290/s1e1
 func (s *Scraper) ExtractPlaylist(ctx context.Context, pageURL string) (*PagePlaylist, error) {
 	return s.extractPlaylistInternal(ctx, pageURL)
 }
@@ -121,7 +122,7 @@ func (s *Scraper) extractPlaylistInternal(ctx context.Context, pageURL string) (
 func (s *Scraper) ExtractAllSeasons(ctx context.Context, baseURL string) (*domain.PagePlaylist, error) {
 	// Normalize the base URL: strip any trailing /sNeM episode segment so we
 	// can construct clean season URLs. e.g.
-	//   https://kino.pub/item/view/38290/s1e1 → https://kino.pub/item/view/38290
+	//   https://kino.watch/item/view/38290/s1e1 → https://kino.watch/item/view/38290
 	baseURL = normalizeItemURL(baseURL)
 
 	// First, load the base page to get season list.

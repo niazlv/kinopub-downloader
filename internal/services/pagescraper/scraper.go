@@ -1,6 +1,6 @@
-// Package pagescraper fetches a kino.pub item page and extracts the podcast
+// Package pagescraper fetches a site item page and extracts the podcast
 // feed URL from the HTML. This allows the tool to accept plain page links
-// (e.g. https://kino.pub/item/view/38290/s1e1) and automatically resolve
+// (e.g. https://kino.watch/item/view/38290/s1e1) and automatically resolve
 // them to the tokenized podcast feed URL, provided valid authentication
 // cookies are supplied.
 package pagescraper
@@ -21,7 +21,7 @@ import (
 // Example: href="/podcast/get/38290/Q2o2DhcYJMP-1SW9cIRUdK0oRnXo4AESCNjRKB_R81s4QS0pljKmWuB1BtlfgxZs"
 var podcastHrefRe = regexp.MustCompile(`href="/podcast/get/(\d+)/([^"]+)"`)
 
-// Scraper fetches a kino.pub page and extracts the podcast feed link.
+// Scraper fetches a site page and extracts the podcast feed link.
 type Scraper struct {
 	client *http.Client
 	log    domain.Logger
@@ -33,7 +33,7 @@ func New(client *http.Client, log domain.Logger) *Scraper {
 	return &Scraper{client: client, log: log.Component("pagescraper")}
 }
 
-// ExtractFeedSource fetches the given kino.pub page URL and parses the podcast
+// ExtractFeedSource fetches the given page URL and parses the podcast
 // feed link from the HTML response. Returns ErrFeedTokenUnavailable if the page
 // does not contain a podcast link (e.g. user is not authenticated), or
 // ErrAuthRequired if the server returns 403.
@@ -49,7 +49,7 @@ func (s *Scraper) ExtractFeedSource(ctx context.Context, pageURL string) (domain
 	return s.parseBody(body, pageURL)
 }
 
-// fetchPage fetches a kino.pub page and returns the body bytes.
+// fetchPage fetches a site page and returns the body bytes.
 func (s *Scraper) fetchPage(ctx context.Context, pageURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
@@ -104,9 +104,12 @@ func (s *Scraper) parseBody(body []byte, pageURL string) (domain.FeedSource, err
 		domain.F("token_prefix", truncate(token, 8)),
 	)
 
+	// The feed lives on the same host as the page it was scraped from, so the
+	// tokenized URL is rebuilt against that host rather than a fixed one.
 	return domain.FeedSource{
 		ID:    id,
 		Token: token,
+		Site:  domain.SiteFromURL(pageURL),
 	}, nil
 }
 

@@ -27,7 +27,7 @@ func main() {
 	auth := domain.RequestAuth{
 		Cookie:    "test=1",
 		UserAgent: "TestUA",
-		Headers:   map[string]string{"Referer": "https://kino.pub/"},
+		Headers:   map[string]string{"Referer": domain.Site{}.Referer()},
 	}
 
 	runOutput := func(_ context.Context, name string, args, _ []string) ([]byte, error) {

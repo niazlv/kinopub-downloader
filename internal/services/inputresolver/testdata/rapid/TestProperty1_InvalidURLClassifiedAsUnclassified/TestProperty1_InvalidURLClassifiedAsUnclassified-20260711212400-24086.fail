@@ -1,0 +1,9 @@
+# 2026/07/11 21:24:00.742865 [TestProperty1_InvalidURLClassifiedAsUnclassified] [rapid] draw url: "https://example.com/podcast/get/1/tok"
+# 2026/07/11 21:24:00.742876 [TestProperty1_InvalidURLClassifiedAsUnclassified] Classify("https://example.com/podcast/get/1/tok") returned nil error, want non-nil for invalid URL
+# 
+v0.4.8#10278807288757122114
+0x0
+0x38e38e38e38e4
+0x2
+0x0
+0x0

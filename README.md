@@ -1,10 +1,13 @@
 # kinopub
 
-CLI-утилита для скачивания видео с [kino.pub](https://kino.pub) в полном качестве — все аудиодорожки (с названиями студий озвучки), все субтитры, мультисезонные сериалы.
+CLI-утилита для скачивания видео с kino.watch (бывший kino.pub) в полном качестве — все аудиодорожки (с названиями студий озвучки), все субтитры, мультисезонные сериалы.
+
+Домен нигде не захардкожен: сайт берётся из переданной ссылки, поэтому любое зеркало или новый домен работают без правок кода. См. [Домены и зеркала](#домены-и-зеркала).
 
 ## Возможности
 
 - Скачивание по ссылке на страницу (`/item/view/...`) или по прямой ссылке на podcast feed
+- Любой домен: kino.watch, kino.pub, произвольные зеркала — ссылка задаёт сайт
 - Все аудиодорожки с метаданными (студия озвучки)
 - Выбор и фильтрация аудиодорожек (`--audio anilibria`, `--audio "!jpn"`, `--audio-menu`)
 - Все субтитры
@@ -74,11 +77,11 @@ go build -o kinopub ./cmd/kinopub
 
 ### 1. Авторизация
 
-kino.pub защищён Cloudflare. Для скачивания нужны куки из залогиненного браузера.
+Сайт защищён Cloudflare. Для скачивания нужны куки из залогиненного браузера.
 
 **Способ 1: Копирование куки из DevTools (работает везде)**
 
-1. Откройте kino.pub в браузере, залогиньтесь
+1. Откройте сайт (kino.watch) в браузере, залогиньтесь
 2. Откройте DevTools (F12) → Network
 3. Обновите страницу, кликните на первый запрос
 4. Скопируйте значение заголовка `Cookie` из Request Headers
@@ -98,23 +101,55 @@ kinopub login \
 kinopub login --browser-cookies safari
 ```
 
+Куки ищутся по очереди для всех известных доменов (kino.watch, затем kino.pub) — не нужно помнить, под каким из них вы залогинены. Для зеркала укажите домен явно:
+
+```bash
+kinopub login --browser-cookies safari --site kino.example
+```
+
 > Credentials сохраняются зашифрованными в `~/.config/kinopub/credentials.enc` и привязаны к конкретному устройству (расшифровать на другой машине невозможно).
 
 ### 2. Скачивание
 
 ```bash
 # По ссылке на страницу (самый простой способ)
-kinopub -o ./downloads https://kino.pub/item/view/38290
+kinopub -o ./downloads https://kino.watch/item/view/38290
 
 # По прямой ссылке на podcast feed (не требует авторизации)
-kinopub -o ./downloads https://kino.pub/podcast/get/38290/TOKEN
+kinopub -o ./downloads https://kino.watch/podcast/get/38290/TOKEN
 
 # Только 1 сезон, 1080p
-kinopub -o ./downloads --seasons 1 -q 1080p https://kino.pub/item/view/38290
+kinopub -o ./downloads --seasons 1 -q 1080p https://kino.watch/item/view/38290
 
 # Посмотреть что будет скачано (без загрузки)
-kinopub --dry-run https://kino.pub/item/view/38290
+kinopub --dry-run https://kino.watch/item/view/38290
 ```
+
+### Домены и зеркала
+
+Утилита не привязана к конкретному домену. Сайт определяется хостом переданной ссылки, и от него зависят всё остальное: адрес podcast feed, заголовок `Referer` и то, куда отправляются куки сессии.
+
+```bash
+# Новый домен
+kinopub https://kino.watch/item/view/38290
+
+# Старый домен продолжает работать
+kinopub https://kino.pub/item/view/38290
+
+# Любое зеркало — просто передайте его ссылку
+kinopub https://kino.example/item/view/38290
+```
+
+Куки сессии уходят только на сам сайт (и его поддомены) и никогда — на CDN: CDN режет скорость и подвисает на запросах с `Cookie`.
+
+Флаг `--site` нужен лишь там, где домен не из чего вывести — то есть когда ссылки нет:
+
+```bash
+# Локальный feed: ссылки нет, но Referer/куки всё ещё нужны для CDN
+kinopub --feed-file ./feed.xml --site kino.watch -o ./downloads
+```
+
+Если куки в браузере найдены для одного домена, а качаете вы с другого, утилита предупредит об этом и всё равно попробует их использовать (зеркала часто делят сессию).
 
 ### Выбор аудиодорожек
 
@@ -122,17 +157,17 @@ kinopub --dry-run https://kino.pub/item/view/38290
 
 ```bash
 # Только дорожки, содержащие "anilibria" в названии или языке
-kinopub --audio anilibria https://kino.pub/item/view/38290
+kinopub --audio anilibria https://kino.watch/item/view/38290
 
 # Все дорожки, кроме японского оригинала (префикс '!' или '-' исключает)
-kinopub --audio "!jpn" https://kino.pub/item/view/38290
+kinopub --audio "!jpn" https://kino.watch/item/view/38290
 
 # AniLibria, но никогда японскую
-kinopub --audio "anilibria,!jpn" https://kino.pub/item/view/38290
+kinopub --audio "anilibria,!jpn" https://kino.watch/item/view/38290
 
 # Интерактивное меню: показать список и выбрать в течение ~90 секунд
 # (Enter или TAB — оставить все дорожки и сразу продолжить)
-kinopub --audio-menu https://kino.pub/item/view/38290
+kinopub --audio-menu https://kino.watch/item/view/38290
 ```
 
 **Умное сопоставление.** Названия дорожек меняются от серии к серии. В одной серии озвучка подписана как `01. Многоголосый. AniLibria (RUS)`, в другой — просто `02. AniLibria`. Совпадение ищется по подстроке (без учёта регистра) и по языку, поэтому шаблон `anilibria` найдёт дорожку в обоих случаях. При интерактивном выборе из первой серии извлекается отличительное ключевое слово студии, и оно применяется ко всем сериям.
@@ -257,6 +292,7 @@ kinopub completion <shell>  — сгенерировать скрипт авто
   --cookie              Cookie header (для разового использования)
   --user-agent          User-Agent (должен совпадать с браузером куки)
   --browser-cookies     Загрузить куки из браузера: safari, chrome, firefox, auto
+  --site                Домен сайта, напр. kino.watch (по умолчанию берётся из ссылки)
   --header              Доп. HTTP заголовок 'Name: Value' (можно повторять)
 
 Прочее:
@@ -278,13 +314,13 @@ kinopub completion <shell>  — сгенерировать скрипт авто
 
 ```bash
 # Способ 1: строка (парсится с учётом кавычек)
-kinopub --ffmpeg-args "-c:v libx265 -crf 28 -c:a aac" https://kino.pub/item/view/38290
+kinopub --ffmpeg-args "-c:v libx265 -crf 28 -c:a aac" https://kino.watch/item/view/38290
 
 # Способ 2: повторяемый --x (точный контроль каждого аргумента)
-kinopub --x "-c:v" --x libx265 --x "-crf" --x 28 https://kino.pub/item/view/38290
+kinopub --x "-c:v" --x libx265 --x "-crf" --x 28 https://kino.watch/item/view/38290
 
 # Можно комбинировать
-kinopub --ffmpeg-args "-c:v libx265" --x "-crf" --x 28 https://kino.pub/item/view/38290
+kinopub --ffmpeg-args "-c:v libx265" --x "-crf" --x 28 https://kino.watch/item/view/38290
 ```
 
 **Примеры использования:**

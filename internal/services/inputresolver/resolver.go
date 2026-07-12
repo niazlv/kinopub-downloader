@@ -1,4 +1,6 @@
-// Package inputresolver classifies and resolves kino.pub URLs into feed sources.
+// Package inputresolver classifies and resolves site URLs into feed sources.
+// Any host is accepted: inputs are identified by their URL shape, so mirrors and
+// renamed domains (kino.pub → kino.watch) work without a code change.
 package inputresolver
 
 import (
@@ -20,7 +22,7 @@ var (
 	pageLinkeRe = regexp.MustCompile(`^/item/view/(\d+)(?:/[^/]*)?$`)
 )
 
-// PageScraper extracts a FeedSource from a kino.pub page by fetching its HTML
+// PageScraper extracts a FeedSource from a site page by fetching its HTML
 // and parsing the embedded podcast link. This is an optional dependency: when
 // nil, page link resolution falls back to ErrFeedTokenUnavailable.
 type PageScraper interface {
@@ -47,14 +49,14 @@ func New(log domain.Logger, opts ...Option) *Resolver {
 type Option func(*Resolver)
 
 // WithPageScraper sets the page scraper used to resolve page links into feed
-// sources. When set, page links (https://kino.pub/item/view/...) are fetched
+// sources. When set, page links (https://<site>/item/view/...) are fetched
 // and the podcast feed URL is extracted from the HTML.
 func WithPageScraper(s PageScraper) Option {
 	return func(r *Resolver) { r.scraper = s }
 }
 
 // Classify inspects a raw URL string and returns its InputClass.
-// It returns ErrInvalidInputURL for empty, non-HTTP(S), wrong-host, or
+// It returns ErrInvalidInputURL for empty, non-HTTP(S), host-less, or
 // unclassified URLs.
 func (r *Resolver) Classify(rawURL string) (domain.InputClass, error) {
 	if rawURL == "" {
@@ -71,9 +73,10 @@ func (r *Resolver) Classify(rawURL string) (domain.InputClass, error) {
 		return domain.ClassUnclassified, domain.ErrInvalidInputURL
 	}
 
-	// Host must be kino.pub (with or without port).
-	host := u.Hostname()
-	if host != "kino.pub" {
+	// Any host is accepted — the service has moved domains (kino.pub →
+	// kino.watch) and is reachable through mirrors, so the URL shape, not the
+	// host, is what identifies an input. The host must merely be present.
+	if u.Hostname() == "" {
 		return domain.ClassUnclassified, domain.ErrInvalidInputURL
 	}
 
@@ -85,7 +88,7 @@ func (r *Resolver) Classify(rawURL string) (domain.InputClass, error) {
 		return domain.ClassPageLink, nil
 	}
 
-	// Unclassified path on kino.pub → invalid.
+	// Host is fine but the path matches nothing we know how to download.
 	return domain.ClassUnclassified, domain.ErrInvalidInputURL
 }
 
@@ -110,6 +113,7 @@ func (r *Resolver) Resolve(ctx context.Context, rawURL string) (domain.FeedSourc
 		return domain.FeedSource{
 			ID:    matches[1],
 			Token: matches[2],
+			Site:  domain.SiteFromURL(rawURL),
 		}, nil
 
 	case domain.ClassPageLink:

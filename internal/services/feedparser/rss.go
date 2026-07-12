@@ -1,5 +1,5 @@
 // Package feedparser implements the domain.FeedParser interface by retrieving
-// and parsing a kino.pub tokenized podcast RSS feed into a domain.Series catalog.
+// and parsing a tokenized podcast RSS feed into a domain.Series catalog.
 package feedparser
 
 import (
@@ -19,9 +19,10 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
-// feedURL constructs the full RSS feed URL from a FeedSource.
+// feedURL constructs the full RSS feed URL from a FeedSource, against the site
+// the source was resolved from (the zero Site falls back to the default host).
 func feedURL(src domain.FeedSource) string {
-	return "https://kino.pub/podcast/get/" + src.ID + "/" + src.Token
+	return src.Site.PodcastFeedURL(src.ID, src.Token)
 }
 
 // Parser implements domain.FeedParser.

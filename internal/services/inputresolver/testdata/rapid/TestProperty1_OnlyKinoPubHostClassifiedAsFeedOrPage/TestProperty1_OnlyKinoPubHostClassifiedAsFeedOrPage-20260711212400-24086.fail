@@ -1,0 +1,17 @@
+# 2026/07/11 21:24:00.744247 [TestProperty1_OnlyKinoPubHostClassifiedAsFeedOrPage] [rapid] draw host: "example.com"
+# 2026/07/11 21:24:00.744249 [TestProperty1_OnlyKinoPubHostClassifiedAsFeedOrPage] [rapid] draw scheme: "http"
+# 2026/07/11 21:24:00.744250 [TestProperty1_OnlyKinoPubHostClassifiedAsFeedOrPage] [rapid] draw pathKind: 1
+# 2026/07/11 21:24:00.744251 [TestProperty1_OnlyKinoPubHostClassifiedAsFeedOrPage] [rapid] draw id: "1"
+# 2026/07/11 21:24:00.744253 [TestProperty1_OnlyKinoPubHostClassifiedAsFeedOrPage] Classify("http://example.com/item/view/1") = 2, non-kino.pub host should never be classified as feed or page
+# 
+v0.4.8#5024027484315712173
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x0

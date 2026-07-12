@@ -1,7 +1,7 @@
 // Package httpx provides HTTP client helpers, notably an auth-injecting
 // transport that applies a Cookie header, a User-Agent, and arbitrary extra
 // headers to every outbound request. This lets the tool reuse a logged-in
-// browser session to pass Cloudflare and kino.pub authentication.
+// browser session to pass Cloudflare and the site's authentication.
 package httpx
 
 import (

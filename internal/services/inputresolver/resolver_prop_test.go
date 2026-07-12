@@ -3,6 +3,7 @@ package inputresolver
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
@@ -60,28 +61,44 @@ func genScheme() *rapid.Generator[string] {
 	return rapid.SampledFrom([]string{"http", "https"})
 }
 
-// genPodcastFeedURL generates a valid podcast feed URL on kino.pub.
+// genHost generates hosts the tool must accept: the domains the service has
+// used so far, plus mirrors it has never heard of. No host is privileged.
+func genHost() *rapid.Generator[string] {
+	return rapid.SampledFrom([]string{
+		"kino.watch",
+		"kino.pub",
+		"kino.example",
+		"mirror.kino.watch",
+		"some-mirror.org",
+		"kino.watch:8443",
+	})
+}
+
+// genPodcastFeedURL generates a valid podcast feed URL on an arbitrary host.
 func genPodcastFeedURL() *rapid.Generator[string] {
 	return rapid.Custom(func(t *rapid.T) string {
 		scheme := genScheme().Draw(t, "scheme")
+		host := genHost().Draw(t, "host")
 		id := genNumericID().Draw(t, "id")
 		token := genToken().Draw(t, "token")
-		return fmt.Sprintf("%s://kino.pub/podcast/get/%s/%s", scheme, id, token)
+		return fmt.Sprintf("%s://%s/podcast/get/%s/%s", scheme, host, id, token)
 	})
 }
 
-// genPageLinkURL generates a valid page link URL on kino.pub.
+// genPageLinkURL generates a valid page link URL on an arbitrary host.
 func genPageLinkURL() *rapid.Generator[string] {
 	return rapid.Custom(func(t *rapid.T) string {
 		scheme := genScheme().Draw(t, "scheme")
+		host := genHost().Draw(t, "host")
 		id := genNumericID().Draw(t, "id")
 		slug := genSlug().Draw(t, "slug")
-		return fmt.Sprintf("%s://kino.pub/item/view/%s%s", scheme, id, slug)
+		return fmt.Sprintf("%s://%s/item/view/%s%s", scheme, host, id, slug)
 	})
 }
 
-// genInvalidURL generates URLs that should be classified as invalid:
-// empty, non-HTTP(S), wrong host, or unclassified path on kino.pub.
+// genInvalidURL generates URLs that should be classified as invalid: empty,
+// non-HTTP(S), host-less, or carrying a path that matches no known input shape.
+// A host the tool has never seen is NOT invalid — that is what makes mirrors work.
 func genInvalidURL() *rapid.Generator[string] {
 	return rapid.Custom(func(t *rapid.T) string {
 		kind := rapid.IntRange(0, 4).Draw(t, "invalidKind")
@@ -93,18 +110,17 @@ func genInvalidURL() *rapid.Generator[string] {
 			// Non-HTTP(S) scheme
 			schemes := []string{"ftp", "file", "gopher", "ws", "wss", "ssh", "telnet"}
 			scheme := rapid.SampledFrom(schemes).Draw(t, "badScheme")
-			return fmt.Sprintf("%s://kino.pub/podcast/get/1/tok", scheme)
+			return fmt.Sprintf("%s://kino.watch/podcast/get/1/tok", scheme)
 		case 2:
-			// Wrong host with valid path
-			hosts := []string{"example.com", "notkinopub.org", "kino.pub.evil.com", "kinopub.com"}
-			host := rapid.SampledFrom(hosts).Draw(t, "badHost")
-			return fmt.Sprintf("https://%s/podcast/get/1/tok", host)
+			// Valid path shape, but no host at all
+			return "https:///podcast/get/1/tok"
 		case 3:
-			// kino.pub with unclassified path
+			// Known host, but a path that matches no input shape
+			host := genHost().Draw(t, "host")
 			paths := []string{"/", "/about", "/some/random/path", "/podcast", "/podcast/get",
 				"/podcast/get/abc/tok", "/item", "/item/view", "/item/view/abc"}
 			path := rapid.SampledFrom(paths).Draw(t, "badPath")
-			return fmt.Sprintf("https://kino.pub%s", path)
+			return fmt.Sprintf("https://%s%s", host, path)
 		default:
 			// Random junk (not a URL at all)
 			chars := "abcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*() "
@@ -124,8 +140,9 @@ func genInvalidURL() *rapid.Generator[string] {
 
 // For any generated URL built from the podcast-feed template, Classify returns
 // ClassPodcastFeed. For page-link template, returns ClassPageLink. For random
-// junk or wrong host, returns ClassUnclassified with error. Only kino.pub-hosted
-// URLs are ever classified as feed or page.
+// junk, a bad scheme or an unknown path, returns ClassUnclassified with error.
+// The host is not part of the decision — any host with a known path shape is
+// classified, which is what lets mirrors and renamed domains work.
 
 func TestProperty1_PodcastFeedURLClassifiedCorrectly(t *testing.T) {
 	r := New(stubLogger{})
@@ -172,30 +189,35 @@ func TestProperty1_InvalidURLClassifiedAsUnclassified(t *testing.T) {
 	})
 }
 
-func TestProperty1_OnlyKinoPubHostClassifiedAsFeedOrPage(t *testing.T) {
+// Classification depends on the URL shape alone: any host carrying a known path
+// is classified, so a mirror or a renamed domain works without a code change.
+func TestProperty1_AnyHostWithKnownPathIsClassified(t *testing.T) {
 	r := New(stubLogger{})
 
 	rapid.Check(t, func(t *rapid.T) {
-		// Generate a URL with a non-kino.pub host but valid path patterns
-		hosts := []string{"example.com", "other.org", "kino.pub.fake.com", "notkino.pub", "pub.kino"}
-		host := rapid.SampledFrom(hosts).Draw(t, "host")
+		host := rapid.SampledFrom([]string{
+			"kino.watch", "kino.pub", "example.com", "other.org", "kino.pub.mirror.com", "pub.kino",
+		}).Draw(t, "host")
 		scheme := genScheme().Draw(t, "scheme")
 
-		// Try both feed and page paths on wrong host
-		pathKind := rapid.IntRange(0, 1).Draw(t, "pathKind")
+		id := genNumericID().Draw(t, "id")
 		var url string
-		if pathKind == 0 {
-			id := genNumericID().Draw(t, "id")
+		var want domain.InputClass
+		if rapid.Bool().Draw(t, "isFeed") {
 			token := genToken().Draw(t, "token")
 			url = fmt.Sprintf("%s://%s/podcast/get/%s/%s", scheme, host, id, token)
+			want = domain.ClassPodcastFeed
 		} else {
-			id := genNumericID().Draw(t, "id")
 			url = fmt.Sprintf("%s://%s/item/view/%s", scheme, host, id)
+			want = domain.ClassPageLink
 		}
 
-		class, _ := r.Classify(url)
-		if class == domain.ClassPodcastFeed || class == domain.ClassPageLink {
-			t.Fatalf("Classify(%q) = %d, non-kino.pub host should never be classified as feed or page", url, class)
+		class, err := r.Classify(url)
+		if err != nil {
+			t.Fatalf("Classify(%q) returned unexpected error: %v", url, err)
+		}
+		if class != want {
+			t.Fatalf("Classify(%q) = %d, want %d", url, class, want)
 		}
 	})
 }
@@ -213,9 +235,10 @@ func TestProperty2_FeedSourcePreservesFeedIdentity(t *testing.T) {
 
 	rapid.Check(t, func(t *rapid.T) {
 		scheme := genScheme().Draw(t, "scheme")
+		host := genHost().Draw(t, "host")
 		id := genNumericID().Draw(t, "id")
 		token := genToken().Draw(t, "token")
-		url := fmt.Sprintf("%s://kino.pub/podcast/get/%s/%s", scheme, id, token)
+		url := fmt.Sprintf("%s://%s/podcast/get/%s/%s", scheme, host, id, token)
 
 		src, err := r.Resolve(ctx, url)
 		if err != nil {
@@ -226,6 +249,14 @@ func TestProperty2_FeedSourcePreservesFeedIdentity(t *testing.T) {
 		}
 		if src.Token != token {
 			t.Fatalf("Resolve(%q).Token = %q, want %q", url, src.Token, token)
+		}
+		// The feed must be fetched back from the host it was resolved from,
+		// otherwise a mirror would silently fall back to the default domain.
+		if got, want := src.Site.String(), strings.ToLower(host); got != want {
+			t.Fatalf("Resolve(%q).Site = %q, want %q", url, got, want)
+		}
+		if got := src.Site.PodcastFeedURL(id, token); got != fmt.Sprintf("%s://%s/podcast/get/%s/%s", scheme, strings.ToLower(host), id, token) {
+			t.Fatalf("Resolve(%q) feed URL = %q, want it rebuilt against %q", url, got, host)
 		}
 	})
 }

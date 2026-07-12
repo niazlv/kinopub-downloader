@@ -49,6 +49,11 @@ type FeedSource struct {
 	ID    string // numeric podcast id from the URL
 	Token string // feed authentication token
 
+	// Site is the origin the feed lives on, carried over from the URL the
+	// source was resolved from so mirrors keep working. The zero value means
+	// DefaultSiteHost.
+	Site Site
+
 	// LocalPath, when non-empty, points to a locally saved RSS feed file that
 	// should be read instead of fetching the feed over the network.
 	LocalPath string
@@ -88,7 +93,7 @@ const (
 // InputResolver classifies and resolves user-supplied URLs into feed sources
 // (Req 1).
 type InputResolver interface {
-	// Classify inspects a kino.pub URL (Req 1.1).
+	// Classify inspects an input URL (Req 1.1). Any host is accepted — see Site.
 	Classify(rawURL string) (InputClass, error)
 
 	// Resolve produces a FeedSource. For a page link it derives the tokenized
@@ -244,13 +249,13 @@ type HLSAudioTrack struct {
 	Language string // language tag, e.g. "ru"
 }
 
-// PageScraper extracts playlist data from kino.pub pages.
+// PageScraper extracts playlist data from site pages.
 type PageScraper interface {
 	// ExtractAllSeasons fetches all seasons' playlists from a page URL.
 	ExtractAllSeasons(ctx context.Context, baseURL string) (*PagePlaylist, error)
 }
 
-// PagePlaylist holds extracted playlist data from a kino.pub page.
+// PagePlaylist holds extracted playlist data from a site page.
 type PagePlaylist struct {
 	ItemID   int
 	Title    string

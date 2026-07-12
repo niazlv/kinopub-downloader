@@ -11,7 +11,7 @@ import (
 // buildInputAuthOpts returns ffmpeg input options that inject authentication
 // into HTTP(S) requests: -user_agent for the User-Agent and -headers for the
 // Referer and extra headers (but NOT Cookie — CDN rejects requests with
-// kino.pub cookies, causing timeouts). The returned options must be placed
+// site cookies, causing timeouts). The returned options must be placed
 // immediately before an -i so they apply to that input.
 //
 // ffmpeg's -headers option takes a single string of CRLF-separated header
@@ -213,7 +213,7 @@ func appendContainerMetadata(args []string, job domain.Job, outFormat string) []
 //
 // The auth argument, when non-empty, injects a Cookie header, User-Agent, and
 // any extra headers via ffmpeg's -headers / -user_agent input options so that
-// ffmpeg's requests pass Cloudflare and kino.pub authentication. These options
+// ffmpeg's requests pass Cloudflare and the site's authentication. These options
 // are applied before each -i so they affect every input.
 //
 // The function produces:

@@ -1,0 +1,9 @@
+# 2026/07/11 21:24:00.747728 [TestProperty3_ErrorsNeverProduceFeedSource] [rapid] draw url: "https://example.com/podcast/get/1/tok"
+# 2026/07/11 21:24:00.747733 [TestProperty3_ErrorsNeverProduceFeedSource] Resolve("https://example.com/podcast/get/1/tok") returned nil error, want non-nil for invalid URL
+# 
+v0.4.8#2015037634198859761
+0x0
+0x38e38e38e38e4
+0x2
+0x0
+0x0

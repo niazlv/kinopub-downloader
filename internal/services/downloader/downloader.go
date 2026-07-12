@@ -58,7 +58,7 @@ func WithFFmpegPath(path string) Option {
 }
 
 // WithAuth sets the request authentication (Cookie, User-Agent, extra headers)
-// propagated to ffmpeg so its requests pass Cloudflare and kino.pub auth.
+// propagated to ffmpeg so its requests pass Cloudflare and the site's auth.
 func WithAuth(auth domain.RequestAuth) Option {
 	return func(d *Downloader) {
 		d.auth = auth

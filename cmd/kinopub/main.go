@@ -57,12 +57,12 @@ func main() {
 // download path cannot proceed without the requested cookies); otherwise it
 // degrades to a warning (doctor can still run read-only checks). The returned
 // fatal flag tells the caller to abort.
-func resolveAuth(cookie, userAgent string, browserCk browserCookiesFlag, browserLoadFatal bool) (resolvedCookie, resolvedUA string, fatal bool) {
+func resolveAuth(cookie, userAgent string, browserCk browserCookiesFlag, site domain.Site, browserLoadFatal bool) (resolvedCookie, resolvedUA string, fatal bool) {
 	resolvedCookie = cookie
 	resolvedUA = userAgent
 
 	if resolvedCookie == "" && browserCk.set {
-		ck, err := browsercookies.Load(browserCk.value, "kino.pub")
+		ck, ckDomain, err := browsercookies.Load(browserCk.value, cookieDomains(site)...)
 		if err != nil {
 			if browserLoadFatal {
 				fmt.Fprintf(os.Stderr, "Error: could not load cookies from browser %q: %v\n", browserCk.value, err)
@@ -71,6 +71,7 @@ func resolveAuth(cookie, userAgent string, browserCk browserCookiesFlag, browser
 			fmt.Fprintf(os.Stderr, "Warning: could not load cookies from browser %q: %v\n", browserCk.value, err)
 		} else {
 			resolvedCookie = ck
+			warnCookieDomainMismatch(ckDomain, site)
 		}
 	}
 
@@ -91,6 +92,32 @@ func resolveAuth(cookie, userAgent string, browserCk browserCookiesFlag, browser
 		resolvedUA = defaultUserAgent
 	}
 	return resolvedCookie, resolvedUA, false
+}
+
+// cookieDomains lists the domains to look for browser cookies under, most
+// preferred first: the site this run targets, then the other domains the
+// service is known by — so a session saved before a rename (kino.pub →
+// kino.watch) is still found instead of failing outright.
+func cookieDomains(site domain.Site) []string {
+	domains := []string{site.String()}
+	for _, known := range domain.KnownSiteHosts {
+		if known != domains[0] {
+			domains = append(domains, known)
+		}
+	}
+	return domains
+}
+
+// warnCookieDomainMismatch tells the user when the cookies we found belong to a
+// different domain than the one being downloaded from. They are still used —
+// mirrors often share a session — but a 403 later is then explained.
+func warnCookieDomainMismatch(cookieDomain string, site domain.Site) {
+	if cookieDomain == "" || site.Owns(cookieDomain) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Warning: loaded cookies for %s, but this run targets %s. "+
+		"If it returns 403, log in to %s in your browser and retry.\n",
+		cookieDomain, site, site)
 }
 
 func run() int {
@@ -133,6 +160,7 @@ func run() int {
 		noChunked   bool
 		audioSel    string
 		audioMenu   bool
+		siteHost    string
 	)
 
 	fs := flag.NewFlagSet("kinopub", flag.ContinueOnError)
@@ -158,7 +186,8 @@ func run() int {
 	fs.StringVar(&cookie, "cookie", "", "raw Cookie header value sent with every request (and to ffmpeg)")
 	fs.StringVar(&userAgent, "user-agent", "", "User-Agent sent with every request (must match the browser that issued the cookies)")
 	fs.Var(&headerVals, "header", "extra HTTP header 'Name: Value' (repeatable)")
-	fs.Var(&browserCk, "browser-cookies", "auto-load kino.pub cookies from a browser: safari, chrome, firefox, or auto (default auto when given without a value)")
+	fs.Var(&browserCk, "browser-cookies", "auto-load site cookies from a browser: safari, chrome, firefox, or auto (default auto when given without a value)")
+	fs.StringVar(&siteHost, "site", "", "site host to target, e.g. kino.watch (default: taken from the <url>, else "+domain.DefaultSiteHost+")")
 	fs.StringVar(&feedFile, "feed-file", "", "read the RSS feed from a local file instead of fetching it over the network")
 	fs.StringVar(&ffmpegArgs, "ffmpeg-args", "", "extra ffmpeg arguments as a single string (advanced, e.g. \"-c:v libx265 -crf 28\")")
 	fs.Var(&ffmpegX, "x", "extra ffmpeg argument (repeatable, advanced, e.g. --x \"-c:v\" --x libx265)")
@@ -168,7 +197,7 @@ func run() int {
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "kinopub %s — download full-fidelity video from kino.pub\n\n", version)
+		fmt.Fprintf(os.Stderr, "kinopub %s — download full-fidelity video from kino.watch (ex-kino.pub) and its mirrors\n\n", version)
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		fmt.Fprintf(os.Stderr, "  kinopub [flags] <url>\n")
 		fmt.Fprintf(os.Stderr, "  kinopub login [flags]       — save authentication credentials\n")
@@ -176,38 +205,43 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "  kinopub doctor [flags]      — verify files and repair state\n")
 		fmt.Fprintf(os.Stderr, "  kinopub completion <shell>  — generate shell completion script (bash, fish)\n\n")
 		fmt.Fprintf(os.Stderr, "The <url> can be:\n")
-		fmt.Fprintf(os.Stderr, "  • A kino.pub page link:     https://kino.pub/item/view/38290\n")
-		fmt.Fprintf(os.Stderr, "                              https://kino.pub/item/view/38290/s1e1\n")
-		fmt.Fprintf(os.Stderr, "  • A podcast feed link:      https://kino.pub/podcast/get/38290/TOKEN\n")
+		fmt.Fprintf(os.Stderr, "  • A site page link:         https://kino.watch/item/view/38290\n")
+		fmt.Fprintf(os.Stderr, "                              https://kino.watch/item/view/38290/s1e1\n")
+		fmt.Fprintf(os.Stderr, "  • A podcast feed link:      https://kino.watch/podcast/get/38290/TOKEN\n")
 		fmt.Fprintf(os.Stderr, "  • A local RSS/XML file:     ./feed.xml\n\n")
+		fmt.Fprintf(os.Stderr, "Any host is accepted — the site is taken from the URL you pass, so mirrors and\n")
+		fmt.Fprintf(os.Stderr, "future domain changes work as-is. Cookies, Referer and feed URLs all follow it.\n")
+		fmt.Fprintf(os.Stderr, "Use --site only when there is no URL to derive the host from (e.g. --feed-file).\n\n")
 		fmt.Fprintf(os.Stderr, "Page links are resolved automatically when credentials are available\n")
 		fmt.Fprintf(os.Stderr, "(via login, --cookie, or --browser-cookies).\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nAuthentication:\n")
-		fmt.Fprintf(os.Stderr, "  kino.pub is behind Cloudflare. To download, you need valid session cookies.\n")
+		fmt.Fprintf(os.Stderr, "  The site is behind Cloudflare. To download, you need valid session cookies.\n")
 		fmt.Fprintf(os.Stderr, "  The easiest workflow:\n")
-		fmt.Fprintf(os.Stderr, "    1. Log in to kino.pub in your browser\n")
+		fmt.Fprintf(os.Stderr, "    1. Log in to the site in your browser\n")
 		fmt.Fprintf(os.Stderr, "    2. Copy cookies from DevTools (Network tab → request header → Cookie)\n")
 		fmt.Fprintf(os.Stderr, "    3. Run: kinopub login --cookie \"paste_here\"\n")
-		fmt.Fprintf(os.Stderr, "    4. Now just: kinopub https://kino.pub/item/view/38290\n\n")
+		fmt.Fprintf(os.Stderr, "    4. Now just: kinopub https://kino.watch/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  On macOS with Full Disk Access granted to your terminal:\n")
 		fmt.Fprintf(os.Stderr, "    kinopub login --browser-cookies safari\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  # Download a series (credentials from `kinopub login`)\n")
-		fmt.Fprintf(os.Stderr, "  kinopub -o ./downloads https://kino.pub/item/view/38290\n\n")
+		fmt.Fprintf(os.Stderr, "  kinopub -o ./downloads https://kino.watch/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # Download using a direct podcast feed link (no auth needed)\n")
-		fmt.Fprintf(os.Stderr, "  kinopub -o ./downloads https://kino.pub/podcast/get/12345/token\n\n")
+		fmt.Fprintf(os.Stderr, "  kinopub -o ./downloads https://kino.watch/podcast/get/12345/token\n\n")
 		fmt.Fprintf(os.Stderr, "  # List what would be downloaded without writing files\n")
-		fmt.Fprintf(os.Stderr, "  kinopub --dry-run https://kino.pub/item/view/38290\n\n")
+		fmt.Fprintf(os.Stderr, "  kinopub --dry-run https://kino.watch/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # Only seasons 1 and 3-5, 1080p, through a proxy\n")
 		fmt.Fprintf(os.Stderr, "  kinopub --seasons 1,3-5 -q 1080p --proxy socks5://127.0.0.1:1080 <url>\n\n")
 		fmt.Fprintf(os.Stderr, "  # Keep only the AniLibria dub, never the Japanese original\n")
-		fmt.Fprintf(os.Stderr, "  kinopub --audio \"anilibria,!jpn\" https://kino.pub/item/view/38290\n\n")
+		fmt.Fprintf(os.Stderr, "  kinopub --audio \"anilibria,!jpn\" https://kino.watch/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # Pick the audio track interactively before downloading\n")
-		fmt.Fprintf(os.Stderr, "  kinopub --audio-menu https://kino.pub/item/view/38290\n\n")
+		fmt.Fprintf(os.Stderr, "  kinopub --audio-menu https://kino.watch/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # One-off with explicit cookies (without saving)\n")
 		fmt.Fprintf(os.Stderr, "  kinopub --cookie \"cf_clearance=...; PHPSESSID=...\" <url>\n\n")
+		fmt.Fprintf(os.Stderr, "  # A mirror or a renamed domain — just pass its URL\n")
+		fmt.Fprintf(os.Stderr, "  kinopub https://kino.example/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # Use a locally saved feed file\n")
 		fmt.Fprintf(os.Stderr, "  kinopub --feed-file ./feed.xml -o ./downloads\n")
 	}
@@ -303,9 +337,17 @@ func run() int {
 		return 1
 	}
 
+	// The site is whatever host the URL names, so mirrors and renamed domains
+	// need no code change; --site names it when there is no URL to derive it
+	// from (e.g. --feed-file) or to override it.
+	site := domain.SiteFromURL(inputURL)
+	if siteHost != "" {
+		site = domain.SiteFromHost(siteHost)
+	}
+
 	// Resolve the Cookie header and User-Agent. A browser-load failure is fatal
 	// here: the download cannot proceed without the cookies the user requested.
-	resolvedCookie, userAgent, fatal := resolveAuth(cookie, userAgent, browserCk, true)
+	resolvedCookie, userAgent, fatal := resolveAuth(cookie, userAgent, browserCk, site, true)
 	if fatal {
 		return 1
 	}
@@ -320,6 +362,7 @@ func run() int {
 
 	cfg := domain.RunConfig{
 		InputURL:        inputURL,
+		Site:            site,
 		OutputPath:      output,
 		MaxConcurrency:  concurrency,
 		ProxyURL:        proxyURL,
@@ -428,14 +471,15 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 		Cookie:    cfg.Cookie,
 		UserAgent: cfg.UserAgent,
 		Headers:   cfg.Headers,
+		Site:      cfg.Site,
 	}
-	// Always include Referer: https://kino.pub/ — the CDN (digital-cdn.net)
+	// Always include a Referer pointing at the site — the CDN (digital-cdn.net)
 	// requires it and will hang/timeout without it.
 	if auth.Headers == nil {
 		auth.Headers = make(map[string]string)
 	}
 	if auth.Headers["Referer"] == "" {
-		auth.Headers["Referer"] = "https://kino.pub/"
+		auth.Headers["Referer"] = cfg.Site.Referer()
 	}
 	httpClient := httpx.WithAuth(proxyProv.HTTPClient(), auth)
 
@@ -692,14 +736,16 @@ func runLogin(args []string) int {
 		cookie    string
 		userAgent string
 		browserCk browserCookiesFlag
+		siteHost  string
 	)
 
 	fs.StringVar(&cookie, "cookie", "", "raw Cookie header value to store")
 	fs.StringVar(&userAgent, "user-agent", "", "User-Agent to store (should match the browser that issued the cookies)")
 	fs.Var(&browserCk, "browser-cookies", "auto-load cookies from a browser: safari, chrome, firefox, or auto")
+	fs.StringVar(&siteHost, "site", "", "site host to read cookies for, e.g. kino.watch (default: "+strings.Join(domain.KnownSiteHosts, ", then ")+")")
 
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Save kino.pub authentication credentials (encrypted, machine-bound).\n\n")
+		fmt.Fprintf(os.Stderr, "Save site authentication credentials (encrypted, machine-bound).\n\n")
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		fmt.Fprintf(os.Stderr, "  kinopub login --cookie \"cf_clearance=...; _identity=...\" --user-agent \"Mozilla/5.0 ...\"\n")
 		fmt.Fprintf(os.Stderr, "  kinopub login --browser-cookies safari\n\n")
@@ -724,15 +770,18 @@ func runLogin(args []string) int {
 		}
 	}
 
-	// Resolve cookie.
+	// Resolve cookie. With no --site, every domain the service is known by is
+	// searched, so the user does not have to know which one they are logged in to.
+	site := domain.SiteFromHost(siteHost)
 	resolvedCookie := cookie
 	if resolvedCookie == "" && browserCk.set {
-		ck, err := browsercookies.Load(browserCk.value, "kino.pub")
+		ck, ckDomain, err := browsercookies.Load(browserCk.value, cookieDomains(site)...)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: could not load cookies from browser %q: %v\n", browserCk.value, err)
 			return 1
 		}
 		resolvedCookie = ck
+		fmt.Fprintf(os.Stderr, "Loaded cookies for %s from browser %q.\n", ckDomain, browserCk.value)
 	}
 
 	if resolvedCookie == "" {
@@ -792,6 +841,7 @@ func runDoctor(args []string) int {
 		userAgent   string
 		browserCk   browserCookiesFlag
 		proxyURL    string
+		siteHost    string
 	)
 
 	fs.StringVar(&outputDir, "output", "", "output directory to check (default: current directory)")
@@ -805,6 +855,7 @@ func runDoctor(args []string) int {
 	fs.StringVar(&userAgent, "user-agent", "", "User-Agent for resolving source")
 	fs.Var(&browserCk, "browser-cookies", "auto-load cookies: safari, chrome, firefox, or auto")
 	fs.StringVar(&proxyURL, "proxy", "", "proxy URL (http, https, or socks5)")
+	fs.StringVar(&siteHost, "site", "", "site host to target, e.g. kino.watch (default: "+domain.DefaultSiteHost+")")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Verify downloaded files against the state file and repair inconsistencies.\n\n")
@@ -848,12 +899,14 @@ func runDoctor(args []string) int {
 	// Resolve auth (same precedence as the main download command). A browser-load
 	// failure is non-fatal here — doctor can still run read-only checks without
 	// fresh source resolution.
-	resolvedCookie, userAgent, _ := resolveAuth(cookie, userAgent, browserCk, false)
+	site := domain.SiteFromHost(siteHost)
+	resolvedCookie, userAgent, _ := resolveAuth(cookie, userAgent, browserCk, site, false)
 
 	auth := domain.RequestAuth{
 		Cookie:    resolvedCookie,
 		UserAgent: userAgent,
-		Headers:   map[string]string{"Referer": "https://kino.pub/"},
+		Headers:   map[string]string{"Referer": site.Referer()},
+		Site:      site,
 	}
 
 	// Set up logger.
