@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package downloader — progresspipe.go parses ffmpeg -progress key=value output
 // and reports per-track download percentage via a ProgressSink (Req 10.3).
 package downloader

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package downloader implements domain.Downloader — it orchestrates ffmpeg
 // invocations to download and mux media for a single episode (Req 7, 8, 9).
 // For progressive MP4 sources, it supports a chunked HTTP download mode with

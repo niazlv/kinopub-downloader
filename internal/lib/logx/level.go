@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package logx implements a custom structured, leveled logging subsystem
 // (Req 13, 14). It provides colored TTY output, plain-text non-TTY output,
 // file logging at all levels, and verbosity filtering.

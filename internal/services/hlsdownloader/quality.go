@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package hlsdownloader implements HLS segment-based downloading with
 // quality selection and resume capability.
 package hlsdownloader

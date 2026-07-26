@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package pagescraper fetches a site item page and extracts the podcast
 // feed URL from the HTML. This allows the tool to accept plain page links
 // (e.g. https://kino.watch/item/view/38290/s1e1) and automatically resolve

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package credstore provides encrypted storage for authentication credentials.
 //
 // Credentials (Cookie header, User-Agent, and the site they belong to) are

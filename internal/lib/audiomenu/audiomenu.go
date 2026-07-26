@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package audiomenu provides an interactive, time-boxed CLI picker for audio
 // tracks. It implements domain.AudioChooser: the user is shown the available
 // tracks and given a bounded window to pick which to keep. If they make no

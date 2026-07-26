@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package termx provides terminal detection, ANSI color helpers, and terminal
 // width querying for the logging and progress display subsystems.
 // (Req 10.8, 14.5, 14.6)

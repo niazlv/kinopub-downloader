@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package main is the CLI entrypoint for the kinopub downloader.
 // It parses flags, builds the RunConfig, wires up all services, and
 // delegates to the app composition root (Req 1.4, 7.3, 15.1, 15.2, 15.3, 16.3).

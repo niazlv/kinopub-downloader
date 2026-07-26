@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package feedparser implements the domain.FeedParser interface by retrieving
 // and parsing a tokenized podcast RSS feed into a domain.Series catalog.
 package feedparser

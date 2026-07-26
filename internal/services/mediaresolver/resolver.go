@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package mediaresolver implements domain.MediaResolver — it dispatches HLS
 // vs progressive media resolution and provides quality-based source selection.
 package mediaresolver

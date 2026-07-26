@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package browsercookies reads cookies for a given domain from local browser
 // cookie stores (Safari, Chrome, Firefox) and assembles a Cookie header value.
 //

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package downloader — chunked.go implements resumable HTTP streaming download
 // for progressive MP4 sources. It downloads the raw video file in a single
 // streaming GET request (with Range header for resume), writing directly to a

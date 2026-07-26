@@ -394,4 +394,18 @@ CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -o kinopub-android-arm64 ./cmd/
 
 ## Лицензия
 
-MIT
+[GNU General Public License v3.0 or later](LICENSE) (GPL-3.0-or-later).
+
+Это копилефт-лицензия: проект свободен для использования, изучения, изменения
+и распространения — но любые производные работы и форки обязаны также
+распространяться под GPL-3.0 с открытыми исходниками.
+
+Каждый файл исходного кода помечен заголовком:
+
+```go
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+```
+
+Программа распространяется БЕЗ КАКИХ-ЛИБО ГАРАНТИЙ — см. разделы 15 и 16
+файла [LICENSE](LICENSE).

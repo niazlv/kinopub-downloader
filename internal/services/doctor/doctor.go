@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package doctor implements the "doctor" subcommand that verifies downloaded
 // files against the state file and repairs inconsistencies.
 //

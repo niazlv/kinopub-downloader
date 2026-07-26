@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package httpx — utls.go provides an HTTP transport that uses uTLS to
 // impersonate a real browser's TLS fingerprint. This bypasses Cloudflare and
 // CDN fingerprint-based throttling/blocking that affects Go's default

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package statestore implements JSON-file-based download state persistence
 // (Req 12). It records which episodes have been completed so that interrupted
 // downloads can resume without re-downloading.

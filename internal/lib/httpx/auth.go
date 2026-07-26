@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package httpx provides HTTP client helpers, notably an auth-injecting
 // transport that applies a Cookie header, a User-Agent, and arbitrary extra
 // headers to every outbound request. This lets the tool reuse a logged-in

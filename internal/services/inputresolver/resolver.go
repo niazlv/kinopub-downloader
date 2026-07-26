@@ -1,3 +1,6 @@
+// Copyright (C) 2026 niazlv <niazlv03@gmail.com>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package inputresolver classifies and resolves site URLs into feed sources.
 // Any host is accepted: inputs are identified by their URL shape, so mirrors and
 // renamed domains (kino.pub → kino.watch) work without a code change.
