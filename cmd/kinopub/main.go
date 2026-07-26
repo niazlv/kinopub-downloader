@@ -37,9 +37,31 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/services/progress"
 	"github.com/niazlv/kinopub-downloader/internal/services/proxyprovider"
 	"github.com/niazlv/kinopub-downloader/internal/services/statestore"
+	"github.com/niazlv/kinopub-downloader/internal/services/updater"
 )
 
-var version = "dev"
+// Build provenance, stamped by the release workflow through -ldflags. An
+// ordinary `go build` leaves everything but version empty, which is how a
+// development build is recognized — and why it is not allowed to update itself.
+// See domain.BuildInfo.
+var (
+	version         = domain.DevVersion
+	buildRepo       = ""
+	buildRef        = ""
+	buildCommit     = ""
+	buildSigningKey = ""
+)
+
+// buildInfo assembles this binary's provenance.
+func buildInfo() domain.BuildInfo {
+	return domain.BuildInfo{
+		Version:    version,
+		Repo:       buildRepo,
+		Ref:        buildRef,
+		Commit:     buildCommit,
+		SigningKey: buildSigningKey,
+	}
+}
 
 // defaultUserAgent is a realistic Safari User-Agent used when the user supplies
 // none. It serves two purposes: Cloudflare binds cf_clearance to the UA that
@@ -175,6 +197,8 @@ func run() int {
 			return runDoctor(os.Args[2:])
 		case "completion":
 			return runCompletion(os.Args[2:])
+		case "update":
+			return runUpdate(os.Args[2:])
 		}
 	}
 
@@ -259,6 +283,7 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "  kinopub login [flags]       — save authentication credentials\n")
 		fmt.Fprintf(os.Stderr, "  kinopub logout              — remove stored credentials\n")
 		fmt.Fprintf(os.Stderr, "  kinopub doctor [flags]      — verify files and repair state\n")
+		fmt.Fprintf(os.Stderr, "  kinopub update [flags]      — install the latest release\n")
 		fmt.Fprintf(os.Stderr, "  kinopub completion <shell>  — generate shell completion script (bash, fish)\n\n")
 		fmt.Fprintf(os.Stderr, "The <url> can be:\n")
 		fmt.Fprintf(os.Stderr, "  • A site page link:         https://kino.watch/item/view/38290\n")
@@ -333,7 +358,7 @@ func run() int {
 	if showVersion {
 		// GPL-3.0 §5(d) asks an interactive program to point users at the
 		// licence and state the absence of warranty.
-		fmt.Printf("kinopub %s\n", version)
+		fmt.Printf("kinopub %s\n", buildInfo().Describe())
 		fmt.Printf("Copyright (C) 2026 niazlv\n")
 		fmt.Printf("License GPL-3.0-or-later: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>\n")
 		fmt.Printf("This program comes with ABSOLUTELY NO WARRANTY.\n")
@@ -1273,6 +1298,8 @@ complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l su
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-external  -d "Write subtitles as separate .srt files"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-only      -d "Download only subtitles, skipping video/audio"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l video-menu     -d "Show interactive video-quality picker"
+complete -c kinopub -n "__fish_seen_subcommand_from update" -l check   -d "Only report whether a newer release exists"
+complete -c kinopub -n "__fish_seen_subcommand_from update" -l proxy   -d "Proxy URL" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s i -l interactive    -d "Pick quality, audio and subtitles interactively"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l version        -d "Print version and exit"
 
@@ -1305,7 +1332,7 @@ _kinopub_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local subcommands="login logout doctor completion"
+    local subcommands="login logout doctor completion update"
     local main_flags="-o --output -c --concurrency --proxy -q --quality
         --verbosity -v --ffmpeg --log-file --container --force --seasons --episodes
         --dry-run --cookie --user-agent --header --browser-cookies
@@ -1408,4 +1435,102 @@ func splitShellArgs(s string) []string {
 		args = append(args, current.String())
 	}
 	return args
+}
+
+// runUpdate checks GitHub Releases for a newer version and installs it.
+//
+// Checking is available to any build; installing is not. A binary that was not
+// produced by the upstream release workflow — a local build, a fork's build, a
+// build from a dirty tree — reports what it found and stops, because replacing
+// it would discard whatever made it different in the first place.
+func runUpdate(args []string) int {
+	fs := flag.NewFlagSet("kinopub update", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	var (
+		checkOnly bool
+		proxyURL  string
+		verbose   bool
+	)
+	fs.BoolVar(&checkOnly, "check", false, "only report whether a newer release exists, install nothing")
+	fs.BoolVar(&verbose, "v", false, "verbose output")
+	fs.StringVar(&proxyURL, "proxy", "", "proxy URL (http, https, socks5)")
+
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "kinopub update — install the latest release\n\n")
+		fmt.Fprintf(os.Stderr, "Usage:\n  kinopub update [--check] [--proxy URL]\n\n")
+		fmt.Fprintf(os.Stderr, "Flags:\n")
+		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nOnly release builds can replace themselves, and only from the repository\n")
+		fmt.Fprintf(os.Stderr, "they were built from. Development builds report what is available and\n")
+		fmt.Fprintf(os.Stderr, "leave themselves alone.\n")
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	verb := domain.VerbosityNormal
+	if verbose {
+		verb = domain.VerbosityVerbose
+	}
+	coord := logx.NewCoordinator(os.Stderr)
+	var handlers []logx.Handler
+	if termx.IsTTY(os.Stderr) {
+		handlers = append(handlers, logx.NewTTYHandler(os.Stderr, verb, coord))
+	} else {
+		handlers = append(handlers, logx.NewPlainHandler(os.Stderr, verb, coord))
+	}
+	logger := logx.New(handlers)
+
+	proxyProv, err := proxyprovider.New(proxyURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	info := buildInfo()
+	up := updater.New(proxyProv.HTTPClient(), logger, info)
+
+	rel, newer, err := up.Check(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not check for updates: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf("Installed: %s\n", info.Describe())
+	fmt.Printf("Latest:    %s\n", rel.Tag)
+
+	switch {
+	case domain.IsDevBuild(info.Version):
+		fmt.Printf("\nThis is a development build, so there is nothing to compare it against.\n")
+		fmt.Printf("See %s\n", rel.PageURL)
+		return 0
+	case !newer:
+		fmt.Printf("\nAlready up to date.\n")
+		return 0
+	}
+
+	fmt.Printf("\nA newer release is available: %s\n", rel.PageURL)
+	if checkOnly {
+		return 0
+	}
+
+	if ok, why := up.CanSelfUpdate(); !ok {
+		// Not an error: the binary is doing the right thing by declining.
+		fmt.Fprintf(os.Stderr, "\nNot updating automatically — %s.\n", why)
+		fmt.Fprintf(os.Stderr, "Install it manually from %s\n", rel.PageURL)
+		return 0
+	}
+
+	fmt.Printf("Downloading and verifying…\n")
+	if err := up.Apply(ctx, rel); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf("Updated to %s.\n", rel.Tag)
+	return 0
 }

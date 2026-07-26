@@ -20,10 +20,43 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Optional hardening. With KINOPUB_SIGNING_KEY set, every binary is stamped
+      # with the matching public key and will then install only releases signed
+      # by it. Without the secret the workflow still produces working releases —
+      # self-update falls back to HTTPS against this repository — so a fork needs
+      # no setup at all.
+      #
+      # The public key is derived from the private one rather than configured
+      # separately, so there is a single secret and the two cannot drift apart.
+      - name: Derive signing public key
+        env:
+          KINOPUB_SIGNING_KEY: ${{ secrets.KINOPUB_SIGNING_KEY }}
+        run: |
+          if [ -z "$KINOPUB_SIGNING_KEY" ]; then
+            echo "::notice::KINOPUB_SIGNING_KEY is not set; releases will be unsigned." \
+                 "Updates still work over HTTPS from this repository. To enable signing," \
+                 "run 'go run ./cmd/releasesign keygen' and store the private half as a" \
+                 "repository secret."
+            echo "SIGNING_PUBKEY=" >> "$GITHUB_ENV"
+          else
+            echo "SIGNING_PUBKEY=$(go run ./cmd/releasesign pubkey)" >> "$GITHUB_ENV"
+          fi
+
       - name: Build binaries
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          LDFLAGS="-s -w -X main.version=${VERSION}"
+          # Build provenance. `kinopub update` refuses to replace a binary that
+          # does not carry these, so a local `go build` — which sets none of
+          # them — can never update itself. The repository and key recorded here
+          # are the only ones it will ever accept an update from, which is what
+          # keeps a fork's release line separate from this one. See
+          # domain.BuildInfo.
+          LDFLAGS="-s -w \
+            -X main.version=${VERSION} \
+            -X main.buildRepo=${GITHUB_REPOSITORY} \
+            -X main.buildRef=${GITHUB_REF} \
+            -X main.buildCommit=${GITHUB_SHA} \
+            -X main.buildSigningKey=${SIGNING_PUBKEY}"
 
           GOOS=darwin  GOARCH=arm64 go build -ldflags="$LDFLAGS" -o kinopub-darwin-arm64  ./cmd/kinopub
           GOOS=darwin  GOARCH=amd64 go build -ldflags="$LDFLAGS" -o kinopub-darwin-amd64  ./cmd/kinopub
@@ -39,6 +72,25 @@ jobs:
             tar -czf "${bin}.tar.gz" "$bin"
           done
           zip kinopub-windows-amd64.zip kinopub-windows-amd64.exe
+
+          # Контрольные суммы: `kinopub update` скачивает бинарник и заменяет
+          # им себя, поэтому он обязан убедиться, что скачал именно то, что
+          # собрал этот workflow, а не подменённый по пути файл.
+          sha256sum kinopub-darwin-arm64 kinopub-darwin-amd64 \
+                    kinopub-linux-amd64 kinopub-linux-arm64 \
+                    kinopub-windows-amd64.exe kinopub-android-arm64 > checksums.txt
+          cat checksums.txt
+
+      - name: Sign checksums
+        if: ${{ env.SIGNING_PUBKEY != '' }}
+        env:
+          KINOPUB_SIGNING_KEY: ${{ secrets.KINOPUB_SIGNING_KEY }}
+        run: |
+          # Binaries stamped with the public key above refuse any release that
+          # is not signed by its private half, so this step must not be skipped
+          # once signing is in use.
+          go run ./cmd/releasesign sign checksums.txt > checksums.txt.sig
+          echo "signature: $(cat checksums.txt.sig)"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -56,3 +108,5 @@ jobs:
             kinopub-windows-amd64.exe
             kinopub-windows-amd64.zip
             kinopub-android-arm64
+            checksums.txt
+            checksums.txt.sig
