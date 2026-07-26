@@ -522,14 +522,18 @@ func run() int {
 		return 1
 	}
 
-	return exitCodeFor(res, ctx.Err())
+	return exitCodeFor(res, ctx.Err(), cfg.DryRun)
 }
 
 // exitCodeFor maps a finished run to a process exit status. The engine reports
 // per-episode failures in the result rather than as an error, so a run where
 // every episode failed would otherwise look successful to cron jobs and shell
 // scripts that only check the status.
-func exitCodeFor(res domain.RunResult, ctxErr error) int {
+//
+// dryRun says the run was only ever meant to list episodes. Such a run downloads
+// nothing by definition, which is success rather than the "nothing came through"
+// failure below — otherwise `kinopub --dry-run … && …` could never proceed.
+func exitCodeFor(res domain.RunResult, ctxErr error, dryRun bool) int {
 	switch {
 	case ctxErr != nil:
 		fmt.Fprintf(os.Stderr, "Interrupted: %d of %d episodes completed\n", res.Succeeded, res.Total)
@@ -538,6 +542,8 @@ func exitCodeFor(res domain.RunResult, ctxErr error) int {
 		fmt.Fprintf(os.Stderr, "Finished with errors: %d succeeded, %d failed, %d skipped\n",
 			res.Succeeded, res.Failed, res.Skipped)
 		return 1
+	case dryRun:
+		return 0
 	case res.Succeeded == 0 && res.Total > 0:
 		// Nothing failed outright, yet nothing was downloaded either — e.g. every
 		// episode was skipped after repeated media-resolution failures.

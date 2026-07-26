@@ -287,20 +287,31 @@ func TestExitCodeFor(t *testing.T) {
 		name   string
 		res    domain.RunResult
 		ctxErr error
+		dryRun bool
 		want   int
 	}{
-		{"all succeeded", domain.RunResult{Total: 3, Succeeded: 3}, nil, 0},
-		{"nothing to do", domain.RunResult{Total: 0}, nil, 0},
-		{"partial failure", domain.RunResult{Total: 3, Succeeded: 2, Failed: 1}, nil, 1},
-		{"every episode failed", domain.RunResult{Total: 3, Failed: 3}, nil, 1},
-		{"all skipped", domain.RunResult{Total: 3, Skipped: 3}, nil, 1},
-		{"interrupted", domain.RunResult{Total: 3, Succeeded: 1}, context.Canceled, 130},
-		{"interrupted outranks failures", domain.RunResult{Total: 3, Failed: 2}, context.Canceled, 130},
+		{"all succeeded", domain.RunResult{Total: 3, Succeeded: 3}, nil, false, 0},
+		{"nothing to do", domain.RunResult{Total: 0}, nil, false, 0},
+		{"partial failure", domain.RunResult{Total: 3, Succeeded: 2, Failed: 1}, nil, false, 1},
+		{"every episode failed", domain.RunResult{Total: 3, Failed: 3}, nil, false, 1},
+		{"all skipped", domain.RunResult{Total: 3, Skipped: 3}, nil, false, 1},
+		{"interrupted", domain.RunResult{Total: 3, Succeeded: 1}, context.Canceled, false, 130},
+		{"interrupted outranks failures", domain.RunResult{Total: 3, Failed: 2}, context.Canceled, false, 130},
+
+		// A dry run downloads nothing by design, so the "nothing came through"
+		// failure must not fire — otherwise `--dry-run && …` can never proceed.
+		{"dry run listed episodes", domain.RunResult{Total: 92}, nil, true, 0},
+		{"dry run with nothing to list", domain.RunResult{Total: 0}, nil, true, 0},
+		// A dry run still reports real trouble: an interrupt or a failure
+		// during listing is not something to paper over.
+		{"dry run interrupted", domain.RunResult{Total: 92}, context.Canceled, true, 130},
+		{"dry run with failures", domain.RunResult{Total: 3, Failed: 1}, nil, true, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := exitCodeFor(tt.res, tt.ctxErr); got != tt.want {
-				t.Errorf("exitCodeFor(%+v, %v) = %d, want %d", tt.res, tt.ctxErr, got, tt.want)
+			if got := exitCodeFor(tt.res, tt.ctxErr, tt.dryRun); got != tt.want {
+				t.Errorf("exitCodeFor(%+v, %v, dryRun=%v) = %d, want %d",
+					tt.res, tt.ctxErr, tt.dryRun, got, tt.want)
 			}
 		})
 	}
