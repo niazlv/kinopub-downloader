@@ -1,6 +1,7 @@
 // Package credstore provides encrypted storage for authentication credentials.
 //
-// Credentials (Cookie header, User-Agent) are encrypted with AES-256-GCM using
+// Credentials (Cookie header, User-Agent, and the site they belong to) are
+// encrypted with AES-256-GCM using
 // a key derived from a machine-specific secret. The encrypted file is stored at
 // ~/.config/kinopub/credentials.enc
 //
@@ -32,9 +33,17 @@ import (
 )
 
 // Credentials holds the authentication data persisted between runs.
+//
+// Site records the host the session belongs to (e.g. "kino.watch"). A session
+// is only ever replayed against the site it was created for — the target host
+// of a run comes from the URL the user passes, so without this binding a link
+// naming an unrelated host would be enough to have the saved session sent
+// there. Site is empty for files written before it was recorded; callers treat
+// that as "unknown" rather than as an error, so an existing login keeps working.
 type Credentials struct {
 	Cookie    string `json:"cookie"`
 	UserAgent string `json:"user_agent"`
+	Site      string `json:"site,omitempty"`
 }
 
 // IsEmpty reports whether the credentials carry no useful data.

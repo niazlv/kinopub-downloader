@@ -171,7 +171,8 @@ func TestSelectOptimalFallbackClosestTo2500(t *testing.T) {
 }
 
 func TestSelectExplicitExactHeightLowestBitrate(t *testing.T) {
-	// Among matching height, lowest bandwidth wins.
+	// At 1080p the lowest bandwidth wins, among the h264 candidates: the h265
+	// entry is filtered out before the bitrate comparison.
 	variants := []Variant{
 		qv(1080, 5000000, "avc1"),
 		qv(1080, 3000000, "avc1"), // lowest -> winner
@@ -184,6 +185,152 @@ func TestSelectExplicitExactHeightLowestBitrate(t *testing.T) {
 	}
 	if got.Bandwidth != 3000000 {
 		t.Errorf("1080p: got bandwidth %d, want 3000000", got.Bandwidth)
+	}
+}
+
+func TestSelectExplicit720pPicksHighestBitrate(t *testing.T) {
+	// Documented contract: "720p" means the best 720p rendition available, not
+	// the cheapest one. Below 1080p the low-bitrate renditions are visibly bad
+	// for a saving that no longer matters.
+	variants := []Variant{
+		qv(720, 800000, "avc1"),
+		qv(720, 2400000, "avc1"), // highest 720p -> winner
+		qv(720, 1500000, "avc1"),
+		qv(1080, 6000000, "avc1"),
+	}
+	got, err := SelectVariant(variants, domain.Quality("720p"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Height != 720 || got.Bandwidth != 2400000 {
+		t.Errorf("720p: got %+v, want 720p@2400000 (highest)", got)
+	}
+}
+
+func TestSelectExplicitSubHDPicksHighestBitrate(t *testing.T) {
+	// The same rule applies to every height below 1080p.
+	for _, c := range []struct {
+		pref   string
+		height int
+	}{{"480p", 480}, {"360p", 360}} {
+		variants := []Variant{
+			qv(c.height, 500000, "avc1"),
+			qv(c.height, 1200000, "avc1"), // winner
+			qv(1080, 5000000, "avc1"),
+		}
+		got, err := SelectVariant(variants, domain.Quality(c.pref))
+		if err != nil {
+			t.Fatalf("%s: %v", c.pref, err)
+		}
+		if got.Height != c.height || got.Bandwidth != 1200000 {
+			t.Errorf("%s: got %+v, want %dp@1200000 (highest)", c.pref, got, c.height)
+		}
+	}
+}
+
+func TestSelectExplicitAtOrAbove1080pPicksLowestBitrate(t *testing.T) {
+	// At 1080p and above the resolution already carries the detail, so the
+	// cheapest rendition is the documented (and bandwidth-friendly) choice.
+	for _, c := range []struct {
+		pref   string
+		height int
+	}{{"1080p", 1080}, {"2160p", 2160}} {
+		variants := []Variant{
+			qv(c.height, 6000000, "avc1"),
+			qv(c.height, 3500000, "avc1"), // winner
+			qv(720, 1000000, "avc1"),
+		}
+		got, err := SelectVariant(variants, domain.Quality(c.pref))
+		if err != nil {
+			t.Fatalf("%s: %v", c.pref, err)
+		}
+		if got.Height != c.height || got.Bandwidth != 3500000 {
+			t.Errorf("%s: got %+v, want %dp@3500000 (lowest)", c.pref, got, c.height)
+		}
+	}
+}
+
+func TestSelectExplicitPrefersH264WithoutCodecSuffix(t *testing.T) {
+	// h265 is cheaper but does not decode on every device, so an unqualified
+	// height must never hand back HEVC while an h264 rendition exists — even
+	// when the h265 one would win the bitrate rule on its own.
+	t.Run("1080p skips cheaper h265", func(t *testing.T) {
+		variants := []Variant{
+			qv(1080, 2000000, "hvc1.1.6.L120"), // cheapest, but HEVC
+			qv(1080, 3500000, "avc1.640028"),   // winner: cheapest h264
+			qv(1080, 5000000, "avc1.640028"),
+		}
+		got, err := SelectVariant(variants, domain.Quality("1080p"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.IsH264() || got.Bandwidth != 3500000 {
+			t.Errorf("1080p: got %+v, want the cheapest h264 (3500000)", got)
+		}
+	})
+
+	t.Run("720p skips higher-bitrate h265", func(t *testing.T) {
+		variants := []Variant{
+			qv(720, 4000000, "hev1.1.6.L93"), // highest, but HEVC
+			qv(720, 2400000, "avc1.4d401f"),  // winner: highest h264
+			qv(720, 900000, "avc1.4d401f"),
+		}
+		got, err := SelectVariant(variants, domain.Quality("720p"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.IsH264() || got.Bandwidth != 2400000 {
+			t.Errorf("720p: got %+v, want the highest h264 (2400000)", got)
+		}
+	})
+
+	t.Run("falls back to h265 when it is the only codec", func(t *testing.T) {
+		variants := []Variant{
+			qv(2160, 12000000, "hvc1.2.4.L153"),
+			qv(2160, 9000000, "hvc1.2.4.L153"), // lowest at 2160p -> winner
+			qv(1080, 3000000, "avc1"),
+		}
+		got, err := SelectVariant(variants, domain.Quality("2160p"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Height != 2160 || got.Bandwidth != 9000000 {
+			t.Errorf("2160p: got %+v, want the h265 fallback at 9000000", got)
+		}
+	})
+
+	t.Run("variant without CODECS counts as h264", func(t *testing.T) {
+		variants := []Variant{
+			qv(1080, 2000000, "hvc1"),
+			qv(1080, 4000000, ""), // no CODECS attribute -> treated as h264
+		}
+		got, err := SelectVariant(variants, domain.Quality("1080p"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Bandwidth != 4000000 {
+			t.Errorf("got %+v, want the codec-less variant", got)
+		}
+	})
+}
+
+func TestSelectExplicitCodecSuffixOverridesH264Preference(t *testing.T) {
+	// An explicit "-h265" is the user asking for HEVC on purpose; the h264
+	// preference must not override it. Bitrate follows the height rule.
+	variants := []Variant{
+		qv(720, 3000000, "hvc1"),
+		qv(720, 1200000, "hvc1"),
+		qv(720, 2000000, "avc1"),
+	}
+	got, err := SelectVariant(variants, domain.Quality("720p-h265"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.IsH265() {
+		t.Fatalf("720p-h265: got %+v, want an h265 variant", got)
+	}
+	if got.Bandwidth != 3000000 {
+		t.Errorf("720p-h265: got bandwidth %d, want 3000000 (highest below 1080p)", got.Bandwidth)
 	}
 }
 
@@ -294,7 +441,8 @@ func TestSelectExplicitCodecNoMatchClosestHeight(t *testing.T) {
 
 func TestSelectExplicitUnparseableHeightZero(t *testing.T) {
 	// A preference that parses to height 0 means wantHeight stays 0, so every
-	// variant matches (no height filter); lowest bitrate wins.
+	// variant matches (no height filter). With no height to reason about, the
+	// original lowest-bitrate rule stands — "max" is the spelling for biggest.
 	variants := []Variant{
 		qv(1080, 3000000, "avc1"),
 		qv(720, 1500000, "avc1"), // lowest -> winner

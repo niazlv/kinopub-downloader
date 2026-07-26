@@ -33,11 +33,6 @@ func genOptionalString() *rapid.Generator[string] {
 	)
 }
 
-// genNonEmptyString generates a non-empty safe string.
-func genNonEmptyString() *rapid.Generator[string] {
-	return rapid.StringMatching(`[A-Za-zА-Яа-я0-9 _\-]{1,30}`)
-}
-
 // genAudioTrack generates a random AudioTrack.
 func genAudioTrack() *rapid.Generator[domain.AudioTrack] {
 	return rapid.Custom(func(t *rapid.T) domain.AudioTrack {

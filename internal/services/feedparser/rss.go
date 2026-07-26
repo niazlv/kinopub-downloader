@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -52,14 +54,19 @@ func (p *Parser) Parse(ctx context.Context, src domain.FeedSource) (domain.Serie
 		return p.parseLocalFile(src)
 	}
 
-	url := feedURL(src)
-	p.log.Info("retrieving feed", domain.F("url", url))
+	// The feed URL embeds the access token as a path segment, so log only the
+	// feed id and a truncated token prefix instead of the full URL.
+	reqURL := feedURL(src)
+	p.log.Info("retrieving feed",
+		domain.F("id", src.ID),
+		domain.F("token_prefix", truncate(src.Token, 8)),
+	)
 
 	// Apply 30s retrieval timeout (Req 2.1).
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return domain.Series{}, fmt.Errorf("%w: %v", domain.ErrFeedRetrieval, err)
 	}
@@ -222,15 +229,22 @@ func ParseSeasonEpisode(title, pageLink string) (season, episode int, ok bool) {
 // Enclosure classification
 // ---------------------------------------------------------------------------
 
-// classifyEnclosure determines the MediaKind from the enclosure URL.
-func classifyEnclosure(url string) domain.MediaSource {
+// classifyEnclosure determines the MediaKind from the enclosure URL. The
+// extension is taken from the parsed URL path so that query strings (e.g.
+// master.m3u8?e=...) do not defeat the check.
+func classifyEnclosure(rawURL string) domain.MediaSource {
 	kind := domain.MediaProgressive
-	if strings.HasSuffix(strings.ToLower(url), ".m3u8") {
+	if u, err := url.Parse(rawURL); err == nil {
+		if strings.EqualFold(path.Ext(u.Path), ".m3u8") {
+			kind = domain.MediaHLS
+		}
+	} else if strings.HasSuffix(strings.ToLower(rawURL), ".m3u8") {
+		// Unparseable URL: fall back to the plain suffix check.
 		kind = domain.MediaHLS
 	}
 	return domain.MediaSource{
 		Kind: kind,
-		URL:  url,
+		URL:  rawURL,
 	}
 }
 
@@ -273,6 +287,14 @@ type rssItem struct {
 
 type rssEnclosure struct {
 	URL string `xml:"url,attr"`
+}
+
+// truncate returns at most n characters of s, appending "…" if truncated.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // Verify that *Parser satisfies domain.FeedParser at compile time.

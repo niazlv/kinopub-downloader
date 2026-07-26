@@ -2,6 +2,7 @@ package downloader
 
 import (
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -9,14 +10,19 @@ import (
 )
 
 // buildInputAuthOpts returns ffmpeg input options that inject authentication
-// into HTTP(S) requests: -user_agent for the User-Agent and -headers for the
-// Referer and extra headers (but NOT Cookie — CDN rejects requests with
-// site cookies, causing timeouts). The returned options must be placed
-// immediately before an -i so they apply to that input.
+// into HTTP(S) requests for inputURL: -user_agent for the User-Agent and
+// -headers for the Referer and extra headers. The returned options must be
+// placed immediately before an -i so they apply to that input.
+//
+// The Cookie is only included for hosts the site owns, matching the policy in
+// ChunkedDownloader.applyAuth: the CDN rejects or throttles requests carrying
+// site cookies. That scoping also keeps the session cookie out of the argv of a
+// process whose command line every local user can read, except when talking to
+// the site that issued it.
 //
 // ffmpeg's -headers option takes a single string of CRLF-separated header
 // lines. Headers are emitted in a deterministic order so the command is stable.
-func buildInputAuthOpts(auth domain.RequestAuth) []string {
+func buildInputAuthOpts(auth domain.RequestAuth, inputURL string) []string {
 	if auth.IsZero() {
 		return nil
 	}
@@ -29,7 +35,7 @@ func buildInputAuthOpts(auth domain.RequestAuth) []string {
 
 	// Collect header lines: Cookie first, then extra headers in sorted order.
 	var lines []string
-	if auth.Cookie != "" {
+	if auth.Cookie != "" && cookieAllowedForURL(auth, inputURL) {
 		lines = append(lines, "Cookie: "+auth.Cookie)
 	}
 	if len(auth.Headers) > 0 {
@@ -49,6 +55,22 @@ func buildInputAuthOpts(auth domain.RequestAuth) []string {
 	}
 
 	return opts
+}
+
+// cookieAllowedForURL reports whether rawURL points at the site the run targets
+// (or one of its subdomains) and may therefore receive the session Cookie. When
+// the caller never told us which site is in play, any known site host is
+// accepted so a mirror is still authenticated. A URL we cannot parse gets no
+// cookie: guessing would leak it.
+func cookieAllowedForURL(auth domain.RequestAuth, rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if auth.Site.IsZero() {
+		return domain.AnyKnownSiteOwns(u.Host)
+	}
+	return auth.Site.Owns(u.Host)
 }
 
 // iso639Map maps common 2-letter language codes to their ISO 639-2 (3-letter)
@@ -227,11 +249,10 @@ func BuildFFmpegArgs(job domain.Job, proxyEnv []string, auth domain.RequestAuth,
 	media := job.Media
 	isHLS := media.Source.Kind == domain.MediaHLS
 
-	// inputOpts are options that must precede every -i (auth headers, UA).
-	inputOpts := buildInputAuthOpts(auth)
-
+	// Auth options must precede the -i they apply to, and are derived per input
+	// because cookie scoping depends on the input's host.
 	addInput := func(args []string, url string) []string {
-		args = append(args, inputOpts...)
+		args = append(args, buildInputAuthOpts(auth, url)...)
 		args = append(args, "-i", url)
 		return args
 	}

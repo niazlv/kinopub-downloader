@@ -5,6 +5,7 @@
 package httpx
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net"
@@ -17,6 +18,10 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
 )
+
+// connectTimeout bounds the HTTP CONNECT handshake with a proxy when the
+// caller's context carries no deadline of its own.
+const connectTimeout = 30 * time.Second
 
 // NewBrowserClient creates an HTTP client that impersonates Chrome's TLS
 // fingerprint using uTLS. This prevents CDN throttling based on JA3/JA4
@@ -37,13 +42,15 @@ type browserTransport struct {
 	proxyURL  *url.URL
 	mu        sync.Mutex
 	h1        *http.Transport
+	plain     *http.Transport              // cleartext-HTTP transport, see plainTransport
 	h2Clients map[string]*http2.ClientConn // host → h2 conn
 }
 
 func (t *browserTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL.Scheme != "https" {
-		// Plain HTTP — use default transport.
-		return http.DefaultTransport.RoundTrip(req)
+		// Plain HTTP — no TLS to fingerprint, but it must still go through the
+		// configured proxy.
+		return t.plainTransport().RoundTrip(req)
 	}
 
 	// Fast path: reuse a pooled HTTP/2 connection to this host without paying
@@ -89,6 +96,31 @@ func (t *browserTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return t.roundTripH1(req, tlsConn)
 }
 
+// plainTransport returns the transport used for cleartext http:// requests,
+// building it on first use and pooling it thereafter.
+//
+// It must NOT be http.DefaultTransport: that only honours proxies from the
+// environment, so a plain-http playlist or segment URL would bypass --proxy
+// entirely and leak the real IP (and any Cookie, in the clear). Configuring the
+// same proxyURL here keeps every scheme on one route.
+func (t *browserTransport) plainTransport() *http.Transport {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.plain == nil {
+		tr := &http.Transport{
+			MaxIdleConns:        100,
+			IdleConnTimeout:     90 * time.Second,
+			MaxIdleConnsPerHost: 10,
+			DialContext:         newDialer().DialContext,
+		}
+		if t.proxyURL != nil {
+			tr.Proxy = http.ProxyURL(t.proxyURL)
+		}
+		t.plain = tr
+	}
+	return t.plain
+}
+
 // dialProxy opens a TCP connection to addr, routing through the configured
 // proxy if one is set. Supports SOCKS5 and HTTP/HTTPS CONNECT proxies.
 func (t *browserTransport) dialProxy(ctx context.Context, addr string) (net.Conn, error) {
@@ -107,7 +139,11 @@ func (t *browserTransport) dialProxy(ctx context.Context, addr string) (net.Conn
 				auth.Password = pass
 			}
 		}
-		socksDialer, err := proxy.SOCKS5("tcp", t.proxyURL.Host, auth, proxy.Direct)
+		// Forward through baseDialer rather than proxy.Direct so the
+		// Android/Termux DNS workaround applies to the connection to the proxy
+		// itself — Android's netd resolver is unreachable from Termux, so a
+		// hostname proxy would otherwise fail to resolve.
+		socksDialer, err := proxy.SOCKS5("tcp", t.proxyURL.Host, auth, baseDialer)
 		if err != nil {
 			return nil, fmt.Errorf("socks5 dialer: %w", err)
 		}
@@ -128,20 +164,56 @@ func (t *browserTransport) dialProxy(ctx context.Context, addr string) (net.Conn
 			pass, _ := t.proxyURL.User.Password()
 			req.SetBasicAuth(t.proxyURL.User.Username(), pass)
 		}
+
+		// The CONNECT exchange happens on the bare conn, before any transport
+		// takes over, so nothing else enforces ctx here: a proxy that accepts the
+		// TCP connection and then never answers would hang this goroutine
+		// forever. Deadlines derived from ctx bound both halves; they are cleared
+		// once the tunnel is open so they don't leak into the TLS handshake and
+		// the request that follows.
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			deadline = time.Now().Add(connectTimeout)
+		}
+		if err := conn.SetDeadline(deadline); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("proxy CONNECT deadline: %w", err)
+		}
+
 		if err := req.Write(conn); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("proxy CONNECT write: %w", err)
 		}
-		// Read response without buffering — we need the raw conn afterwards.
-		buf := make([]byte, 4096)
-		n, err := conn.Read(buf)
+
+		// Parse the response properly instead of eyeballing one Read: a split TCP
+		// response would otherwise be misread as a failure, and any header bytes
+		// past the status line would be left in the stream for the uTLS handshake
+		// to choke on.
+		br := bufio.NewReader(conn)
+		resp, err := http.ReadResponse(br, req)
 		if err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("proxy CONNECT read: %w", err)
 		}
-		if n < 12 || string(buf[9:12]) != "200" {
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
 			conn.Close()
-			return nil, fmt.Errorf("proxy CONNECT failed: %s", string(buf[:n]))
+			return nil, fmt.Errorf("proxy CONNECT failed: %s", resp.Status)
+		}
+		// Everything the proxy sends after the 200 belongs to the tunnel, so a
+		// well-behaved one sends nothing more until we speak first. Anything
+		// already buffered would be stranded in br — invisible to the uTLS
+		// handshake that reads from conn — so refuse the connection rather than
+		// hand back one that will fail in a way nobody can diagnose.
+		if br.Buffered() > 0 {
+			conn.Close()
+			return nil, fmt.Errorf("proxy CONNECT: %d unexpected bytes after response", br.Buffered())
+		}
+
+		if err := conn.SetDeadline(time.Time{}); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("proxy CONNECT clear deadline: %w", err)
 		}
 		return conn, nil
 	}

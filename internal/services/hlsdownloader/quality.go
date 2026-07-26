@@ -52,9 +52,12 @@ func (v Variant) Label() string {
 //   - "" or "optimal": 1080p h264 with bitrate ≤ 3000 kbps, or 720p if unavailable
 //   - "max": highest bandwidth variant
 //   - "1080p": 1080p with lowest bitrate (h264 preferred)
-//   - "720p": 720p with highest bitrate
-//   - "480p": 480p
-//   - "1080p-h265": specific resolution + codec
+//   - "720p": 720p with highest bitrate (h264 preferred)
+//   - "480p": 480p with highest bitrate (h264 preferred)
+//   - "1080p-h265": specific resolution + codec (lowest bitrate for that pair)
+//
+// For an explicit height the codec preference is h264 unless a "-h265" suffix
+// forces otherwise; see selectExplicit for the bitrate rule per height.
 func SelectVariant(variants []Variant, pref domain.Quality) (Variant, error) {
 	if len(variants) == 0 {
 		return Variant{}, fmt.Errorf("no variants available")
@@ -123,6 +126,25 @@ func selectMax(variants []Variant) Variant {
 
 // selectExplicit picks a variant matching the explicit preference string.
 // Supports: "1080p", "720p", "480p", "1080p-h265", "720p-h264", etc.
+//
+// Among the variants matching the requested height two preferences apply:
+//
+//  1. Codec: h264 wins unless the preference carried an explicit "-h264" /
+//     "-h265" suffix. h265 halves the bitrate but does not decode everywhere
+//     (older TVs, browsers, low-end Android), so an unqualified "1080p" must
+//     not hand back a file the user's device cannot play. h265 is still used
+//     when it is the only rendition at that height.
+//  2. Bitrate: at 1080p and above the lowest-bitrate rendition is picked — the
+//     resolution already carries the detail and the smaller file is the point
+//     of asking for a specific height. Below 1080p the highest-bitrate
+//     rendition wins instead: a 720p or 480p stream is bandwidth-constrained
+//     already, and the cheapest rendition of an already-low resolution is
+//     visibly bad for a saving that no longer matters.
+//
+// A preference that names no parseable height (wantHeight == 0) keeps the
+// original lowest-bitrate rule over all variants: with no resolution
+// constraint, "smallest" is the safer reading of an unrecognized string —
+// "max" is the documented spelling for "biggest".
 func selectExplicit(variants []Variant, pref string) (Variant, error) {
 	// Parse preference.
 	wantHeight := 0
@@ -173,10 +195,31 @@ func selectExplicit(variants []Variant, pref string) (Variant, error) {
 		return closestToHeight(variants, wantHeight), nil
 	}
 
-	// Among matches, pick the one with lowest bitrate (most efficient).
+	// With no codec named by the user, keep the h264 candidates when there are
+	// any: h265 is only reached as a fallback for heights that offer nothing
+	// else. Variants with no CODECS attribute count as h264 (see IsH264).
+	if wantCodec == "" {
+		var h264 []Variant
+		for _, v := range candidates {
+			if v.IsH264() {
+				h264 = append(h264, v)
+			}
+		}
+		if len(h264) > 0 {
+			candidates = h264
+		}
+	}
+
+	// Highest bitrate below 1080p, lowest at 1080p and above; see the doc
+	// comment. Both loops use a strict comparison, so the first candidate wins
+	// a tie and selection stays stable across CDN orderings.
+	preferHighest := wantHeight > 0 && wantHeight < 1080
+
 	best := candidates[0]
 	for _, v := range candidates[1:] {
-		if v.Bandwidth < best.Bandwidth {
+		if preferHighest && v.Bandwidth > best.Bandwidth {
+			best = v
+		} else if !preferHighest && v.Bandwidth < best.Bandwidth {
 			best = v
 		}
 	}

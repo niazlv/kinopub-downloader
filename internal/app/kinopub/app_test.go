@@ -309,3 +309,95 @@ func testSeries() domain.Series {
 		},
 	}
 }
+
+// TestCountCompletedPerSeason_Force pins the --force progress seeding: a forced
+// run re-downloads everything, so no season may start out counted as done.
+// Otherwise the season bars begin full while the series bar begins empty, and
+// each re-download pushes a season past its own total.
+func TestCountCompletedPerSeason_Force(t *testing.T) {
+	episodes := []domain.Episode{
+		{Key: domain.EpisodeKey{Series: "s", Season: 1, Episode: 1}},
+		{Key: domain.EpisodeKey{Series: "s", Season: 1, Episode: 2}},
+		{Key: domain.EpisodeKey{Series: "s", Season: 2, Episode: 1}},
+	}
+	store := &allCompletedStateStore{}
+
+	normal := countCompletedPerSeason(episodes, domain.DownloadState{}, store, false)
+	if normal[1] != 2 || normal[2] != 1 {
+		t.Errorf("without --force want {1:2, 2:1}, got %v", normal)
+	}
+
+	forced := countCompletedPerSeason(episodes, domain.DownloadState{}, store, true)
+	if len(forced) != 0 {
+		t.Errorf("with --force want an empty map, got %v", forced)
+	}
+}
+
+// allCompletedStateStore reports every episode as already downloaded.
+type allCompletedStateStore struct{ mockStateStore }
+
+func (s *allCompletedStateStore) IsCompleted(domain.DownloadState, domain.EpisodeKey) bool {
+	return true
+}
+
+// TestRun_NoRSSFallbackWhenCancelled pins that an interrupted HLS run reports
+// the interruption instead of restarting the whole RSS pipeline against an
+// already-dead context, which discards the partial result and surfaces a
+// misleading feed-retrieval error.
+func TestRun_NoRSSFallbackWhenCancelled(t *testing.T) {
+	deps := validDeps()
+	resolver := &countingInputResolver{}
+	deps.InputResolver = resolver
+	deps.PageScraper = &cancellingPageScraper{}
+	deps.HLSDownloader = &stubHLSDownloader{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	app, err := New(deps)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := app.Run(ctx, domain.RunConfig{InputURL: "https://kino.watch/item/view/1"}); err == nil {
+		t.Fatal("expected the cancellation to be reported as an error")
+	}
+	if resolver.calls != 0 {
+		t.Errorf("RSS pipeline must not run after cancellation (input resolved %d times)", resolver.calls)
+	}
+}
+
+type countingInputResolver struct {
+	mockInputResolver
+	calls int
+}
+
+func (r *countingInputResolver) Resolve(ctx context.Context, rawURL string) (domain.FeedSource, error) {
+	r.calls++
+	return r.mockInputResolver.Resolve(ctx, rawURL)
+}
+
+// cancellingPageScraper stands in for a scrape that fails because the run was
+// interrupted.
+type cancellingPageScraper struct{}
+
+func (s *cancellingPageScraper) ExtractPlaylist(ctx context.Context, pageURL string) (*domain.PagePlaylist, error) {
+	return nil, context.Canceled
+}
+
+func (s *cancellingPageScraper) ExtractAllSeasons(ctx context.Context, pageURL string) (*domain.PagePlaylist, error) {
+	return nil, context.Canceled
+}
+
+type stubHLSDownloader struct{}
+
+func (d *stubHLSDownloader) DownloadEpisode(ctx context.Context, manifestURL string, quality domain.Quality,
+	outPath string, key domain.EpisodeKey, sink domain.ProgressSink) (*domain.HLSDownloadResult, error) {
+	return nil, context.Canceled
+}
+
+func (d *stubHLSDownloader) ListAudioTracks(ctx context.Context, manifestURL string,
+	quality domain.Quality) ([]domain.AudioTrackInfo, error) {
+	return nil, nil
+}
+
+func (d *stubHLSDownloader) SetAudioPreference(domain.AudioPreference) {}

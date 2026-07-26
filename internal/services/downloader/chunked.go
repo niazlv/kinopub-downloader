@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
@@ -68,10 +69,17 @@ func (c *ChunkedDownloader) CanHandle(media domain.ResolvedMedia) bool {
 func (c *ChunkedDownloader) Download(ctx context.Context, url string, outPath string, key domain.EpisodeKey, sink domain.ProgressSink) error {
 	partPath := outPath + ".part"
 
-	// 1. Determine total file size via HEAD request.
+	// 1. Determine total file size via HEAD request. Without a size we cannot
+	// tell a finished download from a truncated one, and every completeness
+	// check below (resume offset, the streaming loop bound, the final size
+	// verification) degenerates: the caller must fall back to ffmpeg, which
+	// streams to EOF without needing a declared length.
 	totalSize, err := c.probeSize(ctx, url)
 	if err != nil {
 		return fmt.Errorf("probe: %w", err)
+	}
+	if totalSize <= 0 {
+		return fmt.Errorf("server did not report a content length; cannot verify completeness")
 	}
 
 	c.logger.Info("streaming download starting",
@@ -120,9 +128,14 @@ func (c *ChunkedDownloader) Download(ctx context.Context, url string, outPath st
 			return ctx.Err()
 		}
 
-		// Open streaming connection from current offset.
-		n, err := c.streamFrom(ctx, url, partPath, offset, totalSize, key, track, sink)
-		offset += n
+		// Open streaming connection from current offset. streamFrom returns the
+		// absolute end position it wrote up to, which is not necessarily
+		// offset+written: a server that ignores our Range header restarts the
+		// body at byte 0, and treating those bytes as a continuation would leave
+		// an unwritten hole in the middle of the file.
+		newOffset, err := c.streamFrom(ctx, url, partPath, offset, totalSize, key, track, sink)
+		progressed := newOffset > offset
+		offset = newOffset
 
 		if err != nil {
 			if ctx.Err() != nil {
@@ -130,7 +143,7 @@ func (c *ChunkedDownloader) Download(ctx context.Context, url string, outPath st
 			}
 
 			// If we haven't downloaded anything at all, fail fast (URL expired).
-			if offset == 0 && n == 0 {
+			if offset == 0 {
 				return fmt.Errorf("download failed immediately (URL may be expired): %w", err)
 			}
 
@@ -148,6 +161,33 @@ func (c *ChunkedDownloader) Download(ctx context.Context, url string, outPath st
 			)
 
 			// Exponential backoff: 3s, 6s, 12s, ... capped at 30s.
+			delay := retryBaseDelay * time.Duration(1<<(consecutiveFailures-1))
+			if delay > 30*time.Second {
+				delay = 30 * time.Second
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+			continue
+		}
+
+		// A "successful" response that advanced nothing (an empty body, or a 416
+		// telling us the range is already past the end) would spin this loop at
+		// full speed against the CDN. Treat it as a failed attempt so it goes
+		// through the same bounded backoff as a dropped connection.
+		if !progressed {
+			consecutiveFailures++
+			if consecutiveFailures >= maxResumeAttempts {
+				return fmt.Errorf("download stalled at %s after %d attempts: server returned no data "+
+					"for bytes %d-%d", formatBytes(offset), maxResumeAttempts, offset, totalSize)
+			}
+			c.logger.Warn("server returned no data, retrying",
+				domain.F("episode", key.Label()),
+				domain.F("downloaded", formatBytes(offset)),
+				domain.F("attempt", consecutiveFailures),
+			)
 			delay := retryBaseDelay * time.Duration(1<<(consecutiveFailures-1))
 			if delay > 30*time.Second {
 				delay = 30 * time.Second
@@ -185,9 +225,13 @@ func (c *ChunkedDownloader) Download(ctx context.Context, url string, outPath st
 	return nil
 }
 
-// streamFrom opens a single GET connection starting at offset and streams
-// the body to the .part file. Returns bytes written in this session and any
-// error (nil means stream completed to EOF).
+// streamFrom opens a single GET connection starting at offset and streams the
+// body to the .part file. It returns the absolute position the file is now
+// contiguously written up to, and any error (nil means the stream completed to
+// EOF). Returning an absolute position rather than a byte count is what keeps
+// the caller honest when the server ignores our Range header and restarts the
+// body from zero: the file then holds fewer valid bytes than before, and the
+// next Range request must be computed from the real end of the data.
 func (c *ChunkedDownloader) streamFrom(
 	ctx context.Context,
 	url, partPath string,
@@ -198,7 +242,7 @@ func (c *ChunkedDownloader) streamFrom(
 ) (int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return 0, err
+		return offset, err
 	}
 	c.applyAuth(req)
 
@@ -209,36 +253,43 @@ func (c *ChunkedDownloader) streamFrom(
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return 0, err
+		return offset, err
 	}
 	defer resp.Body.Close()
+
+	// base is where this response's first byte lands in the file. It equals the
+	// requested offset for a 206, and 0 for a 200 (the server sent the whole
+	// file regardless of what we asked for).
+	base := offset
 
 	// Validate response.
 	switch resp.StatusCode {
 	case http.StatusOK:
 		// Full file from start — only valid if offset is 0.
 		if offset > 0 {
-			// Server ignored Range — can't resume. Start fresh.
-			offset = 0
+			// Server ignored Range — can't resume, so this body overwrites the
+			// partial file from the beginning and everything past what it writes
+			// is stale.
+			base = 0
 		}
 	case http.StatusPartialContent:
 		// Expected for Range requests.
 	case http.StatusRequestedRangeNotSatisfiable:
 		// Already past the end.
-		return 0, nil
+		return offset, nil
 	default:
-		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return offset, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	// Open file for writing at offset.
+	// Open file for writing at base.
 	f, err := os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return 0, fmt.Errorf("open part file: %w", err)
+		return offset, fmt.Errorf("open part file: %w", err)
 	}
 	defer f.Close()
 
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return 0, fmt.Errorf("seek: %w", err)
+	if _, err := f.Seek(base, io.SeekStart); err != nil {
+		return offset, fmt.Errorf("seek: %w", err)
 	}
 
 	// Stream body to file with progress reporting.
@@ -246,48 +297,125 @@ func (c *ChunkedDownloader) streamFrom(
 	var written int64
 	var lastReport int64
 
+	// A CDN that accepts the connection and then stops sending would otherwise
+	// hold the read open forever: the request context has no deadline (streaming
+	// downloads are long-lived by design) and the client's Timeout was cleared in
+	// NewChunked. Bound each individual read instead, so a stalled connection
+	// surfaces as an error and the caller's retry loop resumes from the last
+	// written byte.
+	stall := newStallGuard(ctx, resp.Body, stallTimeout)
+	defer stall.stop()
+
+	report := func(currentTotal int64) {
+		if sink == nil || totalSize <= 0 {
+			return
+		}
+		pct := int(currentTotal * 100 / totalSize)
+		if pct > 100 {
+			pct = 100
+		}
+		sink.TrackProgress(key, track, pct)
+		if byteSink, ok := sink.(domain.ByteProgressSink); ok {
+			byteSink.ByteProgress(key, currentTotal, totalSize)
+		}
+	}
+
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
+			stall.alive()
 			nw, writeErr := f.Write(buf[:n])
 			written += int64(nw)
 			if writeErr != nil {
-				return written, writeErr
+				return base + written, writeErr
 			}
 
 			// Report progress periodically.
-			if sink != nil && totalSize > 0 && (written-lastReport) >= progressReportInterval {
+			if (written - lastReport) >= progressReportInterval {
 				lastReport = written
-				currentTotal := offset + written
-				pct := int(currentTotal * 100 / totalSize)
-				if pct > 100 {
-					pct = 100
-				}
-				sink.TrackProgress(key, track, pct)
-				if byteSink, ok := sink.(domain.ByteProgressSink); ok {
-					byteSink.ByteProgress(key, currentTotal, totalSize)
-				}
+				report(base + written)
 			}
 		}
 		if readErr != nil {
 			if readErr == io.EOF {
-				// Final progress report.
-				if sink != nil && totalSize > 0 {
-					currentTotal := offset + written
-					pct := int(currentTotal * 100 / totalSize)
-					if pct > 100 {
-						pct = 100
-					}
-					sink.TrackProgress(key, track, pct)
-					if byteSink, ok := sink.(domain.ByteProgressSink); ok {
-						byteSink.ByteProgress(key, currentTotal, totalSize)
-					}
-				}
-				return written, nil
+				report(base + written)
+				return base + written, nil
 			}
-			return written, readErr
+			if stalled := stall.err(); stalled != nil {
+				return base + written, stalled
+			}
+			return base + written, readErr
 		}
 	}
+}
+
+// stallTimeout bounds how long a streaming download may go without receiving
+// any data before the connection is considered dead.
+const stallTimeout = 90 * time.Second
+
+// stallGuard closes a response body when no data has arrived for the given
+// timeout, turning a silently stalled connection into a read error the retry
+// loop can act on. Read progress is reported via alive().
+type stallGuard struct {
+	mu       sync.Mutex
+	last     time.Time
+	tripped  bool
+	done     chan struct{}
+	stopOnce sync.Once
+}
+
+// newStallGuard starts watching body and returns the guard. Call stop() when
+// the read loop finishes.
+func newStallGuard(ctx context.Context, body io.Closer, timeout time.Duration) *stallGuard {
+	g := &stallGuard{last: time.Now(), done: make(chan struct{})}
+	go func() {
+		ticker := time.NewTicker(timeout / 3)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-g.done:
+				return
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				g.mu.Lock()
+				idle := now.Sub(g.last)
+				if idle >= timeout && !g.tripped {
+					g.tripped = true
+					g.mu.Unlock()
+					// Closing the body unblocks the in-flight Read.
+					_ = body.Close()
+					return
+				}
+				g.mu.Unlock()
+			}
+		}
+	}()
+	return g
+}
+
+// alive records that data was just received.
+func (g *stallGuard) alive() {
+	g.mu.Lock()
+	g.last = time.Now()
+	g.mu.Unlock()
+}
+
+// err returns a descriptive error when the guard closed the body, else nil. It
+// lets the read loop report the stall rather than the generic "read on closed
+// body" error that closing produces.
+func (g *stallGuard) err() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.tripped {
+		return fmt.Errorf("connection stalled: no data received for %s", stallTimeout)
+	}
+	return nil
+}
+
+// stop ends the watch. Safe to call more than once.
+func (g *stallGuard) stop() {
+	g.stopOnce.Do(func() { close(g.done) })
 }
 
 // getPartialOffset returns the size of an existing .part file, or 0 if none.

@@ -109,6 +109,18 @@ video_720.m3u8
 	}
 }
 
+func TestParseAttributes_SpaceBeforeQuotedValue(t *testing.T) {
+	// A quoted value with a space after '=' must still be parsed as quoted,
+	// not cut at the comma inside the quotes.
+	attrs := parseAttributes(`TYPE=AUDIO,NAME= "Studio One, Remastered",LANGUAGE="rus"`)
+	if got := attrs["NAME"]; got != "Studio One, Remastered" {
+		t.Errorf("NAME = %q, want %q", got, "Studio One, Remastered")
+	}
+	if got := attrs["LANGUAGE"]; got != "rus" {
+		t.Errorf("LANGUAGE = %q, want %q", got, "rus")
+	}
+}
+
 func TestParseM3U8_NoVideo(t *testing.T) {
 	playlist := `#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Studio",LANGUAGE="rus",URI="audio.m3u8"

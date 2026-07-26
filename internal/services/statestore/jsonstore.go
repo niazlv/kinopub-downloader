@@ -211,7 +211,8 @@ func (s *JSONStore) MarkCompleted(_ context.Context, info domain.CompletedInfo) 
 		return fmt.Errorf("statestore: create state dir: %w", err)
 	}
 
-	if err := fsutil.AtomicWrite(s.statePath(), data, 0644); err != nil {
+	// 0600: the state file contains tokenized feed URLs and signed media URLs.
+	if err := fsutil.AtomicWrite(s.statePath(), data, 0600); err != nil {
 		return fmt.Errorf("statestore: persist state: %w", err)
 	}
 
@@ -238,7 +239,8 @@ func (s *JSONStore) SetMetadata(_ context.Context, series domain.SeriesID, meta 
 		return fmt.Errorf("statestore: create state dir: %w", err)
 	}
 
-	if err := fsutil.AtomicWrite(s.statePath(), data, 0644); err != nil {
+	// 0600: the state file contains tokenized feed URLs and signed media URLs.
+	if err := fsutil.AtomicWrite(s.statePath(), data, 0600); err != nil {
 		return fmt.Errorf("statestore: persist state: %w", err)
 	}
 

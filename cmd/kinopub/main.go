@@ -75,12 +75,20 @@ func resolveAuth(cookie, userAgent string, browserCk browserCookiesFlag, site do
 		}
 	}
 
-	// Fall back to stored credentials if nothing was provided explicitly.
+	// Fall back to stored credentials if nothing was provided explicitly. They
+	// are only replayed against the site they were saved for: the target site
+	// comes from the URL the user passed, so an unrelated host — a link shared
+	// as a "mirror" — must never receive the saved session.
 	if resolvedCookie == "" {
 		stored, err := credstore.Load()
-		if err != nil {
+		switch {
+		case err != nil:
 			fmt.Fprintf(os.Stderr, "Warning: could not load stored credentials: %v\n", err)
-		} else if !stored.IsEmpty() {
+		case stored.IsEmpty():
+			// Nothing saved; run anonymously.
+		case !storedCredentialsAllowed(stored.Site, site):
+			warnStoredCredentialsWithheld(stored.Site, site)
+		default:
 			resolvedCookie = stored.Cookie
 			if resolvedUA == "" && stored.UserAgent != "" {
 				resolvedUA = stored.UserAgent
@@ -118,6 +126,38 @@ func warnCookieDomainMismatch(cookieDomain string, site domain.Site) {
 	fmt.Fprintf(os.Stderr, "Warning: loaded cookies for %s, but this run targets %s. "+
 		"If it returns 403, log in to %s in your browser and retry.\n",
 		cookieDomain, site, site)
+}
+
+// storedCredentialsAllowed reports whether the session saved by `kinopub login`
+// may be sent to the site this run targets. A stored session belongs to exactly
+// one site, so it travels to that host and its subdomains only — the target
+// host is whatever the user-supplied URL names, and an unrelated one is by
+// definition not the site the user logged in to.
+//
+// storedSite is empty for credentials written before the site was recorded.
+// Rather than forcing a re-login, those are treated the way the tool treated
+// them when it wrote them: as belonging to one of the hosts the service is
+// known by. They are still withheld from any host outside that set.
+func storedCredentialsAllowed(storedSite string, target domain.Site) bool {
+	if strings.TrimSpace(storedSite) == "" {
+		return domain.AnyKnownSiteOwns(target.String())
+	}
+	return domain.SiteFromHost(storedSite).Owns(target.String())
+}
+
+// warnStoredCredentialsWithheld explains why the saved session is not being
+// sent. Unlike a browser-cookie domain mismatch, which is only advisory, this
+// one withholds the cookie — so say so, and say how to get one that fits. The
+// run continues anonymously, which is enough for public pages.
+func warnStoredCredentialsWithheld(storedSite string, site domain.Site) {
+	origin := strings.TrimSpace(storedSite)
+	if origin == "" {
+		origin = strings.Join(domain.KnownSiteHosts, " or ") + " (site not recorded at login)"
+	}
+	fmt.Fprintf(os.Stderr, "Warning: saved credentials for %s are not sent to %s — a stored session "+
+		"is only used on the site it was created for. Continuing without them. "+
+		"To use credentials here, run `kinopub login --site %s`, or pass --cookie explicitly.\n",
+		origin, site, site)
 }
 
 func run() int {
@@ -422,13 +462,36 @@ func run() int {
 		return 1
 	}
 
-	_, runErr := app.Run(ctx, cfg)
+	res, runErr := app.Run(ctx, cfg)
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", runErr)
 		return 1
 	}
 
-	return 0
+	return exitCodeFor(res, ctx.Err())
+}
+
+// exitCodeFor maps a finished run to a process exit status. The engine reports
+// per-episode failures in the result rather than as an error, so a run where
+// every episode failed would otherwise look successful to cron jobs and shell
+// scripts that only check the status.
+func exitCodeFor(res domain.RunResult, ctxErr error) int {
+	switch {
+	case ctxErr != nil:
+		fmt.Fprintf(os.Stderr, "Interrupted: %d of %d episodes completed\n", res.Succeeded, res.Total)
+		return 130 // conventional status for termination by SIGINT
+	case res.Failed > 0:
+		fmt.Fprintf(os.Stderr, "Finished with errors: %d succeeded, %d failed, %d skipped\n",
+			res.Succeeded, res.Failed, res.Skipped)
+		return 1
+	case res.Succeeded == 0 && res.Total > 0:
+		// Nothing failed outright, yet nothing was downloaded either — e.g. every
+		// episode was skipped after repeated media-resolution failures.
+		fmt.Fprintf(os.Stderr, "No episodes were downloaded (%d skipped of %d)\n", res.Skipped, res.Total)
+		return 1
+	default:
+		return 0
+	}
 }
 
 // buildDependencies constructs all real service implementations and returns
@@ -449,7 +512,9 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 
 	// Open log file if configured.
 	if cfg.LogFilePath != "" {
-		f, err := os.OpenFile(cfg.LogFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		// Owner-only: the log records request URLs and headers, which carry feed
+		// tokens and signed media links.
+		f, err := os.OpenFile(cfg.LogFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
 			return kinopub.Dependencies{}, cleanup, fmt.Errorf("cannot open log file: %w", err)
 		}
@@ -494,9 +559,11 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	// Feed parser.
 	feedPars := feedparser.New(httpClient, logger)
 
-	// Media resolver — needs a RunOutput function for ffprobe.
+	// Media resolver — needs a RunOutput function for ffprobe. Its m3u8 fetches
+	// go straight to the CDN, which gates HLS on cf_clearance, so this client
+	// carries the cookie everywhere rather than only to the site.
 	mediaRes := mediaresolver.New(
-		httpClient,
+		httpx.WithAuthCDNCookies(proxyProv.HTTPClient(), auth),
 		makeRunOutput(),
 		logger,
 		auth,
@@ -544,6 +611,7 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 		ProgressReporter: progReporter,
 		StateStore:       stateStr,
 		OutputLayout:     layout,
+		AuthedHTTPClient: httpClient,
 	}
 
 	// Optional HLS pipeline: only available when auth is present (page scraping
@@ -782,6 +850,11 @@ func runLogin(args []string) int {
 		}
 		resolvedCookie = ck
 		fmt.Fprintf(os.Stderr, "Loaded cookies for %s from browser %q.\n", ckDomain, browserCk.value)
+		// Without --site the search covers every domain the service is known by,
+		// so the domain the cookies actually came from is the one they belong to.
+		if siteHost == "" && ckDomain != "" {
+			site = domain.SiteFromHost(ckDomain)
+		}
 	}
 
 	if resolvedCookie == "" {
@@ -795,9 +868,12 @@ func runLogin(args []string) int {
 		userAgent = defaultUserAgent
 	}
 
+	// Bind the credentials to the site they were obtained for: later runs send
+	// them to that site only, never to some other host a URL happens to name.
 	creds := credstore.Credentials{
 		Cookie:    resolvedCookie,
 		UserAgent: userAgent,
+		Site:      site.String(),
 	}
 
 	if err := credstore.Save(creds); err != nil {
@@ -805,7 +881,7 @@ func runLogin(args []string) int {
 		return 1
 	}
 
-	fmt.Fprintf(os.Stderr, "Credentials saved (encrypted, machine-bound) to ~/.config/kinopub/credentials.enc\n")
+	fmt.Fprintf(os.Stderr, "Credentials for %s saved (encrypted, machine-bound) to ~/.config/kinopub/credentials.enc\n", creds.Site)
 	return 0
 }
 

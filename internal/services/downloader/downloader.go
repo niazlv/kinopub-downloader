@@ -128,6 +128,11 @@ func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.P
 		if err == nil {
 			return nil
 		}
+		// A cancelled run is not a chunked-mode failure: retrying through ffmpeg
+		// would fail identically, and the partial file must survive for resume.
+		if ctx.Err() != nil {
+			return err
+		}
 		// Chunked failed — fall back to direct ffmpeg.
 		d.logger.Warn("chunked download failed, falling back to direct ffmpeg",
 			domain.F("episode", job.Episode.Key.Label()),
@@ -135,7 +140,19 @@ func (d *Downloader) Download(ctx context.Context, job domain.Job, sink domain.P
 		)
 	}
 
-	return d.downloadDirect(ctx, job, sink)
+	if err := d.downloadDirect(ctx, job, sink); err != nil {
+		return err
+	}
+
+	// ffmpeg produced the final file, so any chunked-mode leftovers from the
+	// failed attempt above are dead weight — several hundred MB per episode if
+	// left behind.
+	if useChunked {
+		rawPath := job.OutPath + ".raw"
+		_ = os.Remove(rawPath)
+		_ = os.Remove(rawPath + ".part")
+	}
+	return nil
 }
 
 // downloadChunked implements the chunked HTTP Range download + ffmpeg remux.
@@ -160,8 +177,13 @@ func (d *Downloader) downloadChunked(ctx context.Context, job domain.Job, sink d
 	)
 
 	if err := d.remuxLocal(ctx, job, rawPath); err != nil {
-		// Clean up raw file on remux failure.
-		os.Remove(rawPath)
+		// Keep the raw file when the run was cancelled: it is a complete
+		// download that only needs remuxing, and deleting it would force a full
+		// re-download on the next run. Any other failure means the raw file is
+		// suspect, so discard it.
+		if ctx.Err() == nil {
+			os.Remove(rawPath)
+		}
 		return fmt.Errorf("remux: %w", err)
 	}
 

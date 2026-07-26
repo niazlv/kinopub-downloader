@@ -1,18 +1,25 @@
 // Package doctor implements the "doctor" subcommand that verifies downloaded
 // files against the state file and repairs inconsistencies.
 //
+// State files are discovered both at the root of the output directory (the
+// legacy layout) and inside each immediate series subdirectory
+// (<output>/<Series Title>/.kinopub-state.json, the layout the store writes
+// today); every discovered state file is checked and the findings are merged
+// into a single report.
+//
 // It detects:
 //   - Files recorded in state but missing on disk
 //   - Files whose on-disk size doesn't match the recorded bytes
 //   - State entries with empty path or zero bytes (incomplete records)
-//   - Orphan .tmp files left from interrupted downloads
+//   - Orphan intermediate files left from interrupted downloads (.tmp, .raw,
+//     .raw.part, .part, .ts files and .hls-tmp segment-cache directories)
 //   - Files whose duration doesn't match the source (resolved via the same
 //     InputResolver → FeedParser → MediaResolver pipeline as the downloader)
 //
 // Repair actions:
 //   - Remove state entries for broken files so they get re-downloaded
 //   - Delete truncated/corrupt files from disk
-//   - Delete orphan .tmp files
+//   - Delete orphan intermediate files and directories
 package doctor
 
 import (
@@ -40,6 +47,7 @@ type Issue struct {
 	StatePath   string // path recorded in state
 	StateBytes  int64  // bytes recorded in state
 	ActualBytes int64  // actual file size on disk (-1 if missing)
+	StateFile   string // state file the issue was found in (identifies the series folder)
 }
 
 // IssueKind classifies the type of problem.
@@ -50,7 +58,7 @@ const (
 	IssueTruncated                         // file smaller than recorded
 	IssueSizeMismatch                      // file size differs (larger)
 	IssueNoPath                            // state entry has no path
-	IssueOrphanTmp                         // orphan .tmp file
+	IssueOrphanTmp                         // orphan intermediate file or directory
 	IssueDurationMismatch                  // local duration < source duration
 )
 
@@ -74,9 +82,12 @@ func (k IssueKind) String() string {
 	}
 }
 
-// Report is the result of a doctor check.
+// Report is the result of a doctor check. When several state files are
+// discovered (one per series subdirectory), their findings are merged into a
+// single Report and each Issue carries the state file it came from.
 type Report struct {
-	StateFile    string
+	StateFile    string   // checked state file path(s), comma-separated for display
+	StateFiles   []string // every state file that was checked
 	SeriesID     string
 	SeriesTitle  string
 	TotalInState int
@@ -106,7 +117,7 @@ type Options struct {
 	OutputDir string
 	// Fix when true, automatically repairs the state file.
 	Fix bool
-	// CleanTmp when true, deletes orphan .tmp files.
+	// CleanTmp when true, deletes orphan intermediate files and directories.
 	CleanTmp bool
 	// SkipProbe disables duration verification (faster, no network).
 	SkipProbe bool
@@ -120,6 +131,10 @@ const stateFileName = ".kinopub-state.json"
 const defaultDurationTolerance = 0.05
 
 // Run performs the doctor check and optionally repairs issues.
+//
+// State files are discovered at the legacy root location and in every
+// immediate series subdirectory; each one is checked independently (fixes
+// included) and the findings are merged into a single report.
 func Run(ctx context.Context, deps Deps, opts Options) (*Report, error) {
 	log := deps.Logger.Component("doctor")
 
@@ -130,15 +145,130 @@ func Run(ctx context.Context, deps Deps, opts Options) (*Report, error) {
 		opts.DurationTolerance = defaultDurationTolerance
 	}
 
-	stateFilePath := filepath.Join(opts.OutputDir, stateFileName)
+	// 1. Discover state files: the legacy root location plus one per series
+	//    subdirectory (the store writes <output>/<Series Title>/.kinopub-state.json).
+	statePaths := discoverStateFiles(opts.OutputDir)
+	if len(statePaths) == 0 {
+		return nil, fmt.Errorf("state file not found at %s (nor in any series subdirectory) — nothing to check",
+			filepath.Join(opts.OutputDir, stateFileName))
+	}
 
+	// ffprobe availability is machine-wide; look it up once for all state files.
+	hasFFprobe := false
+	if !opts.SkipProbe {
+		if _, err := exec.LookPath(opts.FFprobePath); err == nil {
+			hasFFprobe = true
+		} else {
+			log.Warn("ffprobe not found, skipping duration verification")
+		}
+	}
+
+	// 2. Check every discovered state file and merge findings into one report.
+	report := &Report{}
+	for _, statePath := range statePaths {
+		sub, err := checkStateFile(ctx, deps, opts, statePath, hasFFprobe, log)
+		if err != nil {
+			return nil, err
+		}
+		mergeReport(report, sub)
+	}
+
+	// Sort issues by key (then state file) for stable output.
+	sort.Slice(report.Issues, func(i, j int) bool {
+		if report.Issues[i].Key != report.Issues[j].Key {
+			return report.Issues[i].Key < report.Issues[j].Key
+		}
+		return report.Issues[i].StateFile < report.Issues[j].StateFile
+	})
+
+	// 3. Scan for orphan intermediate files and directories.
+	orphans := findOrphanTmps(opts.OutputDir)
+	report.OrphanTmps = orphans
+	for _, tmp := range orphans {
+		report.Issues = append(report.Issues, Issue{
+			Kind:      IssueOrphanTmp,
+			Detail:    tmp,
+			StatePath: tmp,
+		})
+	}
+
+	// 4. Clean orphans if requested. State-entry fixes were already applied
+	//    per state file in checkStateFile; orphans belong to no state file.
+	if opts.Fix && opts.CleanTmp {
+		for _, tmp := range orphans {
+			removeOrphan(tmp, log)
+		}
+	}
+
+	return report, nil
+}
+
+// discoverStateFiles returns every state file under outputDir that should be
+// checked: the legacy root location (if present) plus the state file of each
+// immediate series subdirectory. Order is deterministic: root first, then
+// subdirectories sorted by name (os.ReadDir returns sorted entries).
+func discoverStateFiles(outputDir string) []string {
+	var paths []string
+
+	rootState := filepath.Join(outputDir, stateFileName)
+	if _, err := os.Stat(rootState); err == nil {
+		paths = append(paths, rootState)
+	}
+
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		return paths
+	}
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		p := filepath.Join(outputDir, e.Name(), stateFileName)
+		if _, err := os.Stat(p); err == nil {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
+// mergeReport folds a per-state-file report into the aggregate report,
+// tagging each issue with the state file it came from so multi-series
+// reports stay unambiguous.
+func mergeReport(dst, src *Report) {
+	dst.StateFiles = append(dst.StateFiles, src.StateFile)
+	dst.StateFile = joinNonEmpty(dst.StateFile, src.StateFile)
+	dst.SeriesID = joinNonEmpty(dst.SeriesID, src.SeriesID)
+	dst.SeriesTitle = joinNonEmpty(dst.SeriesTitle, src.SeriesTitle)
+	dst.TotalInState += src.TotalInState
+	dst.Healthy += src.Healthy
+	dst.Skipped += src.Skipped
+	for i := range src.Issues {
+		if src.Issues[i].StateFile == "" {
+			src.Issues[i].StateFile = src.StateFile
+		}
+	}
+	dst.Issues = append(dst.Issues, src.Issues...)
+}
+
+// joinNonEmpty concatenates two values with ", ", skipping empty ones.
+func joinNonEmpty(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	return a + ", " + b
+}
+
+// checkStateFile loads a single state file, verifies every completed entry,
+// and — when opts.Fix is set — repairs that state file in place. It returns
+// a per-file report that Run merges into the aggregate.
+func checkStateFile(ctx context.Context, deps Deps, opts Options, stateFilePath string, hasFFprobe bool, log domain.Logger) (*Report, error) {
 	// 1. Load and parse state file.
 	data, err := os.ReadFile(stateFilePath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("state file not found at %s — nothing to check", stateFilePath)
-		}
-		return nil, fmt.Errorf("cannot read state file: %w", err)
+		return nil, fmt.Errorf("cannot read state file %s: %w", stateFilePath, err)
 	}
 
 	var state domain.DownloadState
@@ -191,16 +321,7 @@ func Run(ctx context.Context, deps Deps, opts Options) (*Report, error) {
 	//    and durations for comparison. This uses the same pipeline as the downloader.
 	var episodeDurations map[string]time.Duration // key = "S{n}E{n}" → expected duration
 
-	hasFFprobe := false
-	if !opts.SkipProbe {
-		if _, err := exec.LookPath(opts.FFprobePath); err == nil {
-			hasFFprobe = true
-		} else {
-			log.Warn("ffprobe not found, skipping duration verification")
-		}
-	}
-
-	if hasFFprobe && !opts.SkipProbe && state.Metadata != nil {
+	if hasFFprobe && state.Metadata != nil {
 		episodeDurations = resolveExpectedDurations(ctx, deps, state, log)
 	}
 
@@ -259,26 +380,14 @@ func Run(ctx context.Context, deps Deps, opts Options) (*Report, error) {
 		report.Healthy++
 	}
 
-	// Sort issues by key for stable output.
-	sort.Slice(report.Issues, func(i, j int) bool {
-		return report.Issues[i].Key < report.Issues[j].Key
-	})
-
-	// 4. Scan for orphan .tmp files.
-	orphans := findOrphanTmps(opts.OutputDir)
-	report.OrphanTmps = orphans
-	for _, tmp := range orphans {
-		report.Issues = append(report.Issues, Issue{
-			Kind:      IssueOrphanTmp,
-			Detail:    tmp,
-			StatePath: tmp,
-		})
-	}
-
-	// 5. Apply fixes if requested.
+	// 4. Apply fixes for this state file if requested (orphan cleanup is
+	//    handled by Run, since orphans belong to no state file).
 	if opts.Fix && len(report.Issues) > 0 {
 		fixed := applyFixes(stateFilePath, &state, report, opts, log)
-		log.Info("fixes applied", domain.F("entries_removed", fixed))
+		log.Info("fixes applied",
+			domain.F("state_file", stateFilePath),
+			domain.F("entries_removed", fixed),
+		)
 	}
 
 	return report, nil
@@ -465,7 +574,22 @@ func parseDurationFromJSON(data []byte) (time.Duration, error) {
 	return time.Duration(secs * float64(time.Second)), nil
 }
 
-// findOrphanTmps walks the output directory looking for .tmp files.
+// findOrphanTmps walks the output directory looking for intermediate files
+// and directories left behind by interrupted downloads:
+//
+//	<name>.tmp       pre-rename mux output           orphan when final is missing
+//	<name>.raw       chunked payload awaiting remux  always a leftover
+//	<name>.raw.part  resumable chunked raw download  orphan when final exists
+//	<name>.part      resumable chunked download      orphan when final exists
+//	<name>.ts        HLS concat output               orphan when final exists
+//	<name>.hls-tmp/  HLS segment cache directory     orphan when final exists
+//
+// "Final" is the episode file itself: the path with the suffix stripped.
+// .tmp keeps its historical rule (garbage from an interrupted run once the
+// final never appeared). .raw is never resumed by any code path, so it is
+// always reported. The remaining patterns are resumable in-progress state:
+// deleting them would lose resume progress, so they only count as orphans —
+// and are only reported — once the final file already exists.
 func findOrphanTmps(outputDir string) []string {
 	var orphans []string
 	_ = filepath.Walk(outputDir, func(path string, info os.FileInfo, err error) error {
@@ -476,17 +600,55 @@ func findOrphanTmps(outputDir string) []string {
 			if strings.HasPrefix(info.Name(), ".") && path != outputDir {
 				return filepath.SkipDir
 			}
+			// HLS segment caches are reported as a single unit; never
+			// descend into (or individually report) their segment files.
+			if strings.HasSuffix(info.Name(), ".hls-tmp") {
+				if finalExists(strings.TrimSuffix(path, ".hls-tmp")) {
+					orphans = append(orphans, path)
+				}
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		if strings.HasSuffix(info.Name(), ".tmp") {
+
+		switch name := info.Name(); {
+		case strings.HasSuffix(name, ".tmp"):
 			finalPath := strings.TrimSuffix(path, ".tmp")
-			if _, err := os.Stat(finalPath); os.IsNotExist(err) {
+			if _, statErr := os.Stat(finalPath); os.IsNotExist(statErr) {
+				orphans = append(orphans, path)
+			}
+		case strings.HasSuffix(name, ".raw"):
+			orphans = append(orphans, path)
+		case strings.HasSuffix(name, ".raw.part"): // must precede the ".part" case
+			if finalExists(strings.TrimSuffix(path, ".raw.part")) {
+				orphans = append(orphans, path)
+			}
+		case strings.HasSuffix(name, ".part"):
+			if finalExists(strings.TrimSuffix(path, ".part")) {
+				orphans = append(orphans, path)
+			}
+		case strings.HasSuffix(name, ".ts"):
+			if finalExists(strings.TrimSuffix(path, ".ts")) {
 				orphans = append(orphans, path)
 			}
 		}
 		return nil
 	})
 	return orphans
+}
+
+// finalExists reports whether the final output file for a leftover exists.
+func finalExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// removeOrphan deletes an orphan leftover from disk. RemoveAll covers both
+// plain files and .hls-tmp directories.
+func removeOrphan(path string, log domain.Logger) {
+	if err := os.RemoveAll(path); err == nil {
+		log.Info("deleted orphan leftover", domain.F("path", path))
+	}
 }
 
 // applyFixes modifies the state file to remove broken entries.
@@ -518,9 +680,7 @@ func applyFixes(stateFilePath string, state *domain.DownloadState, report *Repor
 
 		case IssueOrphanTmp:
 			if opts.CleanTmp {
-				if err := os.Remove(issue.Detail); err == nil {
-					log.Info("deleted orphan tmp file", domain.F("path", issue.Detail))
-				}
+				removeOrphan(issue.Detail, log)
 			}
 		}
 	}

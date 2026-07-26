@@ -241,8 +241,10 @@ func (p *Provider) buildSOCKS5Client() *http.Client {
 	// Android/Termux DNS workaround applies to the proxy connection too.
 	dialer, err := proxy.SOCKS5("tcp", addr, auth, httpx.NewDialer())
 	if err != nil {
-		// Fallback to direct if SOCKS5 setup fails (shouldn't happen with valid URL).
-		return &http.Client{Timeout: 30 * time.Second}
+		// Fail closed: the user explicitly requested a SOCKS5 proxy, so a
+		// direct fallback would silently leak traffic (and the real IP) to the
+		// target. Instead, return a client whose every request fails loudly.
+		return failClosedClient(fmt.Errorf("socks5 proxy setup failed: %w", err))
 	}
 
 	transport := &http.Transport{
@@ -267,6 +269,21 @@ func (p *Provider) buildSOCKS5Client() *http.Client {
 	return &http.Client{
 		Transport: transport,
 		Timeout:   30 * time.Second,
+	}
+}
+
+// failClosedClient returns an *http.Client that fails every request with the
+// given setup error. It is used when proxy setup fails: rather than silently
+// falling back to a direct connection (which would bypass a proxy the user
+// explicitly requested), every dial attempt returns the error.
+func failClosedClient(err error) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(context.Context, string, string) (net.Conn, error) {
+				return nil, err
+			},
+		},
+		Timeout: 30 * time.Second,
 	}
 }
 

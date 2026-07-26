@@ -361,9 +361,13 @@ func TestParseDurationFromJSON(t *testing.T) {
 
 func TestRunStateFileNotFound(t *testing.T) {
 	dir := t.TempDir()
+	// A series subdirectory WITHOUT a state file must not count as discovered.
+	if err := os.Mkdir(filepath.Join(dir, "Some Series"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	_, err := Run(context.Background(), newDeps(), Options{OutputDir: dir, SkipProbe: true})
 	if err == nil {
-		t.Fatal("expected error when state file is missing")
+		t.Fatal("expected error when no state file exists anywhere")
 	}
 }
 
@@ -857,6 +861,309 @@ var errStub = stubError("stub error")
 type stubError string
 
 func (e stubError) Error() string { return string(e) }
+
+// ---------------------------------------------------------------------------
+// Run: subdirectory state file discovery
+// ---------------------------------------------------------------------------
+
+// TestRunDiscoversSubdirStateFiles: with no root state file, state files one
+// level down (the layout the store writes today) must all be found and their
+// findings merged into a single report.
+func TestRunDiscoversSubdirStateFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// Series A: one healthy entry.
+	dirA := filepath.Join(dir, "Series A")
+	if err := os.Mkdir(dirA, 0755); err != nil {
+		t.Fatal(err)
+	}
+	healthyA := filepath.Join(dirA, "a1.mkv")
+	if err := os.WriteFile(healthyA, make([]byte, 10), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stateA := writeStateFile(t, dirA, domain.DownloadState{
+		Series:   "100",
+		Metadata: &domain.SeriesMetadata{Title: "Series A"},
+		Completed: map[string]domain.CompletedRec{
+			"S1E1": {Season: 1, Episode: 1, Path: healthyA, Bytes: 10},
+		},
+	})
+
+	// Series B: one missing entry.
+	dirB := filepath.Join(dir, "Series B")
+	if err := os.Mkdir(dirB, 0755); err != nil {
+		t.Fatal(err)
+	}
+	stateB := writeStateFile(t, dirB, domain.DownloadState{
+		Series: "200",
+		Completed: map[string]domain.CompletedRec{
+			"S1E1": {Season: 1, Episode: 1, Path: filepath.Join(dirB, "gone.mkv"), Bytes: 5},
+		},
+	})
+
+	report, err := Run(context.Background(), newDeps(), Options{OutputDir: dir, SkipProbe: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if report.TotalInState != 2 {
+		t.Errorf("TotalInState = %d, want 2", report.TotalInState)
+	}
+	if report.Healthy != 1 {
+		t.Errorf("Healthy = %d, want 1", report.Healthy)
+	}
+	if len(report.Issues) != 1 || report.Issues[0].Kind != IssueMissing {
+		t.Fatalf("want one IssueMissing, got %+v", report.Issues)
+	}
+	// The issue must identify the series folder it belongs to.
+	if report.Issues[0].StateFile != stateB {
+		t.Errorf("Issue.StateFile = %q, want %q", report.Issues[0].StateFile, stateB)
+	}
+	if len(report.StateFiles) != 2 || report.StateFiles[0] != stateA || report.StateFiles[1] != stateB {
+		t.Errorf("StateFiles = %v, want [%s %s]", report.StateFiles, stateA, stateB)
+	}
+	if report.SeriesID != "100, 200" {
+		t.Errorf("SeriesID = %q, want %q", report.SeriesID, "100, 200")
+	}
+	if report.SeriesTitle != "Series A" {
+		t.Errorf("SeriesTitle = %q, want %q", report.SeriesTitle, "Series A")
+	}
+}
+
+// TestRunRootAndSubdirStatesBothChecked: a legacy root state file and a
+// subdirectory state file coexist — both must be checked.
+func TestRunRootAndSubdirStatesBothChecked(t *testing.T) {
+	dir := t.TempDir()
+
+	rootEp := filepath.Join(dir, "legacy.mkv")
+	if err := os.WriteFile(rootEp, make([]byte, 8), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeStateFile(t, dir, domain.DownloadState{
+		Series: "1",
+		Completed: map[string]domain.CompletedRec{
+			"S1E1": {Season: 1, Episode: 1, Path: rootEp, Bytes: 8},
+		},
+	})
+
+	sub := filepath.Join(dir, "New Show")
+	if err := os.Mkdir(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	subEp := filepath.Join(sub, "e1.mkv")
+	if err := os.WriteFile(subEp, make([]byte, 8), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeStateFile(t, sub, domain.DownloadState{
+		Series: "2",
+		Completed: map[string]domain.CompletedRec{
+			"S1E1": {Season: 1, Episode: 1, Path: subEp, Bytes: 8},
+		},
+	})
+
+	report, err := Run(context.Background(), newDeps(), Options{OutputDir: dir, SkipProbe: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.TotalInState != 2 || report.Healthy != 2 {
+		t.Errorf("TotalInState = %d, Healthy = %d, want 2/2", report.TotalInState, report.Healthy)
+	}
+	if len(report.StateFiles) != 2 {
+		t.Errorf("StateFiles = %v, want 2 entries (root first)", report.StateFiles)
+	}
+	if report.HasIssues() {
+		t.Errorf("no issues expected, got %+v", report.Issues)
+	}
+}
+
+// TestRunFixScopedPerStateFile: two series share the key S1E1; --fix must
+// remove the entry only from the state file whose file is broken, never from
+// the other series' state file.
+func TestRunFixScopedPerStateFile(t *testing.T) {
+	dir := t.TempDir()
+
+	dirA := filepath.Join(dir, "Show A")
+	if err := os.Mkdir(dirA, 0755); err != nil {
+		t.Fatal(err)
+	}
+	healthyA := filepath.Join(dirA, "a1.mkv")
+	if err := os.WriteFile(healthyA, make([]byte, 20), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stateA := writeStateFile(t, dirA, domain.DownloadState{
+		Series: "10",
+		Completed: map[string]domain.CompletedRec{
+			"S1E1": {Season: 1, Episode: 1, Path: healthyA, Bytes: 20},
+		},
+	})
+
+	dirB := filepath.Join(dir, "Show B")
+	if err := os.Mkdir(dirB, 0755); err != nil {
+		t.Fatal(err)
+	}
+	stateB := writeStateFile(t, dirB, domain.DownloadState{
+		Series: "20",
+		Completed: map[string]domain.CompletedRec{
+			"S1E1": {Season: 1, Episode: 1, Path: filepath.Join(dirB, "missing.mkv"), Bytes: 9},
+		},
+	})
+
+	if _, err := Run(context.Background(), newDeps(), Options{OutputDir: dir, Fix: true, SkipProbe: true}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var afterA, afterB domain.DownloadState
+	dataA, err := os.ReadFile(stateA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(dataA, &afterA); err != nil {
+		t.Fatal(err)
+	}
+	dataB, err := os.ReadFile(stateB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(dataB, &afterB); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := afterA.Completed["S1E1"]; !ok {
+		t.Error("healthy S1E1 in Show A must be retained")
+	}
+	if _, ok := afterB.Completed["S1E1"]; ok {
+		t.Error("broken S1E1 in Show B must be removed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// findOrphanTmps: extended leftover patterns
+// ---------------------------------------------------------------------------
+
+// TestFindOrphanLeftoverPatterns covers the .raw/.raw.part/.part/.ts/.hls-tmp
+// leftovers: resumable patterns are orphans only once the final file exists,
+// while .raw is always a leftover.
+func TestFindOrphanLeftoverPatterns(t *testing.T) {
+	dir := t.TempDir()
+	touch := func(p string) {
+		t.Helper()
+		if err := os.WriteFile(p, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A completed episode with every leftover kind next to it -> all orphans.
+	final := filepath.Join(dir, "done.mkv")
+	touch(final)
+	rawDone := final + ".raw"
+	touch(rawDone)
+	rawPartDone := final + ".raw.part"
+	touch(rawPartDone)
+	partDone := final + ".part"
+	touch(partDone)
+	tsDone := final + ".ts"
+	touch(tsDone)
+	hlsDone := final + ".hls-tmp"
+	if err := os.Mkdir(hlsDone, 0755); err != nil {
+		t.Fatal(err)
+	}
+	touch(filepath.Join(hlsDone, "video.ts"))
+
+	// An in-progress episode (no final file): resumable leftovers must be
+	// left alone and not even reported; .raw is still a leftover.
+	pending := filepath.Join(dir, "pending.mkv") // never created
+	rawPending := pending + ".raw"
+	touch(rawPending)
+	rawPartPending := pending + ".raw.part"
+	touch(rawPartPending)
+	partPending := pending + ".part"
+	touch(partPending)
+	tsPending := pending + ".ts"
+	touch(tsPending)
+	hlsPending := pending + ".hls-tmp"
+	if err := os.Mkdir(hlsPending, 0755); err != nil {
+		t.Fatal(err)
+	}
+	touch(filepath.Join(hlsPending, "video.ts"))
+
+	orphans := findOrphanTmps(dir)
+	got := map[string]bool{}
+	for _, o := range orphans {
+		got[o] = true
+	}
+
+	for _, want := range []string{rawDone, rawPartDone, partDone, tsDone, hlsDone, rawPending} {
+		if !got[want] {
+			t.Errorf("expected orphan %q, got %v", want, orphans)
+		}
+	}
+	for _, keep := range []string{final, rawPartPending, partPending, tsPending, hlsPending} {
+		if got[keep] {
+			t.Errorf("%q must not be reported as orphan: %v", keep, orphans)
+		}
+	}
+	// Segment files inside a .hls-tmp dir are never reported individually,
+	// even when the dir itself is an orphan.
+	if got[filepath.Join(hlsDone, "video.ts")] || got[filepath.Join(hlsPending, "video.ts")] {
+		t.Errorf("segment files inside .hls-tmp must not be reported: %v", orphans)
+	}
+}
+
+// TestRunCleanTmpFixNewPatterns: --fix --clean-tmp removes the new leftover
+// kinds, including .hls-tmp directories (via RemoveAll), while an in-progress
+// .part with no final file survives untouched.
+func TestRunCleanTmpFixNewPatterns(t *testing.T) {
+	dir := t.TempDir()
+	writeStateFile(t, dir, domain.DownloadState{Series: "5", Completed: map[string]domain.CompletedRec{}})
+
+	final := filepath.Join(dir, "ep.mkv")
+	if err := os.WriteFile(final, []byte("done"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	part := final + ".part"
+	if err := os.WriteFile(part, []byte("p"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	hls := final + ".hls-tmp"
+	if err := os.Mkdir(hls, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hls, "seg_00001.ts"), []byte("s"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	inProgress := filepath.Join(dir, "next.mkv.part")
+	if err := os.WriteFile(inProgress, []byte("resume me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := Run(context.Background(), newDeps(), Options{
+		OutputDir: dir,
+		Fix:       true,
+		CleanTmp:  true,
+		SkipProbe: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(report.OrphanTmps) != 2 {
+		t.Fatalf("OrphanTmps = %v, want [%s %s]", report.OrphanTmps, part, hls)
+	}
+
+	// Orphans deleted, including the directory.
+	if _, statErr := os.Stat(part); !os.IsNotExist(statErr) {
+		t.Errorf(".part orphan should be deleted, stat err = %v", statErr)
+	}
+	if _, statErr := os.Stat(hls); !os.IsNotExist(statErr) {
+		t.Errorf(".hls-tmp orphan dir should be deleted, stat err = %v", statErr)
+	}
+	// Resumable in-progress state and the final file are untouched.
+	if _, statErr := os.Stat(inProgress); statErr != nil {
+		t.Errorf("in-progress .part must be preserved, stat err = %v", statErr)
+	}
+	if _, statErr := os.Stat(final); statErr != nil {
+		t.Errorf("final file must remain, stat err = %v", statErr)
+	}
+}
 
 func TestApplyFixesDurationMismatchDeletesFile(t *testing.T) {
 	dir := t.TempDir()

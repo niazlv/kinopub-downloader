@@ -34,11 +34,6 @@ func genGroupID() *rapid.Generator[string] {
 	return rapid.StringMatching(`[a-z0-9]{1,10}`)
 }
 
-// genQuality generates a quality string like "1080p", "720p", "4k", etc.
-func genQuality() *rapid.Generator[string] {
-	return rapid.SampledFrom([]string{"4k", "2160p", "1440p", "1080p", "720p", "480p", "360p", "240p"})
-}
-
 // genDistinctQualities generates a slice of n distinct quality strings
 // selected from the available quality pool.
 func genDistinctQualities(n int) *rapid.Generator[[]string] {

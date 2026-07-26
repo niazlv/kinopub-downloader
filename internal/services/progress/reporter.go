@@ -305,16 +305,19 @@ func (r *LiveReporter) Stop() {
 	r.coord.SetRedraw(nil)
 	r.coord.SetClear(nil)
 
-	// Final render to show completion state, then leave cursor below.
+	// Final render to show completion state, then leave cursor below. The frame
+	// is composed under r.mu and painted after releasing it, per the lock
+	// ordering documented below.
 	r.mu.Lock()
-	r.coord.WriteProgress(func() {
-		r.clearLines()
-		r.renderFrame()
-		// Write a newline so subsequent output starts on a fresh line.
-		fmt.Fprint(r.w, "\n")
-		r.lastLines = 0
-	})
+	frame, prevLines := r.composeFrame()
+	r.lastLines = 0
 	r.mu.Unlock()
+
+	r.coord.WriteProgress(func() {
+		writeClearLines(r.w, prevLines)
+		// Write a newline so subsequent output starts on a fresh line.
+		fmt.Fprint(r.w, frame+"\n")
+	})
 }
 
 // tickLoop runs the periodic refresh.
@@ -341,12 +344,29 @@ func (r *LiveReporter) tickLoop() {
 	}
 }
 
-// render acquires the coordinator and redraws. Must be called with r.mu held.
+// Lock ordering
+//
+// Two mutexes guard the display: r.mu (reporter state) and the coordinator's
+// mutex (TTY line discipline). The coordinator calls back into clearForLog and
+// redraw while holding its own mutex, and those callbacks need r.mu — so the
+// only safe global order is coord.mu → r.mu. Every path that starts from the
+// reporter side (the public methods and the ticker) therefore builds its frame
+// under r.mu, releases r.mu, and only then enters the coordinator. Holding r.mu
+// across a coordinator call would invert the order and deadlock against any
+// concurrent log write.
+
+// render composes the next frame and hands it to the coordinator for painting.
+// Must be called with r.mu held; it releases r.mu for the duration of the
+// coordinator call and re-acquires it before returning, so callers that hold
+// r.mu across the call still observe consistent state afterwards.
 func (r *LiveReporter) render() {
+	frame, prevLines := r.composeFrame()
+	r.mu.Unlock()
 	r.coord.WriteProgress(func() {
-		r.clearLines()
-		r.renderFrame()
+		writeClearLines(r.w, prevLines)
+		fmt.Fprint(r.w, frame)
 	})
+	r.mu.Lock()
 }
 
 // redraw is the callback registered with the coordinator. It is called (with
@@ -355,9 +375,10 @@ func (r *LiveReporter) render() {
 func (r *LiveReporter) redraw() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// After a log line, our previous display was already cleared by clearForLog.
-	// lastLines is already 0, just redraw the frame.
-	r.renderFrame()
+	// After a log line, our previous display was already cleared by clearForLog,
+	// so lastLines is 0 and only the frame itself has to be written.
+	frame, _ := r.composeFrame()
+	fmt.Fprint(r.w, frame)
 }
 
 // clearForLog is the callback registered with the coordinator. It is called
@@ -366,15 +387,16 @@ func (r *LiveReporter) redraw() {
 func (r *LiveReporter) clearForLog() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.clearLines()
+	writeClearLines(r.w, r.lastLines)
 	r.lastLines = 0
 }
 
-// clearLines moves the cursor up and clears each line of the previous frame.
-func (r *LiveReporter) clearLines() {
-	for i := 0; i < r.lastLines; i++ {
+// writeClearLines moves the cursor up and clears n lines of a previous frame.
+// It touches no reporter state, so it is safe to call outside r.mu.
+func writeClearLines(w io.Writer, n int) {
+	for i := 0; i < n; i++ {
 		// Move cursor up one line and clear it.
-		fmt.Fprint(r.w, "\033[A\033[2K")
+		fmt.Fprint(w, "\033[A\033[2K")
 	}
 }
 
@@ -398,9 +420,14 @@ func computeLayout(termWidth int) frameLayout {
 	return frameLayout{width: termWidth, labelCol: labelCol, barWidth: barWidth}
 }
 
-// renderFrame writes the current progress state. Must be called with r.mu held
-// and within a coordinator-protected section.
-func (r *LiveReporter) renderFrame() {
+// composeFrame builds the frame for the current progress state and returns it
+// together with the line count of the frame it replaces. It records the new
+// line count in r.lastLines, so the caller must paint the returned frame.
+// Must be called with r.mu held; it performs no I/O and takes no other lock,
+// which is what lets callers paint outside r.mu (see "Lock ordering" above).
+func (r *LiveReporter) composeFrame() (frame string, prevLines int) {
+	prevLines = r.lastLines
+
 	var lines []string
 	lay := computeLayout(termx.TerminalWidth())
 	sepWidth := min(lay.width, 60)
@@ -530,9 +557,8 @@ func (r *LiveReporter) renderFrame() {
 	// Bottom separator.
 	lines = append(lines, r.colorize(termx.Gray, r.repeatChar('─', sepWidth)))
 
-	output := strings.Join(lines, "\n") + "\n"
-	fmt.Fprint(r.w, output)
 	r.lastLines = len(lines)
+	return strings.Join(lines, "\n") + "\n", prevLines
 }
 
 // barRow renders a single aligned progress row:

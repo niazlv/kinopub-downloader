@@ -2,6 +2,7 @@ package kinopub
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
@@ -24,6 +25,12 @@ type Dependencies struct {
 
 	// Optional: interactive audio-track picker. nil disables the menu.
 	AudioChooser domain.AudioChooser
+
+	// Optional: HTTP client carrying the session auth (Cookie, User-Agent,
+	// Referer). Used for engine-level fetches such as the series poster, which
+	// the site and CDN reject without those headers. When nil, the proxy
+	// provider's bare client is used.
+	AuthedHTTPClient *http.Client
 }
 
 // App is the composition root that wires all services together and exposes

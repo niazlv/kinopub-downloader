@@ -305,11 +305,6 @@ func TestBuildFFmpegArgs_Progressive(t *testing.T) {
 	}
 
 	// No subtitle maps.
-	for _, a := range args {
-		if strings.Contains(a, ":s") && strings.HasPrefix(a, "0:s") {
-			// This is fine — we just check there are no subtitle map entries.
-		}
-	}
 	for i, a := range args {
 		if a == "-map" && i+1 < len(args) && strings.Contains(args[i+1], ":s") {
 			t.Error("progressive with no subtitles should not have subtitle maps")

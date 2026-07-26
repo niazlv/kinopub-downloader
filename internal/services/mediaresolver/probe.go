@@ -89,7 +89,7 @@ func (r *Resolver) resolveProgressive(ctx context.Context, source domain.MediaSo
 	)
 
 	r.logger.Debug("ffprobe command",
-		domain.F("args", fmt.Sprintf("%v", args)),
+		domain.F("args", fmt.Sprintf("%v", redactProbeArgs(args))),
 	)
 
 	output, err := r.runOutput(ctx, "ffprobe", args, nil)
@@ -100,6 +100,23 @@ func (r *Resolver) resolveProgressive(ctx context.Context, source domain.MediaSo
 	// Store the final URL in the source so downstream (ffmpeg) uses it too.
 	source.URL = finalURL
 	return parseFFprobeOutput(output, source)
+}
+
+// redactProbeArgs returns a copy of args safe for logging: the value that
+// follows a -headers, -user_agent, or -cookies option carries user auth
+// material and must not land in the log file, so it is replaced with
+// "[redacted]".
+func redactProbeArgs(args []string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i := 0; i < len(out)-1; i++ {
+		switch out[i] {
+		case "-headers", "-user_agent", "-cookies":
+			out[i+1] = "[redacted]"
+			i++
+		}
+	}
+	return out
 }
 
 // resolveRedirect follows HTTP redirects via the Go HTTP client and returns

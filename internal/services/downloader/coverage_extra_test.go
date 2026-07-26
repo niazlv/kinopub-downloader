@@ -614,3 +614,85 @@ func TestMakeUnique_EdgeCases(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Resume correctness against uncooperative servers
+// ---------------------------------------------------------------------------
+
+// TestChunked_Download_ServerIgnoresRange covers the server that answers a
+// resume request with 200 and the whole body instead of 206. The restarted body
+// overwrites the .part file from byte 0, so the bytes already on disk must not
+// be counted twice — doing so leaves an unwritten hole that still passes the
+// final size check and yields a silently corrupt video.
+func TestChunked_Download_ServerIgnoresRange(t *testing.T) {
+	content := []byte(strings.Repeat("D", 300*1024))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		total := int64(len(content))
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", itoa(total))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// Always ignore Range and send the full body from the start.
+		w.Header().Set("Content-Length", itoa(total))
+		w.WriteHeader(http.StatusOK)
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "ignored-range.mp4")
+	partPath := outPath + ".part"
+
+	// Pre-write a partial file so Download issues a Range request.
+	half := len(content) / 2
+	if err := os.WriteFile(partPath, []byte(strings.Repeat("X", half)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := newChunkedForAuth(domain.RequestAuth{})
+	key := domain.EpisodeKey{Series: "s", Season: 1, Episode: 7}
+
+	if err := c.Download(context.Background(), srv.URL, outPath, key, nil); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+
+	got, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read out: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Errorf("content mismatch after Range-ignoring server: got %d bytes want %d",
+			len(got), len(content))
+	}
+}
+
+// TestChunked_Download_NoContentLength covers a server that reports no size.
+// Completeness is unverifiable in that case, so Download must fail (letting the
+// caller fall back to ffmpeg) rather than rename a possibly truncated .part.
+func TestChunked_Download_NoContentLength(t *testing.T) {
+	content := []byte(strings.Repeat("E", 4096))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			// No Content-Length header at all.
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "nosize.mp4")
+
+	c := newChunkedForAuth(domain.RequestAuth{})
+	key := domain.EpisodeKey{Series: "s", Season: 1, Episode: 8}
+
+	err := c.Download(context.Background(), srv.URL, outPath, key, nil)
+	if err == nil {
+		t.Fatal("expected an error when the server reports no content length")
+	}
+	if _, statErr := os.Stat(outPath); !os.IsNotExist(statErr) {
+		t.Errorf("output file must not be created without a verifiable size, got %v", statErr)
+	}
+}

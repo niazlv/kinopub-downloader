@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -223,6 +224,80 @@ func TestIsKnownBrowser(t *testing.T) {
 		t.Run("input_"+tc.input, func(t *testing.T) {
 			if got := isKnownBrowser(tc.input); got != tc.want {
 				t.Errorf("isKnownBrowser(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// --- storedCredentialsAllowed ---
+
+func TestStoredCredentialsAllowed(t *testing.T) {
+	tests := []struct {
+		name       string
+		storedSite string
+		target     domain.Site
+		want       bool
+	}{
+		// The site the credentials were saved for is the site they are sent to.
+		{"exact_host", "kino.watch", domain.Site{Host: "kino.watch"}, true},
+		{"exact_host_other_known", "kino.pub", domain.Site{Host: "kino.pub"}, true},
+		{"case_insensitive", "KINO.watch", domain.Site{Host: "kino.WATCH"}, true},
+		{"target_carries_port", "kino.watch", domain.Site{Host: "kino.watch:8443"}, true},
+		{"stored_as_url", "https://kino.watch/", domain.Site{Host: "kino.watch"}, true},
+		// A subdomain belongs to the stored site.
+		{"subdomain", "kino.watch", domain.Site{Host: "www.kino.watch"}, true},
+		{"deep_subdomain", "kino.watch", domain.Site{Host: "a.b.kino.watch"}, true},
+		// A parent domain does not: cookies for a subdomain are not the parent's.
+		{"parent_of_stored", "www.kino.watch", domain.Site{Host: "kino.watch"}, false},
+		// Zero target resolves to the default site.
+		{"zero_target_default_site", domain.DefaultSiteHost, domain.Site{}, true},
+		{"zero_target_other_site", "kino.pub", domain.Site{}, false},
+		// Legacy file: no site recorded, so any host the service is known by is
+		// allowed and everything else is not.
+		{"legacy_known_target", "", domain.Site{Host: "kino.watch"}, true},
+		{"legacy_other_known_target", "", domain.Site{Host: "kino.pub"}, true},
+		{"legacy_known_subdomain", "", domain.Site{Host: "www.kino.pub"}, true},
+		{"legacy_zero_target", "", domain.Site{}, true},
+		{"legacy_blank_stored", "   ", domain.Site{Host: "kino.watch"}, true},
+		{"legacy_unknown_target", "", domain.Site{Host: "evil.example"}, false},
+		// The defect this guards: a "mirror" link must not receive the session.
+		{"outright_mismatch", "kino.watch", domain.Site{Host: "evil.example"}, false},
+		{"lookalike_suffix", "kino.watch", domain.Site{Host: "evilkino.watch"}, false},
+		{"stored_site_as_suffix_of_target", "kino.watch", domain.Site{Host: "kino.watch.evil.example"}, false},
+		{"other_known_host_not_implied", "kino.watch", domain.Site{Host: "kino.pub"}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := storedCredentialsAllowed(tc.storedSite, tc.target); got != tc.want {
+				t.Errorf("storedCredentialsAllowed(%q, %q) = %v, want %v",
+					tc.storedSite, tc.target, got, tc.want)
+			}
+		})
+	}
+}
+
+// --- exitCodeFor ---
+
+func TestExitCodeFor(t *testing.T) {
+	tests := []struct {
+		name   string
+		res    domain.RunResult
+		ctxErr error
+		want   int
+	}{
+		{"all succeeded", domain.RunResult{Total: 3, Succeeded: 3}, nil, 0},
+		{"nothing to do", domain.RunResult{Total: 0}, nil, 0},
+		{"partial failure", domain.RunResult{Total: 3, Succeeded: 2, Failed: 1}, nil, 1},
+		{"every episode failed", domain.RunResult{Total: 3, Failed: 3}, nil, 1},
+		{"all skipped", domain.RunResult{Total: 3, Skipped: 3}, nil, 1},
+		{"interrupted", domain.RunResult{Total: 3, Succeeded: 1}, context.Canceled, 130},
+		{"interrupted outranks failures", domain.RunResult{Total: 3, Failed: 2}, context.Canceled, 130},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := exitCodeFor(tt.res, tt.ctxErr); got != tt.want {
+				t.Errorf("exitCodeFor(%+v, %v) = %d, want %d", tt.res, tt.ctxErr, got, tt.want)
 			}
 		})
 	}

@@ -2,8 +2,11 @@ package proxyprovider
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
@@ -294,6 +297,33 @@ func TestIsExcluded_EmptyHostname(t *testing.T) {
 
 	if p.isExcluded("", hosts) {
 		t.Error("expected empty hostname to NOT be excluded")
+	}
+}
+
+// --- Fail-closed proxy setup ---
+
+// TestFailClosedClient_RequestsFail verifies that the client returned when
+// proxy setup fails rejects every request with the setup error instead of
+// silently connecting directly. proxy.SOCKS5 in the vendored x/net never
+// returns a non-nil error, so the buildSOCKS5Client error branch cannot be
+// triggered end-to-end; the fail-closed client is exercised directly instead.
+func TestFailClosedClient_RequestsFail(t *testing.T) {
+	setupErr := fmt.Errorf("socks5 proxy setup failed: %w", errors.New("boom"))
+	client := failClosedClient(setupErr)
+
+	if client.Timeout != 30*time.Second {
+		t.Errorf("expected 30s timeout, got %v", client.Timeout)
+	}
+
+	_, err := client.Get("http://target.example.com/")
+	if err == nil {
+		t.Fatal("expected request through fail-closed client to fail")
+	}
+	if !strings.Contains(err.Error(), "socks5 proxy setup failed") {
+		t.Errorf("expected error to mention proxy setup failure, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Errorf("expected error to wrap original cause, got: %v", err)
 	}
 }
 

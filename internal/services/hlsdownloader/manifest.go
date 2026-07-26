@@ -171,6 +171,46 @@ func parseMasterPlaylist(r io.Reader, baseURL string) (*MasterPlaylist, error) {
 	return result, nil
 }
 
+// checkUnsupportedMediaTag reports a descriptive error when a media-playlist
+// line uses a feature this downloader cannot honour, and nil otherwise.
+//
+// The downloader fetches whole segments and concatenates them byte-for-byte. If
+// any of these tags is present that pipeline produces a file that is silently
+// garbage — the download "succeeds" and the muxed episode is unplayable — so
+// parsing must fail loudly instead. Wording is deliberately free of the
+// substrings in the engine's transientErrorMarkers list ("timeout", "eof",
+// "connection reset", "http 5xx", …) so these are classified as fatal and the
+// episode is not retried forever.
+func checkUnsupportedMediaTag(line string) error {
+	switch {
+	case strings.HasPrefix(line, "#EXT-X-KEY:"):
+		// METHOD=NONE is the standard way to mark the *end* of an encrypted
+		// span (or to state that nothing is encrypted); it must not error.
+		attrs := parseHLSAttributes(line[len("#EXT-X-KEY:"):])
+		method := strings.ToUpper(strings.TrimSpace(attrs["METHOD"]))
+		if method == "NONE" {
+			return nil
+		}
+		if method == "" {
+			method = "unspecified"
+		}
+		return fmt.Errorf("encrypted HLS stream (METHOD=%s) is not supported: this downloader cannot decrypt segments", method)
+
+	case strings.HasPrefix(line, "#EXT-X-MAP"):
+		// fMP4 streams put codec setup in a separate initialization segment;
+		// concatenating media segments without it yields an invalid file.
+		return fmt.Errorf("fMP4 HLS stream (#EXT-X-MAP initialization segment) is not supported: only MPEG-TS segments can be concatenated")
+
+	case strings.HasPrefix(line, "#EXT-X-BYTERANGE"):
+		// Byte-range segments share one resource; fetching them needs Range
+		// requests, which fetchSegment does not make — it would download the
+		// whole resource once per segment and concatenate the duplicates.
+		return fmt.Errorf("byte-range HLS stream (#EXT-X-BYTERANGE) is not supported: this downloader fetches whole segments only")
+	}
+
+	return nil
+}
+
 // parseMediaPlaylist parses an m3u8 media playlist (segment list).
 func parseMediaPlaylist(r io.Reader, baseURL string) (*MediaPlaylist, error) {
 	scanner := newPlaylistScanner(r)
@@ -186,6 +226,12 @@ func parseMediaPlaylist(r io.Reader, baseURL string) (*MediaPlaylist, error) {
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
+
+		// Reject streams whose segments cannot be byte-concatenated before
+		// building a segment list that would download into a corrupt file.
+		if err := checkUnsupportedMediaTag(line); err != nil {
+			return nil, err
+		}
 
 		if strings.HasPrefix(line, "#EXTINF:") {
 			// Parse duration: #EXTINF:10.0, or #EXTINF:10.0

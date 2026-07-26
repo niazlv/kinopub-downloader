@@ -119,3 +119,27 @@ func TestSiteIsZero(t *testing.T) {
 		t.Fatal("Site with a host should not report IsZero")
 	}
 }
+
+func TestSeriesIDFromURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want SeriesID
+	}{
+		{"page link", "https://kino.watch/item/view/38290", "38290"},
+		{"page link with slug", "https://kino.watch/item/view/38290/some-title", "38290"},
+		{"page link trailing slash", "https://kino.watch/item/view/38290/", "38290"},
+		{"podcast feed", "https://kino.watch/podcast/get/38290/TOKEN", "38290"},
+		{"old domain", "https://kino.pub/item/view/12", "12"},
+		{"unrelated path", "https://kino.watch/profile", ""},
+		{"non-numeric id", "https://kino.watch/item/view/abc", ""},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SeriesIDFromURL(tt.url); got != tt.want {
+				t.Errorf("SeriesIDFromURL(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}

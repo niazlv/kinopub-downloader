@@ -205,21 +205,20 @@ func TestProperty27_NonInteractiveProgressEmitsPercentages(t *testing.T) {
 		}
 
 		for i, rec := range h.records {
-			seriesPct := findIntField(rec.Fields, "series_percent")
-			seasonPct := findIntField(rec.Fields, "season_percent")
-
-			if seriesPct == nil {
+			seriesPct, ok := findIntField(rec.Fields, "series_percent")
+			if !ok {
 				t.Fatalf("record %d: missing series_percent field", i)
 			}
-			if seasonPct == nil {
+			seasonPct, ok := findIntField(rec.Fields, "season_percent")
+			if !ok {
 				t.Fatalf("record %d: missing season_percent field", i)
 			}
 
-			if *seriesPct < 0 || *seriesPct > 100 {
-				t.Fatalf("record %d: series_percent=%d, want [0,100]", i, *seriesPct)
+			if seriesPct < 0 || seriesPct > 100 {
+				t.Fatalf("record %d: series_percent=%d, want [0,100]", i, seriesPct)
 			}
-			if *seasonPct < 0 || *seasonPct > 100 {
-				t.Fatalf("record %d: season_percent=%d, want [0,100]", i, *seasonPct)
+			if seasonPct < 0 || seasonPct > 100 {
+				t.Fatalf("record %d: season_percent=%d, want [0,100]", i, seasonPct)
 			}
 		}
 
@@ -228,26 +227,29 @@ func TestProperty27_NonInteractiveProgressEmitsPercentages(t *testing.T) {
 		// floor(100 * len(completedKeys) / plan.Total).
 		if len(h.records) > 0 {
 			lastRec := h.records[len(h.records)-1]
-			finalSeriesPct := findIntField(lastRec.Fields, "series_percent")
+			finalSeriesPct, ok := findIntField(lastRec.Fields, "series_percent")
+			if !ok {
+				t.Fatal("final record: missing series_percent field")
+			}
 			expectedFinal := computePercent(len(completedKeys), plan.Total)
-			if *finalSeriesPct != expectedFinal {
+			if finalSeriesPct != expectedFinal {
 				t.Fatalf("final series_percent=%d, want %d (completed=%d, total=%d)",
-					*finalSeriesPct, expectedFinal, len(completedKeys), plan.Total)
+					finalSeriesPct, expectedFinal, len(completedKeys), plan.Total)
 			}
 		}
 	})
 }
 
-// findIntField searches for a field by key and returns its int value, or nil
-// if not found.
-func findIntField(fields []domain.Field, key string) *int {
+// findIntField searches for an int field by key, reporting whether it was
+// found. Returning a bool rather than a *int keeps a missing field from turning
+// into a nil dereference at the call site.
+func findIntField(fields []domain.Field, key string) (int, bool) {
 	for _, f := range fields {
 		if f.Key == key {
-			switch v := f.Value.(type) {
-			case int:
-				return &v
+			if v, ok := f.Value.(int); ok {
+				return v, true
 			}
 		}
 	}
-	return nil
+	return 0, false
 }

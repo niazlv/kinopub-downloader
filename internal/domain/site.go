@@ -2,6 +2,7 @@ package domain
 
 import (
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -81,6 +82,28 @@ func (s Site) Referer() string { return s.Origin() + "/" }
 // PodcastFeedURL builds the tokenized RSS feed URL for a podcast id and token.
 func (s Site) PodcastFeedURL(id, token string) string {
 	return s.Origin() + "/podcast/get/" + id + "/" + token
+}
+
+// seriesIDPathRe matches the id in the two URL shapes that carry one: a page
+// link (/item/view/38290, optionally with a slug) and a podcast feed
+// (/podcast/get/38290/<token>). Both use the same numeric series id.
+var seriesIDPathRe = regexp.MustCompile(`^/(?:item/view|podcast/get)/(\d+)(?:/[^/]*)?$`)
+
+// SeriesIDFromURL extracts the series id from a page or feed URL, or returns an
+// empty string when the URL carries none. It is the offline counterpart to
+// resolving the input over the network: the id keys the download state, so a
+// caller that cannot reach the site can still resume an existing series instead
+// of treating it as new.
+func SeriesIDFromURL(rawURL string) SeriesID {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
+	}
+	m := seriesIDPathRe.FindStringSubmatch(strings.TrimRight(u.Path, "/"))
+	if m == nil {
+		return ""
+	}
+	return SeriesID(m[1])
 }
 
 // Owns reports whether rawHost belongs to this site, i.e. it is the site host

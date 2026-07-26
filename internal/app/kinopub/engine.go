@@ -47,11 +47,20 @@ const consecutiveFailLimit = 3
 func (e *engine) run(ctx context.Context, cfg domain.RunConfig) (domain.RunResult, error) {
 	log := e.deps.Logger.Component("engine")
 
-	// Try HLS pipeline first if available and input is a page link.
-	if e.deps.HLSDownloader != nil && e.deps.PageScraper != nil && cfg.InputURL != "" && !cfg.NoChunked {
+	// Try the HLS pipeline first when the input is a page link we can scrape.
+	// An explicit --feed-file is honored instead: the user asked for that feed
+	// to be the source of truth, and scraping the live page would ignore it.
+	if e.deps.HLSDownloader != nil && e.deps.PageScraper != nil && cfg.InputURL != "" &&
+		!cfg.NoChunked && cfg.FeedFile == "" {
 		result, err := e.runHLS(ctx, cfg)
 		if err == nil {
 			return result, nil
+		}
+		// A cancelled run is not a pipeline failure. Falling back here would
+		// start the RSS pipeline with an already-dead context, discarding the
+		// partial result and reporting confusing errors.
+		if ctx.Err() != nil {
+			return result, err
 		}
 		log.Warn("HLS pipeline failed, falling back to RSS pipeline",
 			domain.F("error", err.Error()),
@@ -65,6 +74,14 @@ func (e *engine) run(ctx context.Context, cfg domain.RunConfig) (domain.RunResul
 func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunResult, error) {
 	log := e.deps.Logger.Component("engine")
 
+	// Audio-track selection is implemented only for the HLS pipeline, which
+	// downloads each rendition separately. This path muxes whatever the source
+	// file already contains, so say so rather than silently keeping every track.
+	if !cfg.AudioPref.IsAll() || cfg.AudioMenu {
+		log.Warn("audio track selection applies to page-link (HLS) downloads only; " +
+			"this run keeps all audio tracks")
+	}
+
 	// 1. Resolve input → FeedSource.
 	var feedSrc domain.FeedSource
 	if cfg.FeedFile != "" {
@@ -74,6 +91,21 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 			if resolved, rerr := e.deps.InputResolver.Resolve(ctx, cfg.InputURL); rerr == nil {
 				feedSrc.ID = resolved.ID
 				feedSrc.Token = resolved.Token
+			} else if id := domain.SeriesIDFromURL(cfg.InputURL); id != "" {
+				// Resolving needs credentials (it fetches the page to mint a feed
+				// token); without them we can still recover the series id from the
+				// URL itself. It is what keys the state file, so losing it would
+				// make an existing series look unstarted and re-download it.
+				feedSrc.ID = string(id)
+				log.Debug("feed token unavailable; using series id from the input URL",
+					domain.F("series_id", string(id)),
+					domain.F("error", rerr.Error()),
+				)
+			} else {
+				log.Warn("could not determine the series id from the input URL; "+
+					"resume tracking is disabled for this run",
+					domain.F("error", rerr.Error()),
+				)
 			}
 		}
 	} else {
@@ -166,7 +198,7 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 		Total:              len(allMatching),
 		Seasons:            countSeasons(allMatching),
 		AlreadyCompleted:   alreadyCompleted,
-		CompletedPerSeason: countCompletedPerSeason(allMatching, state, e.deps.StateStore),
+		CompletedPerSeason: countCompletedPerSeason(allMatching, state, e.deps.StateStore, cfg.ForceRedownload),
 	}
 	e.deps.ProgressReporter.Start(plan)
 	defer e.deps.ProgressReporter.Stop()
@@ -521,7 +553,7 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 		Total:              len(allMatching),
 		Seasons:            countSeasons(allMatching),
 		AlreadyCompleted:   alreadyCompleted,
-		CompletedPerSeason: countCompletedPerSeason(allMatching, state, e.deps.StateStore),
+		CompletedPerSeason: countCompletedPerSeason(allMatching, state, e.deps.StateStore, cfg.ForceRedownload),
 	}
 	e.deps.ProgressReporter.Start(plan)
 	defer e.deps.ProgressReporter.Stop()
@@ -801,17 +833,25 @@ func (e *engine) attemptHLSEpisode(
 		remuxErr = fmt.Errorf("downloader does not support HLS muxing")
 	}
 
-	// Clean up temp segment files regardless of mux outcome.
-	if hlsResult.TempDir != "" {
-		os.RemoveAll(hlsResult.TempDir)
-	}
-
 	if remuxErr != nil {
+		// Keep the segment cache. Muxing is the last step of an episode whose
+		// segments are all on disk already, so discarding them here would make
+		// the next attempt re-download gigabytes — exactly what the deferred
+		// retry design preserves them for. An interrupted mux is not a defect in
+		// the episode either, so it stays retryable.
+		if ctx.Err() != nil {
+			return epRetryable, remuxErr
+		}
 		log.Warn("remux failed",
 			domain.F("episode", epLabel),
 			domain.F("error", remuxErr.Error()),
 		)
 		return epFatal, remuxErr
+	}
+
+	// Muxed successfully — the segments have served their purpose.
+	if hlsResult.TempDir != "" {
+		os.RemoveAll(hlsResult.TempDir)
 	}
 
 	// Mark completed.
@@ -1044,9 +1084,15 @@ func countSeasons(episodes []domain.Episode) map[int]int {
 	return m
 }
 
-// countCompletedPerSeason counts how many episodes per season are already completed.
-func countCompletedPerSeason(allEpisodes []domain.Episode, state domain.DownloadState, store domain.StateStore) map[int]int {
+// countCompletedPerSeason counts how many episodes per season are already
+// completed. A --force run re-downloads everything, so nothing counts as done
+// up front — otherwise the season bars would start full while the series bar
+// starts empty, and each re-download would push a season past its own total.
+func countCompletedPerSeason(allEpisodes []domain.Episode, state domain.DownloadState, store domain.StateStore, force bool) map[int]int {
 	m := make(map[int]int)
+	if force {
+		return m
+	}
 	for _, ep := range allEpisodes {
 		if store.IsCompleted(state, ep.Key) {
 			m[ep.Key.Season]++
@@ -1068,7 +1114,13 @@ func (e *engine) seriesDirPath(root string, series domain.Series) string {
 // Returns the path to the downloaded file, or an error if the download fails.
 // The caller is responsible for removing the file when done.
 func (e *engine) downloadPoster(ctx context.Context, posterURL, outputDir string) (string, error) {
-	client := e.deps.ProxyProvider.HTTPClient()
+	// Prefer the authenticated client: posters live behind the same Cloudflare
+	// and CDN checks as the media, which reject the bare Go user agent and the
+	// missing Referer.
+	client := e.deps.AuthedHTTPClient
+	if client == nil {
+		client = e.deps.ProxyProvider.HTTPClient()
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()

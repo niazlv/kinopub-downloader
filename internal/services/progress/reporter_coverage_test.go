@@ -1,11 +1,14 @@
 package progress
 
 import (
+	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/lib/logx"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termx"
 )
 
@@ -537,5 +540,54 @@ func TestRepeatChar(t *testing.T) {
 		if got := r.repeatChar(tc.ch, tc.n); got != tc.want {
 			t.Errorf("repeatChar(%q, %d) = %q, want %q", tc.ch, tc.n, got, tc.want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Lock ordering between LiveReporter.mu and the logx Coordinator mutex
+// ---------------------------------------------------------------------------
+
+// TestLiveReporter_ConcurrentLogAndProgressNoDeadlock exercises the two paths
+// that take both locks: the reporter side (public methods → coordinator) and
+// the log side (coordinator → clearForLog/redraw callbacks). Composing the
+// frame before entering the coordinator is what keeps the order consistent; if
+// a reporter method ever holds r.mu across a coordinator call again, this test
+// hangs and fails on the timeout.
+func TestLiveReporter_ConcurrentLogAndProgressNoDeadlock(t *testing.T) {
+	coord := logx.NewCoordinator(io.Discard)
+	r := NewLive(io.Discard, coord)
+
+	key := domain.EpisodeKey{Season: 1, Episode: 1}
+	r.Start(domain.SeriesPlan{Title: "S", Total: 1, Seasons: map[int]int{1: 1}})
+	defer r.Stop()
+
+	const iterations = 300
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			r.EpisodeStarted(key)
+			r.TrackProgress(key, domain.TrackRef{Kind: domain.TrackVideo}, i%100)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			coord.WriteLog("log line\n")
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("deadlock: concurrent progress updates and log writes did not complete")
 	}
 }

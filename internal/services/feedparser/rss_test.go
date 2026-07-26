@@ -85,7 +85,9 @@ func TestClassifyEnclosure(t *testing.T) {
 	}{
 		{"https://cdn.example.com/video.m3u8", domain.MediaHLS},
 		{"https://cdn.example.com/video.M3U8", domain.MediaHLS},
+		{"https://cdn.example.com/master.m3u8?e=1700000000&h=abc", domain.MediaHLS},
 		{"https://cdn.example.com/video.mp4", domain.MediaProgressive},
+		{"https://cdn.example.com/video.mp4?name=not.m3u8", domain.MediaProgressive},
 		{"https://cdn.example.com/video.mkv", domain.MediaProgressive},
 		{"", domain.MediaProgressive},
 	}

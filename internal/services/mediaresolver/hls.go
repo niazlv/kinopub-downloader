@@ -124,6 +124,9 @@ func parseStreamInf(attrs string) domain.VideoTrack {
 
 // parseAttributes parses a comma-separated list of KEY=VALUE or KEY="VALUE"
 // attributes from an HLS tag line.
+//
+// NOTE: keep in sync with parseHLSAttributes in
+// internal/services/hlsdownloader/manifest.go — this is a copy of that parser.
 func parseAttributes(s string) map[string]string {
 	result := make(map[string]string)
 	s = strings.TrimSpace(s)
@@ -135,7 +138,9 @@ func parseAttributes(s string) map[string]string {
 			break
 		}
 		key := strings.TrimSpace(s[:eqIdx])
-		s = s[eqIdx+1:]
+		// Trim whitespace after '=' so a quoted value with a leading space
+		// (KEY = "val") is recognized as quoted rather than kept literal.
+		s = strings.TrimLeft(s[eqIdx+1:], " \t")
 
 		var value string
 		if len(s) > 0 && s[0] == '"' {

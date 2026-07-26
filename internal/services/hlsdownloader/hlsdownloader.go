@@ -4,6 +4,7 @@ package hlsdownloader
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/lib/fsutil"
 	"github.com/niazlv/kinopub-downloader/internal/lib/httpx"
 )
 
@@ -28,6 +30,10 @@ const (
 	// defaultConcurrency is the default number of segments fetched in parallel
 	// across all tracks of an episode.
 	defaultConcurrency = 4
+
+	// variantMarkerName is the file written inside the resume temp dir to record
+	// which renditions the cached segments were downloaded from.
+	variantMarkerName = "variant.id"
 )
 
 // Downloader downloads HLS streams by fetching individual segments.
@@ -239,6 +245,24 @@ func (d *Downloader) downloadEpisodeInternal(
 		return nil, fmt.Errorf("create temp dir: %w", err)
 	}
 
+	// Reconcile any cached segments with the renditions we are about to fetch.
+	// Segments are keyed by playlist index alone, so a cache left by a run that
+	// used a different video variant or audio track set cannot be reused.
+	fingerprint := variantFingerprint(selected, audioRenditions)
+	wiped, err := ensureVariantMarker(tmpDir, fingerprint)
+	if err != nil {
+		return nil, err
+	}
+	if wiped {
+		d.logger.Info("discarding cached segments from a different rendition set",
+			domain.F("episode", epLabel),
+			domain.F("quality", selected.Label()),
+			domain.F("audio_tracks", len(audioRenditions)),
+			domain.F("reason", "resuming with different quality/audio would splice renditions into one corrupt file"),
+			domain.F("dir", tmpDir),
+		)
+	}
+
 	// 4. Fetch video media playlist.
 	videoPlaylist, err := FetchMediaPlaylist(ctx, d.client, selected.URL, d.auth)
 	if err != nil {
@@ -406,9 +430,11 @@ func (d *Downloader) downloadEpisodeInternal(
 			}
 			segPath := filepath.Join(segDir, fmt.Sprintf("seg_%05d.ts", seg.Index))
 
-			// Resume: skip already-downloaded segments.
-			if info, statErr := os.Stat(segPath); statErr == nil && info.Size() > 0 {
-				updateTrack(trackIdx, info.Size())
+			// Resume: skip already-downloaded segments. Only a segment that was
+			// renamed into place counts, so a run killed mid-copy cannot leave
+			// a truncated file here — see hasCompleteSegment / fetchSegment.
+			if size, ok := hasCompleteSegment(segPath); ok {
+				updateTrack(trackIdx, size)
 				continue
 			}
 
@@ -430,7 +456,11 @@ func (d *Downloader) downloadEpisodeInternal(
 
 				n, err := d.downloadSegment(gctx, seg, segPath)
 				if err != nil {
-					os.Remove(segPath)
+					// fetchSegment removes its own temp file on every failure
+					// path; this is a belt-and-braces sweep so a leftover
+					// partial can never linger next to a segment we failed on.
+					// segPath itself is never half-written (atomic rename).
+					os.Remove(segmentPartPath(segPath))
 					setErr(fmt.Errorf("segment %d failed: %w", seg.Index, err))
 					return
 				}
@@ -575,7 +605,111 @@ func (d *Downloader) downloadSegment(ctx context.Context, seg Segment, outPath s
 	return 0, fmt.Errorf("after %d attempts: %w", maxSegmentRetries, lastErr)
 }
 
+// segmentPartPath returns the scratch path a segment is streamed to before it
+// is renamed onto its final path. It lives in the same directory as the segment
+// so the rename stays within one filesystem (and is therefore atomic).
+func segmentPartPath(segPath string) string {
+	return segPath + ".part"
+}
+
+// hasCompleteSegment reports whether segPath holds a finished segment from an
+// earlier run, returning its size for progress accounting.
+//
+// Completeness is implied by existence: fetchSegment only ever renames a fully
+// written, flushed file onto segPath, so an interrupted download leaves a
+// ".part" file that this check does not see. Before segment writes were atomic
+// a process killed mid-copy left a truncated .ts here, which resume accepted,
+// concatenated and muxed — a silently corrupt episode reported as success.
+func hasCompleteSegment(segPath string) (int64, bool) {
+	info, err := os.Stat(segPath)
+	if err != nil || info.IsDir() || info.Size() == 0 {
+		return 0, false
+	}
+	return info.Size(), true
+}
+
+// variantFingerprint builds a stable identity for the rendition set an episode
+// is about to be downloaded from: the selected video variant plus every audio
+// rendition that will be fetched, in order.
+//
+// Cached segments are keyed by playlist index only (seg_00042.ts), so segments
+// from two different renditions are indistinguishable on disk. Resuming a 720p
+// run with --quality 1080p — or resuming after the CDN re-advertised BANDWIDTH
+// so SelectVariant picks differently — would otherwise splice both renditions
+// into one file that switches resolution/bitrate mid-stream. Audio URIs are
+// included because the same mixing risk applies when the selected track set
+// changes: audio_0 would hold segments from two different dubs.
+func variantFingerprint(selected Variant, audio []AudioRendition) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "video=%s\n", selected.URL)
+	fmt.Fprintf(&b, "resolution=%s\n", selected.Resolution)
+	fmt.Fprintf(&b, "bandwidth=%d\n", selected.Bandwidth)
+	fmt.Fprintf(&b, "codecs=%s\n", selected.Codecs)
+	for _, a := range audio {
+		fmt.Fprintf(&b, "audio=%s\n", a.URI)
+	}
+	return b.String()
+}
+
+// ensureVariantMarker reconciles the segment cache in tmpDir with the rendition
+// set identified by fingerprint, and reports whether a stale cache was wiped.
+//
+// On first use it simply records the fingerprint. On resume it compares: an
+// exact match keeps the cached segments, anything else wipes tmpDir (segment
+// directories plus any already-concatenated track files) and starts over, since
+// mixing renditions produces a corrupt file that still reports as a success.
+// A missing or unreadable marker also counts as a mismatch — without proof that
+// the cache belongs to this rendition set, re-downloading is the only safe move.
+func ensureVariantMarker(tmpDir, fingerprint string) (bool, error) {
+	markerPath := filepath.Join(tmpDir, variantMarkerName)
+
+	if stored, err := os.ReadFile(markerPath); err == nil && string(stored) == fingerprint {
+		return false, nil
+	}
+
+	// Report a wipe only if there was actually something cached; on a fresh
+	// directory this is just the marker being written for the first time.
+	hadCache, err := dirHasEntries(tmpDir)
+	if err != nil {
+		return false, fmt.Errorf("inspect segment cache: %w", err)
+	}
+
+	if err := os.RemoveAll(tmpDir); err != nil {
+		return false, fmt.Errorf("wipe stale segment cache: %w", err)
+	}
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		return false, fmt.Errorf("recreate temp dir: %w", err)
+	}
+	// Written atomically so a crash here cannot leave a half-written marker
+	// that would look like a mismatch (harmless) or, worse, silently truncate
+	// to a prefix of some other fingerprint.
+	if err := fsutil.AtomicWrite(markerPath, []byte(fingerprint), 0644); err != nil {
+		return false, fmt.Errorf("write variant marker: %w", err)
+	}
+
+	return hadCache, nil
+}
+
+// dirHasEntries reports whether dir exists and contains at least one entry.
+// A missing directory is not an error: it simply holds nothing.
+func dirHasEntries(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(entries) > 0, nil
+}
+
 // fetchSegment downloads a single segment to disk.
+//
+// The body is streamed into a temp file next to outPath, flushed, and only then
+// renamed into place. Rename within a directory is atomic, so a process kill or
+// a machine crash mid-download can never leave a truncated file at outPath —
+// which the resume check would otherwise accept as a finished segment and
+// concatenate into a silently corrupt episode.
 func (d *Downloader) fetchSegment(ctx context.Context, segURL, outPath string) (int64, error) {
 	// Per-segment timeout: 120 seconds for slow CDN connections.
 	segCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
@@ -597,21 +731,29 @@ func (d *Downloader) fetchSegment(ctx context.Context, segURL, outPath string) (
 		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	f, err := os.Create(outPath)
+	partPath := segmentPartPath(outPath)
+	f, err := os.Create(partPath)
 	if err != nil {
 		return 0, err
 	}
 
 	n, copyErr := io.Copy(f, resp.Body)
+	// Flush to stable storage before the rename: without it the rename can
+	// reach disk ahead of the data, so a power loss would publish a segment
+	// whose tail is missing — exactly the corruption the rename prevents.
+	syncErr := f.Sync()
 	closeErr := f.Close()
 
-	if copyErr != nil {
-		os.Remove(outPath)
-		return 0, copyErr
+	for _, e := range []error{copyErr, syncErr, closeErr} {
+		if e != nil {
+			os.Remove(partPath)
+			return 0, e
+		}
 	}
-	if closeErr != nil {
-		os.Remove(outPath)
-		return 0, closeErr
+
+	if err := fsutil.AtomicRename(partPath, outPath); err != nil {
+		os.Remove(partPath)
+		return 0, err
 	}
 
 	return n, nil

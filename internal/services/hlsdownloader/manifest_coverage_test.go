@@ -289,6 +289,189 @@ func TestParseMediaPlaylistEmpty(t *testing.T) {
 	}
 }
 
+// transientMarkers mirrors internal/app/kinopub's transientErrorMarkers list.
+// The engine classifies a download error as retryable when its lowercased text
+// contains any of these, so an "unsupported stream" error containing one would
+// be retried forever instead of failing the episode once.
+var transientMarkers = []string{
+	"context deadline exceeded",
+	"deadline exceeded",
+	"timeout",
+	"timed out",
+	"unexpected eof",
+	"connection reset",
+	"connection refused",
+	"broken pipe",
+	"eof",
+	"no such host",
+	"temporary failure",
+	"tls handshake",
+	"http 429",
+	"http 500",
+	"http 502",
+	"http 503",
+	"http 504",
+	"server misbehaving",
+}
+
+// assertFatalError checks that err exists, names the offending feature, and
+// reads as permanent to the engine's transient-vs-fatal classifier.
+func assertFatalError(t *testing.T, err error, wantSubstr string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected an error mentioning %q, got nil", wantSubstr)
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, strings.ToLower(wantSubstr)) {
+		t.Errorf("error %q does not mention %q", err, wantSubstr)
+	}
+	if !strings.Contains(msg, "not supported") {
+		t.Errorf("error %q should state that the stream is not supported", err)
+	}
+	for _, marker := range transientMarkers {
+		if strings.Contains(msg, marker) {
+			t.Errorf("error %q contains transient marker %q, engine would retry it forever", err, marker)
+		}
+	}
+}
+
+func TestParseMediaPlaylistRejectsEncryption(t *testing.T) {
+	// Segments of an encrypted stream cannot be concatenated into a playable
+	// file, and this downloader implements no decryption — it must fail rather
+	// than emit garbage.
+	const base = "https://cdn.example.com/index.m3u8"
+	cases := []struct {
+		name   string
+		tag    string
+		method string
+	}{
+		{
+			name:   "aes-128",
+			tag:    `#EXT-X-KEY:METHOD=AES-128,URI="https://cdn.example.com/key.bin",IV=0x0123456789abcdef`,
+			method: "aes-128",
+		},
+		{
+			name:   "sample-aes",
+			tag:    `#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://key"`,
+			method: "sample-aes",
+		},
+		{
+			name:   "lowercase method",
+			tag:    `#EXT-X-KEY:METHOD=aes-128,URI="k.bin"`,
+			method: "aes-128",
+		},
+		{
+			name:   "missing method",
+			tag:    `#EXT-X-KEY:URI="k.bin"`,
+			method: "unspecified",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			body := "#EXTM3U\n" + c.tag + "\n#EXTINF:6.0,\nseg0.ts\n"
+			pl, err := parseMediaPlaylist(strings.NewReader(body), base)
+			if pl != nil {
+				t.Errorf("expected no playlist on error, got %+v", pl)
+			}
+			assertFatalError(t, err, "encrypted")
+			if !strings.Contains(strings.ToLower(err.Error()), c.method) {
+				t.Errorf("error %q should name METHOD=%s", err, c.method)
+			}
+		})
+	}
+}
+
+func TestParseMediaPlaylistAllowsKeyMethodNone(t *testing.T) {
+	// METHOD=NONE is the valid "no encryption here" marker and must parse.
+	const base = "https://cdn.example.com/index.m3u8"
+	for _, tag := range []string{"#EXT-X-KEY:METHOD=NONE", "#EXT-X-KEY:METHOD=none"} {
+		body := "#EXTM3U\n" + tag + "\n#EXTINF:6.0,\nseg0.ts\n#EXTINF:6.0,\nseg1.ts\n"
+		pl, err := parseMediaPlaylist(strings.NewReader(body), base)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", tag, err)
+		}
+		if len(pl.Segments) != 2 {
+			t.Errorf("%s: got %d segments, want 2", tag, len(pl.Segments))
+		}
+	}
+}
+
+func TestParseMediaPlaylistRejectsFMP4Map(t *testing.T) {
+	// An fMP4 stream needs its initialization segment prepended and cannot be
+	// assembled by concatenating media segments.
+	const base = "https://cdn.example.com/index.m3u8"
+	body := `#EXTM3U
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:6.0,
+seg0.m4s
+`
+	pl, err := parseMediaPlaylist(strings.NewReader(body), base)
+	if pl != nil {
+		t.Errorf("expected no playlist on error, got %+v", pl)
+	}
+	assertFatalError(t, err, "#EXT-X-MAP")
+}
+
+func TestParseMediaPlaylistRejectsByterange(t *testing.T) {
+	// Byte-range segments live inside a shared resource and need Range
+	// requests, which fetchSegment does not make.
+	const base = "https://cdn.example.com/index.m3u8"
+	body := `#EXTM3U
+#EXTINF:6.0,
+#EXT-X-BYTERANGE:75232@0
+all.ts
+#EXTINF:6.0,
+#EXT-X-BYTERANGE:82112@75232
+all.ts
+`
+	pl, err := parseMediaPlaylist(strings.NewReader(body), base)
+	if pl != nil {
+		t.Errorf("expected no playlist on error, got %+v", pl)
+	}
+	assertFatalError(t, err, "#EXT-X-BYTERANGE")
+}
+
+func TestCheckUnsupportedMediaTagPassesOrdinaryLines(t *testing.T) {
+	// Only the three unsupported tags trip the check; everything else in a
+	// normal playlist (including similarly named tags) passes through.
+	lines := []string{
+		"",
+		"#EXTM3U",
+		"#EXT-X-VERSION:3",
+		"#EXT-X-TARGETDURATION:10",
+		"#EXT-X-MEDIA-SEQUENCE:0",
+		"#EXTINF:6.0,",
+		"#EXT-X-ENDLIST",
+		"#EXT-X-DISCONTINUITY",
+		"#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00Z",
+		"seg0.ts",
+		"https://cdn.example.com/seg0.ts?range=0-100",
+	}
+	for _, line := range lines {
+		if err := checkUnsupportedMediaTag(line); err != nil {
+			t.Errorf("line %q rejected: %v", line, err)
+		}
+	}
+}
+
+func TestFetchMediaPlaylistSurfacesUnsupportedStream(t *testing.T) {
+	// A parse error must abort immediately: FetchMediaPlaylist's retry loop is
+	// for network failures, and re-fetching an encrypted playlist changes
+	// nothing.
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k.bin\"\n#EXTINF:6.0,\nseg0.ts\n"))
+	}))
+	defer srv.Close()
+
+	_, err := FetchMediaPlaylist(context.Background(), srv.Client(), srv.URL+"/index.m3u8", domain.RequestAuth{})
+	assertFatalError(t, err, "encrypted")
+	if hits != 1 {
+		t.Errorf("playlist fetched %d times, want 1 (parse errors must not retry)", hits)
+	}
+}
+
 func TestParseVariantAttrs(t *testing.T) {
 	tests := []struct {
 		name  string

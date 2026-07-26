@@ -391,7 +391,6 @@ func TestProperty6_CatalogOrdering_Comprehensive(t *testing.T) {
 		// Generate a specific number of seasons and episodes per season.
 		numSeasons := rapid.IntRange(1, 5).Draw(t, "numSeasons")
 
-		type seKey struct{ s, e int }
 		var items []rssItemData
 		expectedSeasons := make([]int, 0, numSeasons)
 		expectedEpisodes := make(map[int][]int) // season -> sorted episode numbers
