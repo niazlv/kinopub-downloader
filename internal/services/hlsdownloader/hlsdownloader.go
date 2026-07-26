@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -204,6 +205,65 @@ func (d *Downloader) ListSubtitleTracks(ctx context.Context, manifestURL string,
 		infos[i] = domain.SubtitleTrackInfo{Index: i, Name: s.DisplayName(), Language: s.Language}
 	}
 	return infos, nil
+}
+
+// ListVideoQualities fetches the master playlist and reports the video
+// renditions it offers, ready to be shown as a menu.
+//
+// Options are ordered best first (by height, then bitrate) and collapsed by
+// resolution and codec: a source often lists several bitrates of the same
+// 1080p/h264 stream, which are indistinguishable to someone picking from a
+// list. Collapsing also keeps each option's Quality selector unambiguous —
+// "1080p-h264" must identify exactly one of the offered entries.
+func (d *Downloader) ListVideoQualities(ctx context.Context, manifestURL string) ([]domain.VideoQualityInfo, error) {
+	master, err := FetchMasterPlaylist(ctx, d.client, manifestURL, d.auth, d.logger)
+	if err != nil {
+		return nil, fmt.Errorf("master playlist: %w", err)
+	}
+	if len(master.Variants) == 0 {
+		return nil, fmt.Errorf("no variants found in master playlist")
+	}
+
+	return videoQualitiesFrom(master.Variants), nil
+}
+
+// videoQualitiesFrom ranks and collapses variants into menu options. It is the
+// pure half of ListVideoQualities, split out so the ordering and de-duplication
+// rules can be tested without a playlist server.
+func videoQualitiesFrom(variants []Variant) []domain.VideoQualityInfo {
+	ranked := append([]Variant(nil), variants...)
+	sort.SliceStable(ranked, func(a, b int) bool {
+		if ranked[a].Height != ranked[b].Height {
+			return ranked[a].Height > ranked[b].Height
+		}
+		return ranked[a].Bandwidth > ranked[b].Bandwidth
+	})
+
+	type key struct {
+		height int
+		codec  string
+	}
+	seen := make(map[key]bool, len(ranked))
+	var out []domain.VideoQualityInfo
+	for _, v := range ranked {
+		codec := "h264"
+		if v.IsH265() {
+			codec = "h265"
+		}
+		k := key{height: v.Height, codec: codec}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, domain.VideoQualityInfo{
+			Index:       len(out),
+			Height:      v.Height,
+			Codec:       codec,
+			BitrateKbps: v.BitrateKbps(),
+			Quality:     domain.VideoQualitySelector(v.Height, codec),
+		})
+	}
+	return out
 }
 
 // subtitleRenditionsFor returns the subtitle renditions belonging to the

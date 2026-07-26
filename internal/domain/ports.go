@@ -219,6 +219,11 @@ type HLSDownloader interface {
 	// SetSubtitlePreference sets the subtitle-track filter applied to subsequent
 	// DownloadEpisode calls. The zero SubtitlePreference keeps every track.
 	SetSubtitlePreference(pref SubtitlePreference)
+
+	// ListVideoQualities reports the video renditions the master playlist
+	// offers, best first and with duplicates of the same resolution and codec
+	// collapsed, so they can be presented as a menu.
+	ListVideoQualities(ctx context.Context, manifestURL string) ([]VideoQualityInfo, error)
 }
 
 // AudioChooser presents the available audio tracks to the user and returns the

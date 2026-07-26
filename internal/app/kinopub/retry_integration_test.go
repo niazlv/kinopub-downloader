@@ -57,6 +57,9 @@ func (f *fakeHLSDownloader) ListSubtitleTracks(context.Context, string, domain.Q
 	return nil, nil
 }
 func (f *fakeHLSDownloader) SetSubtitlePreference(domain.SubtitlePreference) {}
+func (f *fakeHLSDownloader) ListVideoQualities(context.Context, string) ([]domain.VideoQualityInfo, error) {
+	return nil, nil
+}
 
 // muxingDownloader is a mockDownloader that also satisfies domain.HLSMuxer.
 type muxingDownloader struct {

@@ -102,6 +102,9 @@ func ApplyDefaults(cfg *domain.RunConfig) {
 	if cfg.SubsMenu && cfg.SubsMenuTimeout == 0 {
 		cfg.SubsMenuTimeout = 90 * time.Second
 	}
+	if cfg.VideoMenu && cfg.VideoMenuTimeout == 0 {
+		cfg.VideoMenuTimeout = 90 * time.Second
+	}
 	// --subs-only produces nothing but subtitle files, so it necessarily writes
 	// them beside the episode rather than into a container that is never built.
 	if cfg.SubtitlesOnly {
@@ -167,6 +170,29 @@ func parseTrackSelector(s, kind string) (include, exclude []string, err error) {
 		}
 	}
 	return include, exclude, nil
+}
+
+// ApplyURLEpisodeRef narrows a run using the "s1e1" suffix a page URL may
+// carry, so a link copied from an episode page does what it looks like it does.
+//
+// seasonsSet and episodesSet report whether the user passed --seasons and
+// --episodes. An explicit flag always wins: it is more specific than the link
+// it accompanies, and silently overriding it would be surprising.
+//
+// A URL without a usable suffix leaves cfg untouched.
+func ApplyURLEpisodeRef(cfg *domain.RunConfig, seasonsSet, episodesSet bool) {
+	ref := domain.EpisodeRefFromURL(cfg.InputURL)
+	if ref.IsZero() {
+		return
+	}
+	if !seasonsSet {
+		cfg.SeasonSel = domain.Selection{Values: map[int]bool{ref.Season: true}}
+	}
+	// "sN" with no episode selects a whole season, so the episode selection is
+	// only narrowed when the URL actually names one.
+	if !episodesSet && ref.Episode > 0 {
+		cfg.EpisodeSel = domain.Selection{Values: map[int]bool{ref.Episode: true}}
+	}
 }
 
 // ParseSelection parses a selection string like "1,3-5,8" into a Selection.

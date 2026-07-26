@@ -560,6 +560,12 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 	// and let the user choose. The resulting preference is pushed to the HLS
 	// downloader for all episodes. This runs before progress rendering so the
 	// interactive prompt isn't clobbered by progress redraws.
+	// Video quality is resolved first: the audio and subtitle probes below take
+	// a quality and report only the renditions belonging to that variant, so
+	// choosing afterwards could list tracks that the chosen variant does not
+	// carry.
+	cfg.Quality = e.resolveVideoQuality(ctx, cfg, selected, manifestMap)
+
 	pref := e.resolveAudioPreference(ctx, cfg, selected, manifestMap)
 	e.deps.HLSDownloader.SetAudioPreference(pref)
 
@@ -1053,6 +1059,59 @@ func (e *engine) resolveAudioPreference(
 
 	// 3. Keep everything.
 	return domain.AudioPreference{}
+}
+
+// resolveVideoQuality returns the quality the run should use, showing the
+// interactive picker when --video-menu is set and leaving cfg.Quality untouched
+// otherwise.
+//
+// The picker resolves to an ordinary --quality selector ("1080p-h265"), so the
+// choice applies uniformly to every episode and the rest of the pipeline stays
+// unaware a menu happened. Any failure keeps the configured quality: a probe
+// that cannot reach the network is no reason to abandon the run.
+func (e *engine) resolveVideoQuality(
+	ctx context.Context,
+	cfg domain.RunConfig,
+	selected []domain.Episode,
+	manifestMap map[domain.EpisodeKey]string,
+) domain.Quality {
+	log := e.deps.Logger.Component("engine")
+
+	if !cfg.VideoMenu || e.deps.VideoChooser == nil || len(selected) == 0 {
+		return cfg.Quality
+	}
+
+	url, ok := manifestMap[selected[0].Key]
+	if !ok || url == "" {
+		return cfg.Quality
+	}
+
+	qualities, err := e.deps.HLSDownloader.ListVideoQualities(ctx, url)
+	if err != nil {
+		log.Warn("video quality probe failed, keeping the configured quality",
+			domain.F("error", err.Error()))
+		return cfg.Quality
+	}
+	if len(qualities) <= 1 {
+		return cfg.Quality
+	}
+
+	chosen, err := e.deps.VideoChooser.ChooseVideo(qualities, cfg.VideoMenuTimeout)
+	if err != nil {
+		log.Warn("video menu failed, keeping the configured quality",
+			domain.F("error", err.Error()))
+		return cfg.Quality
+	}
+	if chosen < 0 || chosen >= len(qualities) {
+		return cfg.Quality
+	}
+
+	picked := qualities[chosen]
+	log.Info("video quality (interactive)",
+		domain.F("quality", picked.Label()),
+		domain.F("selector", string(picked.Quality)),
+	)
+	return picked.Quality
 }
 
 // resolveSubtitlePreference mirrors resolveAudioPreference for subtitles: an

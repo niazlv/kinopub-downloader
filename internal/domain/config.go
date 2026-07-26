@@ -93,6 +93,15 @@ type RunConfig struct {
 	// before defaulting to "keep all". Zero means use the package default.
 	AudioMenuTimeout time.Duration
 
+	// VideoMenu enables the interactive video-quality picker shown before the
+	// first download. The chosen quality replaces Quality for the whole run —
+	// unlike audio and subtitles, exactly one video stream is downloaded, so
+	// this is a single choice rather than a filter. TTY only.
+	VideoMenu bool
+	// VideoMenuTimeout bounds how long that picker waits for input before
+	// keeping the automatic quality. Zero means use the package default.
+	VideoMenuTimeout time.Duration
+
 	// SubsPref selects which subtitle tracks to keep. The zero value keeps
 	// every track. See SubtitlePreference for matching semantics.
 	SubsPref SubtitlePreference

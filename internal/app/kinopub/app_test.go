@@ -411,3 +411,8 @@ func (d *stubHLSDownloader) ListSubtitleTracks(ctx context.Context, manifestURL 
 }
 
 func (d *stubHLSDownloader) SetSubtitlePreference(domain.SubtitlePreference) {}
+
+func (d *stubHLSDownloader) ListVideoQualities(ctx context.Context,
+	manifestURL string) ([]domain.VideoQualityInfo, error) {
+	return nil, nil
+}

@@ -32,6 +32,9 @@ type Dependencies struct {
 	// Optional: interactive subtitle-track picker. nil disables the menu.
 	SubtitleChooser domain.SubtitleChooser
 
+	// Optional: interactive video-quality picker. nil disables the menu.
+	VideoChooser domain.VideoChooser
+
 	// Optional: writes subtitles as separate .srt files next to the episode.
 	// Required for --subs-external and --subs-only; nil disables both.
 	SubtitleSidecarWriter domain.SubtitleSidecarWriter

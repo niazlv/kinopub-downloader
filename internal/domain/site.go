@@ -6,6 +6,7 @@ package domain
 import (
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -107,6 +108,61 @@ func SeriesIDFromURL(rawURL string) SeriesID {
 		return ""
 	}
 	return SeriesID(m[1])
+}
+
+// episodeRefRe matches the "s1e1" / "s01" suffix a page URL may carry. Digits
+// are bounded so an arbitrarily long numeric run cannot be read as a season.
+var episodeRefRe = regexp.MustCompile(`(?i)^s(\d{1,3})(?:e(\d{1,4}))?$`)
+
+// itemViewPathRe matches the page path an episode reference may be appended to.
+// Podcast feed paths end in an opaque token, which must never be mistaken for
+// an episode reference.
+var itemViewPathRe = regexp.MustCompile(`^/item/view/\d+(?:/([^/]+))?$`)
+
+// EpisodeRef is a season/episode pointer parsed from a page URL suffix. A zero
+// field means "not specified": EpisodeRef{Season: 1} selects a whole season.
+type EpisodeRef struct {
+	Season  int
+	Episode int
+}
+
+// IsZero reports whether the reference selects nothing.
+func (r EpisodeRef) IsZero() bool { return r.Season == 0 && r.Episode == 0 }
+
+// EpisodeRefFromURL extracts the "s1e1" suffix from a page URL, so a link
+// copied straight from the site's episode view narrows the run the same way
+// --seasons/--episodes would.
+//
+// It recognizes "sN" (a whole season) and "sNeM" (one episode), case- and
+// zero-padding-insensitive, and returns the zero EpisodeRef for anything else —
+// including podcast feed URLs, whose trailing segment is an access token.
+func EpisodeRefFromURL(rawURL string) EpisodeRef {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return EpisodeRef{}
+	}
+	m := itemViewPathRe.FindStringSubmatch(strings.TrimRight(u.Path, "/"))
+	if m == nil || m[1] == "" {
+		return EpisodeRef{}
+	}
+	parts := episodeRefRe.FindStringSubmatch(m[1])
+	if parts == nil {
+		return EpisodeRef{}
+	}
+
+	var ref EpisodeRef
+	// The regexp guarantees digits, so a conversion error is impossible; a
+	// leading-zero form like "s01" parses to the same number as "s1".
+	ref.Season, _ = strconv.Atoi(parts[1])
+	if parts[2] != "" {
+		ref.Episode, _ = strconv.Atoi(parts[2])
+	}
+	// "s0" is not a season anyone can download; treat it as absent rather than
+	// silently selecting nothing.
+	if ref.Season == 0 {
+		return EpisodeRef{}
+	}
+	return ref
 }
 
 // Owns reports whether rawHost belongs to this site, i.e. it is the site host

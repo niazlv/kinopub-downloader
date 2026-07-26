@@ -23,7 +23,8 @@ func validateDependencies(deps Dependencies) error {
 
 		// Skip optional fields.
 		if fieldName == "HLSDownloader" || fieldName == "PageScraper" || fieldName == "AudioChooser" ||
-			fieldName == "SubtitleChooser" || fieldName == "SubtitleSidecarWriter" {
+			fieldName == "SubtitleChooser" || fieldName == "SubtitleSidecarWriter" ||
+			fieldName == "VideoChooser" {
 			continue
 		}
 

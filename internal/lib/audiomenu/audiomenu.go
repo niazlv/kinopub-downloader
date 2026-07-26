@@ -77,6 +77,51 @@ func (c *Chooser) ChooseSubtitles(tracks []domain.SubtitleTrackInfo, timeout tim
 	return c.chooseTracks(tracks, timeout, trackKind{noun: "subtitle", fallbackLabel: "Subtitles"})
 }
 
+// ChooseVideo implements domain.VideoChooser. Unlike the audio and subtitle
+// pickers this accepts exactly one option, because a run muxes one video
+// stream: a range or a comma-separated list is rejected rather than silently
+// using its first entry.
+//
+// It returns the chosen 0-based index, or -1 to keep the automatic selection —
+// which is also what an empty line, TAB, "auto", a timeout, a non-terminal
+// input, or an unparseable answer produce.
+func (c *Chooser) ChooseVideo(qualities []domain.VideoQualityInfo, timeout time.Duration) (int, error) {
+	if len(qualities) <= 1 || !c.interactive {
+		return -1, nil
+	}
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+
+	fmt.Fprintf(c.out, "\nAvailable video qualities (choose within %s, Enter or TAB = automatic):\n",
+		timeout.Round(time.Second))
+	for i, q := range qualities {
+		fmt.Fprintf(c.out, "  %d. %s\n", i+1, q.Label())
+	}
+	fmt.Fprint(c.out, "Selection (e.g. 1; Enter/TAB or 'auto' to keep automatic): ")
+
+	line, ok := c.readSelection(timeout)
+	if !ok {
+		fmt.Fprintln(c.out, "\nNo selection — keeping the automatic quality.")
+		return -1, nil
+	}
+
+	sel := strings.ToLower(strings.TrimSpace(line))
+	switch sel {
+	case "", "auto", "automatic", "optimal":
+		fmt.Fprintln(c.out, "Keeping the automatic quality.")
+		return -1, nil
+	}
+
+	n, err := strconv.Atoi(sel)
+	if err != nil || n < 1 || n > len(qualities) {
+		fmt.Fprintf(c.out, "Invalid selection — keeping the automatic quality.\n")
+		return -1, nil
+	}
+	fmt.Fprintf(c.out, "Using %s for every episode.\n", qualities[n-1].Label())
+	return n - 1, nil
+}
+
 // trackKind carries the only thing that differs between the audio and subtitle
 // pickers: what to call the tracks.
 type trackKind struct {
@@ -327,4 +372,5 @@ func parseIndexSelection(s string, n int) ([]int, error) {
 var (
 	_ domain.AudioChooser    = (*Chooser)(nil)
 	_ domain.SubtitleChooser = (*Chooser)(nil)
+	_ domain.VideoChooser    = (*Chooser)(nil)
 )

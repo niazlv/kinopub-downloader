@@ -96,6 +96,31 @@ func TestApplyDefaults_SubsMenuTimeout(t *testing.T) {
 	}
 }
 
+func TestApplyDefaults_VideoMenuTimeout(t *testing.T) {
+	cfg := domain.RunConfig{VideoMenu: true}
+	ApplyDefaults(&cfg)
+	if cfg.VideoMenuTimeout != 90*time.Second {
+		t.Errorf("want a 90s default, got %v", cfg.VideoMenuTimeout)
+	}
+
+	cfg = domain.RunConfig{}
+	ApplyDefaults(&cfg)
+	if cfg.VideoMenuTimeout != 0 {
+		t.Errorf("want no timeout without the menu, got %v", cfg.VideoMenuTimeout)
+	}
+}
+
+// All three pickers time out on the same schedule; a run left unattended must
+// not stall on one of them longer than another.
+func TestApplyDefaults_AllMenuTimeoutsAgree(t *testing.T) {
+	cfg := domain.RunConfig{VideoMenu: true, AudioMenu: true, SubsMenu: true}
+	ApplyDefaults(&cfg)
+	if cfg.VideoMenuTimeout != cfg.AudioMenuTimeout || cfg.AudioMenuTimeout != cfg.SubsMenuTimeout {
+		t.Errorf("timeouts diverged: video=%v audio=%v subs=%v",
+			cfg.VideoMenuTimeout, cfg.AudioMenuTimeout, cfg.SubsMenuTimeout)
+	}
+}
+
 // Both flags force the RSS pipeline, where --subs-only cannot work: rejecting
 // them up front beats downloading full episodes the user did not ask for.
 func TestValidateConfig_SubtitlesOnlyConflicts(t *testing.T) {

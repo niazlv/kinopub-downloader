@@ -207,6 +207,8 @@ func run() int {
 		subsMenu    bool
 		subsExtern  bool
 		subsOnly    bool
+		videoMenu   bool
+		interactive bool
 		siteHost    string
 	)
 
@@ -245,6 +247,9 @@ func run() int {
 	fs.BoolVar(&subsMenu, "subs-menu", false, "show an interactive subtitle-track picker before downloading (TTY only)")
 	fs.BoolVar(&subsExtern, "subs-external", false, "write subtitles as separate .srt files instead of muxing them into the container")
 	fs.BoolVar(&subsOnly, "subs-only", false, "download only subtitles as .srt files, skipping video and audio (page links only)")
+	fs.BoolVar(&videoMenu, "video-menu", false, "show an interactive video-quality picker before downloading (TTY only)")
+	fs.BoolVar(&interactive, "interactive", false, "pick quality, then audio, then subtitles interactively (implies --video-menu --audio-menu --subs-menu)")
+	fs.BoolVar(&interactive, "i", false, "interactive mode (shorthand)")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 
 	fs.Usage = func() {
@@ -291,6 +296,10 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "  kinopub --audio-menu https://kino.watch/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # Keep only Russian subtitles, as separate .srt files\n")
 		fmt.Fprintf(os.Stderr, "  kinopub --subs rus --subs-external https://kino.watch/item/view/38290\n\n")
+		fmt.Fprintf(os.Stderr, "  # Pick quality, audio and subtitles interactively, then download\n")
+		fmt.Fprintf(os.Stderr, "  kinopub -i https://kino.watch/item/view/38290\n\n")
+		fmt.Fprintf(os.Stderr, "  # A link to one episode narrows the run by itself\n")
+		fmt.Fprintf(os.Stderr, "  kinopub https://kino.watch/item/view/38290/s1e1\n\n")
 		fmt.Fprintf(os.Stderr, "  # Download nothing but the Russian subtitles\n")
 		fmt.Fprintf(os.Stderr, "  kinopub --subs-only --subs rus https://kino.watch/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # One-off with explicit cookies (without saving)\n")
@@ -456,6 +465,19 @@ func run() int {
 		SubsMenu:        subsMenu,
 		SubsExternal:    subsExtern,
 		SubtitlesOnly:   subsOnly,
+		VideoMenu:       videoMenu,
+	}
+
+	// A page link may already point at one episode ("…/item/view/38290/s1e1");
+	// honour it as a filter unless the user gave an explicit selection.
+	kinopub.ApplyURLEpisodeRef(&cfg, seasons != "", episodes != "")
+
+	// -i is shorthand for the whole interactive flow: quality, then audio,
+	// then subtitles, in the order they narrow a download.
+	if interactive {
+		cfg.VideoMenu = true
+		cfg.AudioMenu = true
+		cfg.SubsMenu = true
 	}
 
 	// Apply defaults and validate.
@@ -666,6 +688,11 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	// Interactive subtitle-track picker, on the same terms as the audio one.
 	if cfg.SubsMenu && termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr) {
 		deps.SubtitleChooser = audiomenu.New(os.Stdin, os.Stderr, true)
+	}
+
+	// Interactive video-quality picker, likewise.
+	if cfg.VideoMenu && termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr) {
+		deps.VideoChooser = audiomenu.New(os.Stdin, os.Stderr, true)
 	}
 
 	return deps, cleanup, nil
@@ -1239,6 +1266,8 @@ complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l su
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-menu      -d "Show interactive subtitle-track picker"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-external  -d "Write subtitles as separate .srt files"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-only      -d "Download only subtitles, skipping video/audio"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l video-menu     -d "Show interactive video-quality picker"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s i -l interactive    -d "Pick quality, audio and subtitles interactively"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l version        -d "Print version and exit"
 
 # login flags
@@ -1275,7 +1304,8 @@ _kinopub_completion() {
         --verbosity -v --ffmpeg --log-file --container --force --seasons --episodes
         --dry-run --cookie --user-agent --header --browser-cookies
         --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu \
-        --subs --subs-menu --subs-external --subs-only --version"
+        --subs --subs-menu --subs-external --subs-only \\
+        --video-menu -i --interactive --version"
 
     # Detect which subcommand is active
     local subcmd=""
