@@ -24,4 +24,9 @@ var (
 	ErrInvalidFlag            = errors.New("invalid flag value")                            // Req 15.4
 	ErrMissingDependency      = errors.New("required component dependency not provided")    // Req 16.5
 	ErrAuthRequired           = errors.New("content appears to require authentication")     // Req 17.3, 17.4
+
+	// ErrNoSubtitlesMatched reports that an episode carries none of the
+	// subtitles --subs-only asked for. Only strict (subtitles-only) runs raise
+	// it: elsewhere subtitles are optional and a missing track falls back.
+	ErrNoSubtitlesMatched = errors.New("no subtitles matched the selection")
 )

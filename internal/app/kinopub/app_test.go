@@ -404,3 +404,10 @@ func (d *stubHLSDownloader) ListAudioTracks(ctx context.Context, manifestURL str
 }
 
 func (d *stubHLSDownloader) SetAudioPreference(domain.AudioPreference) {}
+
+func (d *stubHLSDownloader) ListSubtitleTracks(ctx context.Context, manifestURL string,
+	quality domain.Quality) ([]domain.SubtitleTrackInfo, error) {
+	return nil, nil
+}
+
+func (d *stubHLSDownloader) SetSubtitlePreference(domain.SubtitlePreference) {}

@@ -210,6 +210,15 @@ type HLSDownloader interface {
 	// SetAudioPreference sets the audio-track filter applied to subsequent
 	// DownloadEpisode calls. The zero AudioPreference keeps every track.
 	SetAudioPreference(pref AudioPreference)
+
+	// ListSubtitleTracks reports the subtitle tracks available for the selected
+	// quality, without downloading anything. An episode with no subtitles yields
+	// an empty list rather than an error — subtitles are optional.
+	ListSubtitleTracks(ctx context.Context, manifestURL string, quality Quality) ([]SubtitleTrackInfo, error)
+
+	// SetSubtitlePreference sets the subtitle-track filter applied to subsequent
+	// DownloadEpisode calls. The zero SubtitlePreference keeps every track.
+	SetSubtitlePreference(pref SubtitlePreference)
 }
 
 // AudioChooser presents the available audio tracks to the user and returns the
@@ -219,6 +228,24 @@ type AudioChooser interface {
 	// ChooseAudio shows tracks and returns the selected indices. A nil/empty
 	// result means "keep all tracks".
 	ChooseAudio(tracks []AudioTrackInfo, timeout time.Duration) ([]int, error)
+}
+
+// SubtitleChooser presents the available subtitle tracks to the user and returns
+// the indices to keep. Implementations may block for input up to a timeout; on
+// timeout or non-interactive input they should keep all tracks (return nil).
+type SubtitleChooser interface {
+	// ChooseSubtitles shows tracks and returns the selected indices. A nil/empty
+	// result means "keep all tracks".
+	ChooseSubtitles(tracks []SubtitleTrackInfo, timeout time.Duration) ([]int, error)
+}
+
+// SubtitleSidecarWriter writes subtitle tracks as separate files next to the
+// episode instead of muxing them into the container. It backs both
+// --subs-external and --subs-only.
+type SubtitleSidecarWriter interface {
+	// WriteSubtitleSidecars converts each track to SubRip and writes it beside
+	// job.OutPath, returning the paths written. Existing files are replaced.
+	WriteSubtitleSidecars(ctx context.Context, job Job, tracks []HLSSubtitleTrack) ([]string, error)
 }
 
 // HLSMuxer muxes downloaded HLS video + audio files into a final container.
@@ -240,6 +267,9 @@ type HLSDownloadResult struct {
 	// AudioTracks are the local audio files downloaded separately (demuxed HLS).
 	// Empty when audio is muxed into the video stream.
 	AudioTracks []HLSAudioTrack
+	// SubtitleTracks are the local subtitle files downloaded separately. Empty
+	// when the source carries no subtitles or the preference kept none.
+	SubtitleTracks []HLSSubtitleTrack
 	// TempDir is the directory holding the intermediate files; the caller
 	// should remove it after remuxing.
 	TempDir string
@@ -250,6 +280,13 @@ type HLSAudioTrack struct {
 	Path     string // local .ts/.aac file path
 	Name     string // studio/track label, e.g. "MVO, AniLibria"
 	Language string // language tag, e.g. "ru"
+}
+
+// HLSSubtitleTrack describes a downloaded subtitle rendition.
+type HLSSubtitleTrack struct {
+	Path     string // local .vtt file path (segments already merged)
+	Name     string // track label, e.g. "Русские полные"
+	Language string // language tag, e.g. "rus"
 }
 
 // PageScraper extracts playlist data from site pages.

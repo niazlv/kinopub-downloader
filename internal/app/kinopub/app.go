@@ -29,6 +29,13 @@ type Dependencies struct {
 	// Optional: interactive audio-track picker. nil disables the menu.
 	AudioChooser domain.AudioChooser
 
+	// Optional: interactive subtitle-track picker. nil disables the menu.
+	SubtitleChooser domain.SubtitleChooser
+
+	// Optional: writes subtitles as separate .srt files next to the episode.
+	// Required for --subs-external and --subs-only; nil disables both.
+	SubtitleSidecarWriter domain.SubtitleSidecarWriter
+
 	// Optional: HTTP client carrying the session auth (Cookie, User-Agent,
 	// Referer). Used for engine-level fetches such as the series poster, which
 	// the site and CDN reject without those headers. When nil, the proxy

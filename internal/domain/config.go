@@ -92,6 +92,28 @@ type RunConfig struct {
 	// AudioMenuTimeout bounds how long the interactive picker waits for input
 	// before defaulting to "keep all". Zero means use the package default.
 	AudioMenuTimeout time.Duration
+
+	// SubsPref selects which subtitle tracks to keep. The zero value keeps
+	// every track. See SubtitlePreference for matching semantics.
+	SubsPref SubtitlePreference
+
+	// SubsMenu enables the interactive subtitle-track picker, mirroring
+	// AudioMenu. The menu is only shown on a TTY.
+	SubsMenu bool
+	// SubsMenuTimeout bounds how long that picker waits for input before
+	// defaulting to "keep all". Zero means use the package default.
+	SubsMenuTimeout time.Duration
+
+	// SubsExternal writes the selected subtitles as separate .srt files next to
+	// the episode instead of muxing them into the container.
+	SubsExternal bool
+
+	// SubtitlesOnly downloads and writes only the selected subtitles, skipping
+	// video and audio entirely. Selection becomes strict in this mode: an
+	// episode lacking the requested subtitles is an error rather than a
+	// fallback, since substituting a different language would defeat the point
+	// of the run. Implies SubsExternal.
+	SubtitlesOnly bool
 }
 
 // RequestAuth carries credentials and request-shaping headers applied to every

@@ -33,9 +33,41 @@ type AudioRendition struct {
 }
 
 // MasterPlaylist holds parsed data from an HLS master playlist.
+// SubtitleRendition represents a subtitle track from the master playlist.
+type SubtitleRendition struct {
+	GroupID  string
+	Name     string
+	Language string
+	URI      string // media playlist URL for this subtitle track
+	Forced   bool   // FORCED=YES — shown automatically for foreign dialogue
+	Default  bool   // DEFAULT=YES — the source's preferred track
+}
+
+// DisplayName is the label shown in the interactive picker and matched against
+// --subs patterns.
+//
+// NAME is optional in HLS, so it falls back to the language tag and finally to
+// a generic label — a track must always be nameable to be selectable. A forced
+// track is marked so "--subs forced" can single it out, unless its own name
+// already says so.
+func (s SubtitleRendition) DisplayName() string {
+	name := strings.TrimSpace(s.Name)
+	if name == "" {
+		if name = strings.TrimSpace(s.Language); name == "" {
+			name = "Subtitles"
+		}
+	}
+	if s.Forced && !strings.Contains(strings.ToLower(name), "forced") &&
+		!strings.Contains(strings.ToLower(name), "форсир") {
+		name += " (forced)"
+	}
+	return name
+}
+
 type MasterPlaylist struct {
-	Variants []Variant
-	Audio    []AudioRendition
+	Variants  []Variant
+	Audio     []AudioRendition
+	Subtitles []SubtitleRendition
 }
 
 // MediaPlaylist holds parsed data from an HLS media playlist.
@@ -151,7 +183,8 @@ func parseMasterPlaylist(r io.Reader, baseURL string) (*MasterPlaylist, error) {
 			pendingVariant = &v
 		} else if strings.HasPrefix(line, "#EXT-X-MEDIA:") {
 			attrs := parseHLSAttributes(line[len("#EXT-X-MEDIA:"):])
-			if strings.ToUpper(attrs["TYPE"]) == "AUDIO" {
+			switch strings.ToUpper(attrs["TYPE"]) {
+			case "AUDIO":
 				rendition := AudioRendition{
 					GroupID:  attrs["GROUP-ID"],
 					Name:     attrs["NAME"],
@@ -159,6 +192,19 @@ func parseMasterPlaylist(r io.Reader, baseURL string) (*MasterPlaylist, error) {
 					URI:      resolveURL(baseURL, attrs["URI"]),
 				}
 				result.Audio = append(result.Audio, rendition)
+			case "SUBTITLES":
+				// A SUBTITLES rendition always carries its own URI; unlike audio
+				// it is never muxed into the video stream, so an entry without
+				// one is unusable and is dropped by subtitleRenditionsFor.
+				rendition := SubtitleRendition{
+					GroupID:  attrs["GROUP-ID"],
+					Name:     attrs["NAME"],
+					Language: attrs["LANGUAGE"],
+					URI:      resolveURL(baseURL, attrs["URI"]),
+					Forced:   strings.EqualFold(attrs["FORCED"], "YES"),
+					Default:  strings.EqualFold(attrs["DEFAULT"], "YES"),
+				}
+				result.Subtitles = append(result.Subtitles, rendition)
 			}
 		} else if pendingVariant != nil && !strings.HasPrefix(line, "#") && line != "" {
 			pendingVariant.URL = resolveURL(baseURL, line)
@@ -289,6 +335,7 @@ func parseVariantAttrs(attrs string) Variant {
 	}
 	v.Codecs = parsed["CODECS"]
 	v.AudioGroup = parsed["AUDIO"]
+	v.SubsGroup = parsed["SUBTITLES"]
 
 	return v
 }

@@ -9,12 +9,16 @@ import (
 	"strings"
 )
 
-// AudioTrackInfo describes a single audio rendition available for an episode.
-// It is the lightweight, transport-agnostic view used by audio selection and
-// the interactive picker (the HLS layer builds these from its renditions).
-type AudioTrackInfo struct {
-	// Index is the position of the track within the episode's audio list
-	// (0-based). SelectAudio returns these indices.
+// TrackInfo describes a single selectable rendition available for an episode.
+// It is the lightweight, transport-agnostic view used by track selection and
+// the interactive pickers (the HLS layer builds these from its renditions).
+//
+// Audio and subtitle selection share this shape, and with it the language
+// canonicalization and substring matching below, so a pattern like "rus"
+// behaves identically for both.
+type TrackInfo struct {
+	// Index is the position of the track within the episode's track list of
+	// that kind (0-based). SelectAudio and SelectSubtitles return these indices.
 	Index int
 	// Name is the human label from the source, e.g.
 	// "01. Многоголосый. AniLibria (RUS)" or "02. AniLibria".
@@ -23,6 +27,12 @@ type AudioTrackInfo struct {
 	// It may be empty when the source only encodes the language in Name.
 	Language string
 }
+
+// AudioTrackInfo is the audio spelling of TrackInfo.
+type AudioTrackInfo = TrackInfo
+
+// SubtitleTrackInfo is the subtitle spelling of TrackInfo.
+type SubtitleTrackInfo = TrackInfo
 
 // AudioPreference describes which audio tracks to keep for a download run.
 //

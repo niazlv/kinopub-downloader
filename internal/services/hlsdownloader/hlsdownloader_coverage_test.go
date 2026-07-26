@@ -274,16 +274,16 @@ func TestVariantFingerprintDistinguishesRenditions(t *testing.T) {
 	audioEN := AudioRendition{Name: "English", URI: "https://cdn/audio/en.m3u8"}
 	audioRU := AudioRendition{Name: "Russian", URI: "https://cdn/audio/ru.m3u8"}
 
-	base := variantFingerprint(v720, []AudioRendition{audioEN})
+	base := variantFingerprint(v720, []AudioRendition{audioEN}, nil, false)
 
 	t.Run("stable for identical input", func(t *testing.T) {
-		if again := variantFingerprint(v720, []AudioRendition{audioEN}); again != base {
+		if again := variantFingerprint(v720, []AudioRendition{audioEN}, nil, false); again != base {
 			t.Errorf("fingerprint not stable:\n%q\n%q", base, again)
 		}
 	})
 
 	t.Run("video variant change", func(t *testing.T) {
-		if variantFingerprint(v1080, []AudioRendition{audioEN}) == base {
+		if variantFingerprint(v1080, []AudioRendition{audioEN}, nil, false) == base {
 			t.Error("720p and 1080p share a fingerprint")
 		}
 	})
@@ -293,19 +293,19 @@ func TestVariantFingerprintDistinguishesRenditions(t *testing.T) {
 		// differently, so it has to be part of the identity.
 		rebranded := v720
 		rebranded.Bandwidth = 2500000
-		if variantFingerprint(rebranded, []AudioRendition{audioEN}) == base {
+		if variantFingerprint(rebranded, []AudioRendition{audioEN}, nil, false) == base {
 			t.Error("bandwidth change did not alter the fingerprint")
 		}
 	})
 
 	t.Run("audio track set change", func(t *testing.T) {
-		if variantFingerprint(v720, []AudioRendition{audioRU}) == base {
+		if variantFingerprint(v720, []AudioRendition{audioRU}, nil, false) == base {
 			t.Error("different audio rendition shares a fingerprint")
 		}
-		if variantFingerprint(v720, []AudioRendition{audioEN, audioRU}) == base {
+		if variantFingerprint(v720, []AudioRendition{audioEN, audioRU}, nil, false) == base {
 			t.Error("extra audio rendition shares a fingerprint")
 		}
-		if variantFingerprint(v720, nil) == base {
+		if variantFingerprint(v720, nil, nil, false) == base {
 			t.Error("dropping audio did not alter the fingerprint")
 		}
 	})
@@ -313,8 +313,8 @@ func TestVariantFingerprintDistinguishesRenditions(t *testing.T) {
 	t.Run("audio order change", func(t *testing.T) {
 		// audio_0 / audio_1 directories are positional, so swapping the order
 		// remaps cached segments onto the wrong track.
-		a := variantFingerprint(v720, []AudioRendition{audioEN, audioRU})
-		b := variantFingerprint(v720, []AudioRendition{audioRU, audioEN})
+		a := variantFingerprint(v720, []AudioRendition{audioEN, audioRU}, nil, false)
+		b := variantFingerprint(v720, []AudioRendition{audioRU, audioEN}, nil, false)
 		if a == b {
 			t.Error("audio order change did not alter the fingerprint")
 		}

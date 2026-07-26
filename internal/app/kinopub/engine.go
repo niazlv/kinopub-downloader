@@ -85,6 +85,19 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 			"this run keeps all audio tracks")
 	}
 
+	// The RSS pipeline downloads a finished file and has no separate subtitle
+	// renditions to pick from or save. --subs-only cannot be honoured here at
+	// all, so it fails rather than silently downloading full episodes — the
+	// opposite of what was asked for.
+	if cfg.SubtitlesOnly {
+		return domain.RunResult{}, fmt.Errorf(
+			"--subs-only requires the HLS pipeline: pass a page link (…/item/view/…) with valid credentials")
+	}
+	if !cfg.SubsPref.IsAll() || cfg.SubsMenu || cfg.SubsExternal {
+		log.Warn("subtitle selection applies to page-link (HLS) downloads only; " +
+			"this run keeps whatever subtitles the source file already contains")
+	}
+
 	// 1. Resolve input → FeedSource.
 	var feedSrc domain.FeedSource
 	if cfg.FeedFile != "" {
@@ -550,6 +563,9 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 	pref := e.resolveAudioPreference(ctx, cfg, selected, manifestMap)
 	e.deps.HLSDownloader.SetAudioPreference(pref)
 
+	subsPref := e.resolveSubtitlePreference(ctx, cfg, selected, manifestMap)
+	e.deps.HLSDownloader.SetSubtitlePreference(subsPref)
+
 	// 8. Start progress reporting.
 	plan := domain.SeriesPlan{
 		Title:              series.Title,
@@ -815,18 +831,62 @@ func (e *engine) attemptHLSEpisode(
 		return epFatal, dlErr
 	}
 
-	// Mux downloaded video + audio streams into the final container.
-	log.Info("muxing",
-		domain.F("episode", epLabel),
-		domain.F("quality", fmt.Sprintf("%s @ %d kbps", hlsResult.Resolution, hlsResult.BitrateKbps)),
-		domain.F("audio_tracks", len(hlsResult.AudioTracks)),
-	)
-
 	muxJob := domain.Job{
 		Episode:     ep,
 		OutPath:     outPath,
 		PosterPath:  posterPath,
 		SeriesTitle: series.Title,
+	}
+
+	// --subs-only: no video was downloaded, so there is nothing to mux. Write
+	// the subtitles out and finish the episode here.
+	//
+	// Selection was strict, so an empty result means this episode simply does
+	// not carry what was asked for. That is fatal for the episode (the run's
+	// exit code reflects it) but not retryable — retrying cannot make a missing
+	// language appear.
+	if cfg.SubtitlesOnly {
+		if len(hlsResult.SubtitleTracks) == 0 {
+			if hlsResult.TempDir != "" {
+				os.RemoveAll(hlsResult.TempDir)
+			}
+			return epFatal, fmt.Errorf("%w: %s", domain.ErrNoSubtitlesMatched, epLabel)
+		}
+		written, subsErr := e.writeSubtitleSidecars(ctx, muxJob, hlsResult)
+		if hlsResult.TempDir != "" {
+			os.RemoveAll(hlsResult.TempDir)
+		}
+		if subsErr != nil {
+			if ctx.Err() != nil {
+				return epRetryable, subsErr
+			}
+			return epFatal, subsErr
+		}
+		log.Info("subtitles saved",
+			domain.F("episode", epLabel),
+			domain.F("files", len(written)),
+		)
+		return epSuccess, nil
+	}
+
+	// Mux downloaded video + audio streams into the final container.
+	log.Info("muxing",
+		domain.F("episode", epLabel),
+		domain.F("quality", fmt.Sprintf("%s @ %d kbps", hlsResult.Resolution, hlsResult.BitrateKbps)),
+		domain.F("audio_tracks", len(hlsResult.AudioTracks)),
+		domain.F("subtitle_tracks", len(hlsResult.SubtitleTracks)),
+	)
+
+	// --subs-external keeps subtitles out of the container and writes them as
+	// separate files instead, so they must not also be muxed in.
+	if cfg.SubsExternal && len(hlsResult.SubtitleTracks) > 0 {
+		if _, subsErr := e.writeSubtitleSidecars(ctx, muxJob, hlsResult); subsErr != nil {
+			log.Warn("writing external subtitles failed; continuing without them",
+				domain.F("episode", epLabel),
+				domain.F("error", subsErr.Error()),
+			)
+		}
+		hlsResult.SubtitleTracks = nil
 	}
 
 	var remuxErr error
@@ -993,6 +1053,100 @@ func (e *engine) resolveAudioPreference(
 
 	// 3. Keep everything.
 	return domain.AudioPreference{}
+}
+
+// resolveSubtitlePreference mirrors resolveAudioPreference for subtitles: an
+// explicit --subs wins, otherwise the interactive picker runs, otherwise every
+// track is kept.
+//
+// The Strict and Only flags always reflect --subs-only, including on the fast
+// path, because they govern how the downloader behaves rather than which tracks
+// match — a subtitles-only run with no --subs still must not download video.
+func (e *engine) resolveSubtitlePreference(
+	ctx context.Context,
+	cfg domain.RunConfig,
+	selected []domain.Episode,
+	manifestMap map[domain.EpisodeKey]string,
+) domain.SubtitlePreference {
+	log := e.deps.Logger.Component("engine")
+
+	withMode := func(p domain.SubtitlePreference) domain.SubtitlePreference {
+		p.Strict = cfg.SubtitlesOnly
+		p.Only = cfg.SubtitlesOnly
+		return p
+	}
+
+	menuActive := cfg.SubsMenu && e.deps.SubtitleChooser != nil
+	if cfg.SubsPref.IsAll() && !menuActive {
+		return withMode(domain.SubtitlePreference{})
+	}
+
+	// Probe the first episode's subtitle tracks (best-effort), used for the menu
+	// and to enrich Prefer hints.
+	var tracks []domain.SubtitleTrackInfo
+	if len(selected) > 0 {
+		if url, ok := manifestMap[selected[0].Key]; ok && url != "" {
+			if t, err := e.deps.HLSDownloader.ListSubtitleTracks(ctx, url, cfg.Quality); err != nil {
+				log.Debug("subtitle track probe failed", domain.F("error", err.Error()))
+			} else {
+				tracks = t
+			}
+		}
+	}
+
+	// 1. Explicit --subs preference.
+	if !cfg.SubsPref.IsAll() {
+		pref := cfg.SubsPref
+		if len(pref.Prefer) == 0 && len(tracks) > 0 {
+			pref.Prefer = domain.DeriveSubtitlePrefer(tracks, pref.Include)
+		}
+		log.Info("subtitle preference (explicit)",
+			domain.F("include", strings.Join(pref.Include, ", ")),
+			domain.F("exclude", strings.Join(pref.Exclude, ", ")),
+		)
+		return withMode(pref)
+	}
+
+	// 2. Interactive menu.
+	if menuActive && len(tracks) > 1 {
+		chosen, err := e.deps.SubtitleChooser.ChooseSubtitles(tracks, cfg.SubsMenuTimeout)
+		if err != nil {
+			log.Warn("subtitle menu failed, keeping all tracks", domain.F("error", err.Error()))
+			return withMode(domain.SubtitlePreference{})
+		}
+		if len(chosen) == 0 {
+			return withMode(domain.SubtitlePreference{})
+		}
+		pref := domain.BuildSubtitlePreference(tracks, chosen)
+		log.Info("subtitle preference (interactive)",
+			domain.F("include", strings.Join(pref.Include, ", ")),
+			domain.F("selected", len(chosen)),
+		)
+		return withMode(pref)
+	}
+
+	// 3. Keep everything.
+	return withMode(domain.SubtitlePreference{})
+}
+
+// writeSubtitleSidecars writes the downloaded subtitle tracks as separate files
+// next to the episode, via the optional SubtitleSidecarWriter dependency.
+func (e *engine) writeSubtitleSidecars(
+	ctx context.Context,
+	job domain.Job,
+	hls *domain.HLSDownloadResult,
+) ([]string, error) {
+	writer := e.deps.SubtitleSidecarWriter
+	if writer == nil {
+		// Fall back to the downloader, which implements the port in production
+		// wiring; an explicit dependency is only needed to override it.
+		w, ok := e.deps.Downloader.(domain.SubtitleSidecarWriter)
+		if !ok {
+			return nil, fmt.Errorf("writing subtitles to separate files is not supported by this downloader")
+		}
+		writer = w
+	}
+	return writer.WriteSubtitleSidecars(ctx, job, hls.SubtitleTracks)
 }
 
 // buildSeriesFromPlaylist constructs a domain.Series from page playlist data.

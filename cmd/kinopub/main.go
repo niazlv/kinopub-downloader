@@ -203,6 +203,10 @@ func run() int {
 		noChunked   bool
 		audioSel    string
 		audioMenu   bool
+		subsSel     string
+		subsMenu    bool
+		subsExtern  bool
+		subsOnly    bool
 		siteHost    string
 	)
 
@@ -237,6 +241,10 @@ func run() int {
 	fs.BoolVar(&noChunked, "no-chunked", false, "disable chunked HTTP download (use ffmpeg streaming for all sources)")
 	fs.StringVar(&audioSel, "audio", "", "audio track selection: comma-separated patterns; prefix with '!' (or '-') to exclude (e.g. \"anilibria\", \"!jpn\", \"anilibria,!jpn\")")
 	fs.BoolVar(&audioMenu, "audio-menu", false, "show an interactive audio-track picker before downloading (TTY only)")
+	fs.StringVar(&subsSel, "subs", "", "subtitle track selection, same syntax as --audio (e.g. \"rus\", \"!eng\", \"rus,!eng\")")
+	fs.BoolVar(&subsMenu, "subs-menu", false, "show an interactive subtitle-track picker before downloading (TTY only)")
+	fs.BoolVar(&subsExtern, "subs-external", false, "write subtitles as separate .srt files instead of muxing them into the container")
+	fs.BoolVar(&subsOnly, "subs-only", false, "download only subtitles as .srt files, skipping video and audio (page links only)")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 
 	fs.Usage = func() {
@@ -281,6 +289,10 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "  kinopub --audio \"anilibria,!jpn\" https://kino.watch/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # Pick the audio track interactively before downloading\n")
 		fmt.Fprintf(os.Stderr, "  kinopub --audio-menu https://kino.watch/item/view/38290\n\n")
+		fmt.Fprintf(os.Stderr, "  # Keep only Russian subtitles, as separate .srt files\n")
+		fmt.Fprintf(os.Stderr, "  kinopub --subs rus --subs-external https://kino.watch/item/view/38290\n\n")
+		fmt.Fprintf(os.Stderr, "  # Download nothing but the Russian subtitles\n")
+		fmt.Fprintf(os.Stderr, "  kinopub --subs-only --subs rus https://kino.watch/item/view/38290\n\n")
 		fmt.Fprintf(os.Stderr, "  # One-off with explicit cookies (without saving)\n")
 		fmt.Fprintf(os.Stderr, "  kinopub --cookie \"cf_clearance=...; PHPSESSID=...\" <url>\n\n")
 		fmt.Fprintf(os.Stderr, "  # A mirror or a renamed domain — just pass its URL\n")
@@ -310,7 +322,13 @@ func run() int {
 
 	// --version
 	if showVersion {
+		// GPL-3.0 §5(d) asks an interactive program to point users at the
+		// licence and state the absence of warranty.
 		fmt.Printf("kinopub %s\n", version)
+		fmt.Printf("Copyright (C) 2026 niazlv\n")
+		fmt.Printf("License GPL-3.0-or-later: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>\n")
+		fmt.Printf("This program comes with ABSOLUTELY NO WARRANTY.\n")
+		fmt.Printf("This is free software: you are free to change and redistribute it.\n")
 		return 0
 	}
 
@@ -380,6 +398,13 @@ func run() int {
 		return 1
 	}
 
+	// Parse subtitle-track preference.
+	subsPref, err := kinopub.ParseSubtitlePreference(subsSel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
 	// The site is whatever host the URL names, so mirrors and renamed domains
 	// need no code change; --site names it when there is no URL to derive it
 	// from (e.g. --feed-file) or to override it.
@@ -427,6 +452,10 @@ func run() int {
 		NoChunked:       noChunked,
 		AudioPref:       audioPref,
 		AudioMenu:       audioMenu,
+		SubsPref:        subsPref,
+		SubsMenu:        subsMenu,
+		SubsExternal:    subsExtern,
+		SubtitlesOnly:   subsOnly,
 	}
 
 	// Apply defaults and validate.
@@ -632,6 +661,11 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	// and stdin/stderr are a real terminal.
 	if cfg.AudioMenu && termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr) {
 		deps.AudioChooser = audiomenu.New(os.Stdin, os.Stderr, true)
+	}
+
+	// Interactive subtitle-track picker, on the same terms as the audio one.
+	if cfg.SubsMenu && termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr) {
+		deps.SubtitleChooser = audiomenu.New(os.Stdin, os.Stderr, true)
 	}
 
 	return deps, cleanup, nil
@@ -1201,6 +1235,10 @@ complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s x      
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l no-chunked     -d "Disable chunked HTTP download"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l audio          -d "Audio track selection (e.g. anilibria,!jpn)" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l audio-menu     -d "Show interactive audio-track picker"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs           -d "Subtitle track selection (e.g. rus,!eng)" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-menu      -d "Show interactive subtitle-track picker"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-external  -d "Write subtitles as separate .srt files"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-only      -d "Download only subtitles, skipping video/audio"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l version        -d "Print version and exit"
 
 # login flags
@@ -1236,7 +1274,8 @@ _kinopub_completion() {
     local main_flags="-o --output -c --concurrency --proxy -q --quality
         --verbosity -v --ffmpeg --log-file --container --force --seasons --episodes
         --dry-run --cookie --user-agent --header --browser-cookies
-        --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu --version"
+        --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu \
+        --subs --subs-menu --subs-external --subs-only --version"
 
     # Detect which subcommand is active
     local subcmd=""
@@ -1286,7 +1325,7 @@ _kinopub_completion() {
                     --browser-cookies)
                         COMPREPLY=($(compgen -W "safari chrome firefox auto" -- "$cur")); return ;;
                     --cookie|--user-agent|--proxy|--header|--seasons|--episodes| \
-                    --ffmpeg-args|-x|-c|--concurrency|--audio)
+                    --ffmpeg-args|-x|-c|--concurrency|--audio|--subs)
                         return ;;
                 esac
                 COMPREPLY=($(compgen -W "$main_flags" -- "$cur"))

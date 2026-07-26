@@ -21,6 +21,7 @@ type Variant struct {
 	Width      int    // parsed from Resolution
 	Height     int    // parsed from Resolution
 	AudioGroup string // GROUP-ID of associated audio renditions (empty = muxed)
+	SubsGroup  string // GROUP-ID of associated subtitle renditions (empty = none)
 }
 
 // IsH265 reports whether this variant uses HEVC/H.265 codec.

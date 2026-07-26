@@ -429,6 +429,12 @@ func BuildHLSMuxArgs(job domain.Job, hls *domain.HLSDownloadResult, tempPath str
 		args = append(args, "-i", a.Path)
 	}
 
+	// Inputs N+1..M: subtitle tracks (merged WebVTT files).
+	subsInputBase := 1 + len(hls.AudioTracks)
+	for _, s := range hls.SubtitleTracks {
+		args = append(args, "-i", s.Path)
+	}
+
 	// Map video from input 0.
 	args = append(args, "-map", "0:v:0")
 
@@ -443,8 +449,24 @@ func BuildHLSMuxArgs(job domain.Job, hls *domain.HLSDownloadResult, tempPath str
 		args = append(args, "-map", "0:a?")
 	}
 
+	for i := range hls.SubtitleTracks {
+		args = append(args, "-map", fmt.Sprintf("%d:s:0", subsInputBase+i))
+	}
+
 	// Stream copy.
 	args = append(args, "-c", "copy")
+
+	// Subtitles are the exception to the copy above: the downloaded tracks are
+	// WebVTT, which MP4 cannot hold. Transcode them to the container's native
+	// text codec — mov_text for MP4, SubRip for Matroska. Both are cheap text
+	// conversions, so this does not touch the video or audio streams.
+	if len(hls.SubtitleTracks) > 0 {
+		if outputFormat(tempPath) == "mp4" {
+			args = append(args, "-c:s", "mov_text")
+		} else {
+			args = append(args, "-c:s", "srt")
+		}
+	}
 
 	// Audio metadata: labels and languages.
 	labels := make([]string, len(hls.AudioTracks))
@@ -462,6 +484,27 @@ func BuildHLSMuxArgs(job domain.Job, hls *domain.HLSDownloadResult, tempPath str
 		args = append(args, fmt.Sprintf("-metadata:s:a:%d", i), fmt.Sprintf("title=%s", labels[i]))
 		if a.Language != "" {
 			args = append(args, fmt.Sprintf("-metadata:s:a:%d", i), fmt.Sprintf("language=%s", ToISO6392(a.Language)))
+		}
+	}
+
+	// Subtitle metadata: labels and languages, deduplicated the same way, so a
+	// player's track menu can tell two same-language tracks apart.
+	subLabels := make([]string, len(hls.SubtitleTracks))
+	for i, s := range hls.SubtitleTracks {
+		switch {
+		case s.Name != "":
+			subLabels[i] = s.Name
+		case s.Language != "":
+			subLabels[i] = s.Language
+		default:
+			subLabels[i] = "Subtitles"
+		}
+	}
+	subLabels = makeUnique(subLabels)
+	for i, s := range hls.SubtitleTracks {
+		args = append(args, fmt.Sprintf("-metadata:s:s:%d", i), fmt.Sprintf("title=%s", subLabels[i]))
+		if s.Language != "" {
+			args = append(args, fmt.Sprintf("-metadata:s:s:%d", i), fmt.Sprintf("language=%s", ToISO6392(s.Language)))
 		}
 	}
 

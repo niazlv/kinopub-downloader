@@ -1,10 +1,14 @@
 // Copyright (C) 2026 niazlv <niazlv03@gmail.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Package audiomenu provides an interactive, time-boxed CLI picker for audio
-// tracks. It implements domain.AudioChooser: the user is shown the available
-// tracks and given a bounded window to pick which to keep. If they make no
-// choice in time (or input is not a terminal), all tracks are kept.
+// Package audiomenu provides an interactive, time-boxed CLI picker for the
+// selectable tracks of an episode. It implements both domain.AudioChooser and
+// domain.SubtitleChooser: the user is shown the available tracks and given a
+// bounded window to pick which to keep. If they make no choice in time (or
+// input is not a terminal), all tracks are kept.
+//
+// Audio and subtitle tracks share one implementation because they share one
+// shape (domain.TrackInfo) and one interaction — only the wording differs.
 package audiomenu
 
 import (
@@ -63,6 +67,25 @@ func (c *Chooser) rawTTY() (*os.File, bool) {
 //
 // Returned indices are 0-based (into tracks). A nil result means "keep all".
 func (c *Chooser) ChooseAudio(tracks []domain.AudioTrackInfo, timeout time.Duration) ([]int, error) {
+	return c.chooseTracks(tracks, timeout, trackKind{noun: "audio", fallbackLabel: "Audio"})
+}
+
+// ChooseSubtitles implements domain.SubtitleChooser. It behaves exactly like
+// ChooseAudio — same selection syntax, same timeout, same defaults — over the
+// episode's subtitle tracks.
+func (c *Chooser) ChooseSubtitles(tracks []domain.SubtitleTrackInfo, timeout time.Duration) ([]int, error) {
+	return c.chooseTracks(tracks, timeout, trackKind{noun: "subtitle", fallbackLabel: "Subtitles"})
+}
+
+// trackKind carries the only thing that differs between the audio and subtitle
+// pickers: what to call the tracks.
+type trackKind struct {
+	noun          string // used in prompts, e.g. "audio" → "all audio tracks"
+	fallbackLabel string // shown when a track has neither name nor language
+}
+
+// chooseTracks is the shared picker behind ChooseAudio and ChooseSubtitles.
+func (c *Chooser) chooseTracks(tracks []domain.TrackInfo, timeout time.Duration, kind trackKind) ([]int, error) {
 	if len(tracks) <= 1 || !c.interactive {
 		return nil, nil
 	}
@@ -70,24 +93,24 @@ func (c *Chooser) ChooseAudio(tracks []domain.AudioTrackInfo, timeout time.Durat
 		timeout = DefaultTimeout
 	}
 
-	c.render(tracks, timeout)
+	c.render(tracks, timeout, kind)
 
 	line, ok := c.readSelection(timeout)
 	if !ok {
-		fmt.Fprintln(c.out, "\nNo selection — keeping all audio tracks.")
+		fmt.Fprintf(c.out, "\nNo selection — keeping all %s tracks.\n", kind.noun)
 		return nil, nil
 	}
 
 	sel := strings.ToLower(strings.TrimSpace(line))
 	switch sel {
 	case "", "all", "*", "none":
-		fmt.Fprintln(c.out, "Keeping all audio tracks.")
+		fmt.Fprintf(c.out, "Keeping all %s tracks.\n", kind.noun)
 		return nil, nil
 	}
 
 	idx, err := parseIndexSelection(sel, len(tracks))
 	if err != nil {
-		fmt.Fprintf(c.out, "Invalid selection (%v) — keeping all audio tracks.\n", err)
+		fmt.Fprintf(c.out, "Invalid selection (%v) — keeping all %s tracks.\n", err, kind.noun)
 		return nil, nil
 	}
 	if len(idx) == 0 {
@@ -97,15 +120,16 @@ func (c *Chooser) ChooseAudio(tracks []domain.AudioTrackInfo, timeout time.Durat
 }
 
 // render prints the prompt and track list.
-func (c *Chooser) render(tracks []domain.AudioTrackInfo, timeout time.Duration) {
-	fmt.Fprintf(c.out, "\nAvailable audio tracks (choose within %s, Enter or TAB = all):\n", timeout.Round(time.Second))
+func (c *Chooser) render(tracks []domain.TrackInfo, timeout time.Duration, kind trackKind) {
+	fmt.Fprintf(c.out, "\nAvailable %s tracks (choose within %s, Enter or TAB = all):\n",
+		kind.noun, timeout.Round(time.Second))
 	for i, t := range tracks {
 		label := t.Name
 		if label == "" {
 			label = t.Language
 		}
 		if label == "" {
-			label = "Audio"
+			label = kind.fallbackLabel
 		}
 		if t.Language != "" && !strings.Contains(strings.ToLower(label), strings.ToLower(t.Language)) {
 			label = fmt.Sprintf("%s [%s]", label, t.Language)
@@ -299,5 +323,8 @@ func parseIndexSelection(s string, n int) ([]int, error) {
 	return out, nil
 }
 
-// Verify Chooser satisfies the port at compile time.
-var _ domain.AudioChooser = (*Chooser)(nil)
+// Verify Chooser satisfies both ports at compile time.
+var (
+	_ domain.AudioChooser    = (*Chooser)(nil)
+	_ domain.SubtitleChooser = (*Chooser)(nil)
+)

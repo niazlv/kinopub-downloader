@@ -13,16 +13,20 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/lib/fsutil"
+	"github.com/niazlv/kinopub-downloader/internal/lib/webvtt"
 )
 
 // Compile-time interface assertions.
 var (
-	_ domain.Downloader = (*Downloader)(nil)
-	_ domain.HLSMuxer   = (*Downloader)(nil)
+	_ domain.Downloader            = (*Downloader)(nil)
+	_ domain.HLSMuxer              = (*Downloader)(nil)
+	_ domain.SubtitleSidecarWriter = (*Downloader)(nil)
 )
 
 // RunFunc is a function that runs a command, streaming stdout to the provided
@@ -212,6 +216,55 @@ func (d *Downloader) remuxLocal(ctx context.Context, job domain.Job, rawPath str
 // the final container at job.OutPath. For demuxed HLS, video and audio come
 // from separate files; this maps them all together with -c copy and applies
 // per-track labels/languages.
+// WriteSubtitleSidecars converts each downloaded WebVTT track to SubRip and
+// writes it next to job.OutPath, returning the paths written.
+//
+// Names follow the "<episode>.<lang>.srt" convention players auto-load, with a
+// numeric suffix when several tracks share a language — see
+// domain.SubtitleSidecarName. Each file is written atomically, so an
+// interrupted run cannot leave a half-written subtitle that looks complete.
+func (d *Downloader) WriteSubtitleSidecars(ctx context.Context, job domain.Job, tracks []domain.HLSSubtitleTrack) ([]string, error) {
+	if len(tracks) == 0 {
+		return nil, nil
+	}
+
+	base := strings.TrimSuffix(filepath.Base(job.OutPath), filepath.Ext(job.OutPath))
+	dir := filepath.Dir(job.OutPath)
+	used := make(map[string]bool, len(tracks))
+
+	var written []string
+	for _, t := range tracks {
+		if err := ctx.Err(); err != nil {
+			return written, err
+		}
+
+		vtt, err := os.Open(t.Path)
+		if err != nil {
+			return written, fmt.Errorf("open subtitle track %q: %w", t.Name, err)
+		}
+		var srt strings.Builder
+		convErr := webvtt.ToSRT(&srt, vtt)
+		vtt.Close()
+		if convErr != nil {
+			return written, fmt.Errorf("convert subtitle track %q: %w", t.Name, convErr)
+		}
+
+		info := domain.SubtitleTrackInfo{Name: t.Name, Language: t.Language}
+		outPath := filepath.Join(dir, domain.SubtitleSidecarName(base, info, "srt", used))
+		if err := fsutil.AtomicWrite(outPath, []byte(srt.String()), 0644); err != nil {
+			return written, fmt.Errorf("write subtitle file %q: %w", outPath, err)
+		}
+		written = append(written, outPath)
+
+		d.logger.Info("subtitle written",
+			domain.F("episode", job.Episode.Key.Label()),
+			domain.F("track", t.Name),
+			domain.F("path", outPath),
+		)
+	}
+	return written, nil
+}
+
 func (d *Downloader) MuxHLS(ctx context.Context, job domain.Job, hls *domain.HLSDownloadResult) error {
 	d.logger.Info("muxing HLS streams",
 		domain.F("episode", job.Episode.Key.Label()),
