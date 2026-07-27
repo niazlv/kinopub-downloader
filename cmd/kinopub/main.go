@@ -1261,13 +1261,14 @@ func runCompletion(args []string) int {
 const fishCompletion = `# kinopub fish shell completion
 # Install: kinopub completion fish > ~/.config/fish/completions/kinopub.fish
 
-set -l subcommands login logout doctor completion
+set -l subcommands login logout doctor completion update
 
 # Subcommands
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a login      -d "Save authentication credentials"
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a logout     -d "Remove stored credentials"
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a doctor     -d "Verify files and repair state"
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a completion -d "Generate shell completion script"
+complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a update     -d "Install the latest release"
 
 # Main command flags
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s o -l output        -d "Output directory path" -r -F
@@ -1344,7 +1345,7 @@ _kinopub_completion() {
     local subcmd=""
     for w in "${words[@]:1}"; do
         case "$w" in
-            login|logout|doctor|completion)
+            login|logout|doctor|completion|update)
                 subcmd="$w"
                 break
                 ;;
@@ -1372,6 +1373,12 @@ _kinopub_completion() {
             ;;
         completion)
             COMPREPLY=($(compgen -W "bash fish" -- "$cur"))
+            ;;
+        update)
+            case "$prev" in
+                --proxy) return ;;
+            esac
+            COMPREPLY=($(compgen -W "--check --proxy -v" -- "$cur"))
             ;;
         *)
             # Main command
