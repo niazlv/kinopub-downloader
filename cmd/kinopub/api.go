@@ -16,6 +16,7 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/lib/credstore"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termx"
 	"github.com/niazlv/kinopub-downloader/internal/services/apiclient"
+	"github.com/niazlv/kinopub-downloader/internal/services/apiscraper"
 	"github.com/niazlv/kinopub-downloader/internal/services/kinopubapp"
 	"github.com/niazlv/kinopub-downloader/internal/services/proxyprovider"
 )
@@ -231,4 +232,16 @@ func promptYesNo(question string, def bool) bool {
 	default:
 		return def
 	}
+}
+
+// savedAppSessionApplies reports whether a run with no website cookie should
+// fall back to a saved `login --app` session. It requires both a stored token
+// and an input the API backend can actually resolve — an item link — so a
+// podcast feed run still fails with its own, accurate error.
+func savedAppSessionApplies(inputURL string) bool {
+	if _, err := apiscraper.ParseItemID(inputURL); err != nil {
+		return false
+	}
+	stored, err := credstore.Load()
+	return err == nil && stored.HasAppToken()
 }

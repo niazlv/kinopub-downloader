@@ -529,6 +529,17 @@ func run() int {
 		if fatal {
 			return 1
 		}
+		// Having logged in with `login --app` is a statement of intent: with no
+		// website cookie to fall back on, use that session rather than failing
+		// with "authentication required" while a usable one sits in the store.
+		// Only item links qualify — a podcast feed or --feed-file run has no
+		// API equivalent.
+		if resolvedCookie == "" && feedFile == "" && savedAppSessionApplies(inputURL) {
+			appMode = true
+			userAgent = "" // let the app session supply its own User-Agent
+			notef("using the saved kino.pub app session (no website cookies found). " +
+				"Pass --cookie or `login --cookie` to use the website instead.")
+		}
 	}
 
 	// Build RunConfig.

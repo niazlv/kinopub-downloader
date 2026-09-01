@@ -4,7 +4,11 @@
 package credstore
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 )
@@ -156,5 +160,56 @@ func TestCredentialsPreAppPayloadDecodes(t *testing.T) {
 	}
 	if !got.HasCookie() {
 		t.Error("HasCookie() = false, want true")
+	}
+}
+
+// encryptWith mirrors Save's encryption for a chosen seed, so the legacy-seed
+// migration path can be exercised without a real machine identifier.
+func encryptWith(t *testing.T, seed []byte, creds Credentials) []byte {
+	t.Helper()
+	plaintext, err := json.Marshal(creds)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	block, err := aes.NewCipher(deriveKey(seed))
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("gcm: %v", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		t.Fatalf("nonce: %v", err)
+	}
+	return gcm.Seal(nonce, nonce, plaintext, nil)
+}
+
+func TestDecryptWithRoundTrip(t *testing.T) {
+	want := Credentials{Cookie: "cf=1", UserAgent: "UA", AppToken: "tok"}
+	blob := encryptWith(t, []byte("seed-a"), want)
+
+	got, err := decryptWith([]byte("seed-a"), blob)
+	if err != nil {
+		t.Fatalf("decryptWith: %v", err)
+	}
+	if got != want {
+		t.Errorf("round trip = %+v, want %+v", got, want)
+	}
+}
+
+// A blob written under one seed must not open under another — this is what
+// binds a store to the machine that wrote it.
+func TestDecryptWithWrongSeedFails(t *testing.T) {
+	blob := encryptWith(t, []byte("seed-a"), Credentials{Cookie: "cf=1"})
+	if _, err := decryptWith([]byte("seed-b"), blob); err == nil {
+		t.Fatal("decryptWith with a different seed succeeded, want failure")
+	}
+}
+
+func TestDecryptWithTruncatedBlob(t *testing.T) {
+	if _, err := decryptWith([]byte("seed"), []byte("short")); err == nil {
+		t.Fatal("want error for a blob shorter than the nonce")
 	}
 }

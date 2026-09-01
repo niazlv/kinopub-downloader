@@ -65,6 +65,11 @@ func New(api ItemFetcher, logger domain.Logger, opts ...Option) *Scraper {
 // /item/view/, /item/ and bare-path forms and any trailing /sNeM segment.
 var itemIDRe = regexp.MustCompile(`(?:/item(?:/view)?/|^)(\d+)(?:/|$)`)
 
+// ParseItemID reports whether a URL names a kino.pub item this backend can
+// fetch, returning its numeric id. Callers use it to decide whether the app
+// session applies to a given input — a podcast feed or a local file does not.
+func ParseItemID(raw string) (string, error) { return parseItemID(raw) }
+
 // parseItemID extracts the numeric item id from a URL or accepts a bare numeric
 // id. Returns ErrItemIDUnrecognized when neither form is present.
 func parseItemID(raw string) (string, error) {

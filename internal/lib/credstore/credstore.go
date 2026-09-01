@@ -82,7 +82,7 @@ func (c Credentials) HasAppToken() bool { return c.AppToken != "" }
 
 // credDir returns the directory where the credential file is stored.
 func credDir() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := storeHome()
 	if err != nil {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
@@ -156,6 +156,12 @@ func Save(creds Credentials) error {
 		return fmt.Errorf("write credential file: %w", err)
 	}
 
+	// A store written while running as root (the documented way to read the
+	// mobile app's session) belongs to the user who invoked us, not to root —
+	// otherwise the next unprivileged run cannot read what it just saved.
+	chownToStoreOwner(dir)
+	chownToStoreOwner(path)
+
 	return nil
 }
 
@@ -180,6 +186,31 @@ func Load() (Credentials, error) {
 		return Credentials{}, fmt.Errorf("machine seed: %w", err)
 	}
 
+	creds, err := decryptWith(seed, ciphertext)
+	if err == nil {
+		return creds, nil
+	}
+
+	// A store written by an older version was keyed on a seed this build no
+	// longer prefers — on Android that was the boot id, which changes at every
+	// reboot. Try those seeds before giving up, and migrate anything that opens
+	// to the stable seed so the next reboot does not lose it again.
+	for _, legacy := range legacySeeds() {
+		if migrated, lerr := decryptWith(legacy, ciphertext); lerr == nil {
+			if serr := Save(migrated); serr != nil {
+				// Re-encryption is an optimization; the credentials are valid
+				// either way, so report them rather than failing the run.
+				return migrated, nil
+			}
+			return migrated, nil
+		}
+	}
+
+	return Credentials{}, fmt.Errorf("decrypt credentials failed (wrong machine or corrupted file): %w", err)
+}
+
+// decryptWith opens a stored blob with the key derived from seed.
+func decryptWith(seed, blob []byte) (Credentials, error) {
 	key := deriveKey(seed)
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -192,21 +223,20 @@ func Load() (Credentials, error) {
 	}
 
 	nonceSize := gcm.NonceSize()
-	if len(ciphertext) < nonceSize {
+	if len(blob) < nonceSize {
 		return Credentials{}, fmt.Errorf("credential file is corrupted (too short)")
 	}
 
-	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	nonce, body := blob[:nonceSize], blob[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, body, nil)
 	if err != nil {
-		return Credentials{}, fmt.Errorf("decrypt credentials failed (wrong machine or corrupted file): %w", err)
+		return Credentials{}, err
 	}
 
 	var creds Credentials
 	if err := json.Unmarshal(plaintext, &creds); err != nil {
 		return Credentials{}, fmt.Errorf("parse credentials: %w", err)
 	}
-
 	return creds, nil
 }
 
