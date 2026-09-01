@@ -65,7 +65,17 @@ func ColorError(s string) string {
 // TerminalWidth returns the width of the terminal connected to stdout.
 // If detection fails (e.g., not a TTY), it returns 80.
 func TerminalWidth() int {
-	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	return Width(os.Stdout)
+}
+
+// Width returns the width of the terminal connected to f, or 80 when f is not
+// a terminal. Help and warnings are written to stderr, which can be a terminal
+// of a different size than stdout — or the only terminal in `kinopub … | cat`.
+func Width(f *os.File) int {
+	if f == nil {
+		return defaultWidth
+	}
+	w, _, err := term.GetSize(int(f.Fd()))
 	if err != nil || w <= 0 {
 		return defaultWidth
 	}

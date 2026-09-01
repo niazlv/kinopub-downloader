@@ -16,19 +16,29 @@ import (
 // ttyHandler — colored console output (Req 14.5)
 // ---------------------------------------------------------------------------
 
-// ttyHandler renders log records with ANSI colors per severity level.
+// ttyHandler renders log records in the compact console layout, with ANSI
+// colors per severity level when its Styler allows them.
 // It respects verbosity filtering (Req 14.2-14.4).
 type ttyHandler struct {
 	w         io.Writer
 	verbosity domain.Verbosity
 	coord     *Coordinator
+	st        termx.Styler
 }
 
 // NewTTYHandler creates a handler that writes colored output to w.
 // Records below the verbosity threshold are suppressed.
 // If coord is non-nil, writes are serialized through the coordinator.
 func NewTTYHandler(w io.Writer, verbosity domain.Verbosity, coord *Coordinator) Handler {
-	return &ttyHandler{w: w, verbosity: verbosity, coord: coord}
+	return NewConsoleHandler(w, verbosity, coord, termx.NewStyler(true))
+}
+
+// NewConsoleHandler creates a handler with the same compact layout as
+// NewTTYHandler but with the coloring decided by st. A terminal whose user
+// asked for no color still deserves the short timestamps and aligned levels,
+// so the layout and the escapes are separate choices.
+func NewConsoleHandler(w io.Writer, verbosity domain.Verbosity, coord *Coordinator, st termx.Styler) Handler {
+	return &ttyHandler{w: w, verbosity: verbosity, coord: coord, st: st}
 }
 
 func (h *ttyHandler) Handle(rec Record) {
@@ -47,24 +57,16 @@ func (h *ttyHandler) format(rec Record) string {
 	var b strings.Builder
 
 	// Timestamp in HH:MM:SS format.
-	b.WriteString(termx.Gray)
-	b.WriteString(rec.Time.Format("15:04:05"))
-	b.WriteString(termx.Reset)
+	b.WriteString(h.st.Gray(rec.Time.Format("15:04:05")))
 	b.WriteByte(' ')
 
 	// Level with distinct color per severity.
-	b.WriteString(levelColor(rec.Level))
-	b.WriteString(fmt.Sprintf("%-5s", LevelString(rec.Level)))
-	b.WriteString(termx.Reset)
+	b.WriteString(h.st.Wrap(levelColor(rec.Level), fmt.Sprintf("%-5s", LevelString(rec.Level))))
 	b.WriteByte(' ')
 
 	// Component (if present).
 	if rec.Component != "" {
-		b.WriteString(termx.Cyan)
-		b.WriteByte('[')
-		b.WriteString(rec.Component)
-		b.WriteByte(']')
-		b.WriteString(termx.Reset)
+		b.WriteString(h.st.Cyan("[" + rec.Component + "]"))
 		b.WriteByte(' ')
 	}
 
@@ -74,11 +76,7 @@ func (h *ttyHandler) format(rec Record) string {
 	// Fields.
 	for _, f := range rec.Fields {
 		b.WriteByte(' ')
-		b.WriteString(termx.Gray)
-		b.WriteString(f.Key)
-		b.WriteByte('=')
-		b.WriteString(fmt.Sprintf("%v", f.Value))
-		b.WriteString(termx.Reset)
+		b.WriteString(h.st.Gray(fmt.Sprintf("%s=%v", f.Key, f.Value)))
 	}
 
 	b.WriteByte('\n')

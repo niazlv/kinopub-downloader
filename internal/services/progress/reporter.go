@@ -35,6 +35,9 @@ const (
 type LiveReporter struct {
 	w     io.Writer
 	coord *logx.Coordinator
+	// isTTY gates the ANSI color attributes inside the frame. The in-place
+	// redraw itself is unconditional: a LiveReporter is only ever built for a
+	// terminal, but that terminal's user may have asked for no color.
 	isTTY bool
 
 	mu   sync.Mutex
@@ -86,14 +89,28 @@ type episodeState struct {
 	hlsTracks []domain.TrackProgressInfo
 }
 
+// Option customizes a LiveReporter at construction.
+type Option func(*LiveReporter)
+
+// WithColor decides whether the progress frame carries ANSI color attributes.
+// Colors are on by default; --color=never and NO_COLOR turn them off without
+// giving up the live display.
+func WithColor(on bool) Option {
+	return func(r *LiveReporter) { r.isTTY = on }
+}
+
 // NewLive creates a LiveReporter that writes to w and coordinates with the
 // given logx.Coordinator for TTY line-discipline.
-func NewLive(w io.Writer, coord *logx.Coordinator) *LiveReporter {
-	return &LiveReporter{
+func NewLive(w io.Writer, coord *logx.Coordinator, opts ...Option) *LiveReporter {
+	r := &LiveReporter{
 		w:     w,
 		coord: coord,
 		isTTY: true,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // Start begins reporting for the full series plan.

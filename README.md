@@ -294,7 +294,7 @@ kinopub completion bash >> ~/.bashrc
 source <(kinopub completion bash)
 ```
 
-Дополняются подкоманды (`login`, `logout`, `doctor`), все флаги с описаниями, а для флагов с фиксированными значениями (`--quality`, `--container`, `--verbosity`, `--browser-cookies`) предлагаются варианты.
+Дополняются подкоманды (`login`, `logout`, `doctor`), все флаги с описаниями, а для флагов с фиксированными значениями (`--quality`, `--container`, `--verbosity`, `--browser-cookies`, `--color`) предлагаются варианты.
 
 ## Проверка и восстановление загрузок
 
@@ -406,8 +406,38 @@ kinopub completion <shell>  — сгенерировать скрипт авто
   --log-file            Путь к файлу лога
   -v                    Подробный вывод (debug)
   --verbosity           Уровень логирования: quiet, normal, verbose
+  --color               Когда красить вывод: auto (по умолчанию), always, never
+  --no-color            То же, что --color=never
   --version             Показать версию
 ```
+
+## Цветной вывод
+
+Справка, предупреждения, отчёт `doctor`, интерактивные меню, логи и полоса прогресса раскрашиваются, когда вывод читает терминал, который это умеет. При перенаправлении в файл или в pipe (`kinopub … > log`, `kinopub … | grep`) escape-последовательности не пишутся — файл остаётся чистым.
+
+Решение принимается отдельно для `stdout` и `stderr`, так что `kinopub update > file` продолжит красить диагностику на экране.
+
+Управление вручную:
+
+```bash
+kinopub --color=never  <url>   # никогда, даже в терминале
+kinopub --no-color     <url>   # то же самое
+kinopub --color=always <url>   # всегда, даже в pipe — например для pager
+kinopub --color=always -h | less -R
+```
+
+Учитываются и общепринятые переменные окружения:
+
+| Переменная | Действие |
+|---|---|
+| `NO_COLOR` | выключает цвет (приоритетнее `*_FORCE`), см. [no-color.org](https://no-color.org) |
+| `CLICOLOR_FORCE`, `FORCE_COLOR` | включают цвет даже без терминала (полезно для CI, где логи рендерят ANSI) |
+| `CLICOLOR=0` | выключает цвет |
+| `TERM=dumb` | цвет не используется |
+
+Флаг сильнее переменных: `--color=always` красит при любом `NO_COLOR`, `--color=never` не красит ни при каком `FORCE_COLOR`.
+
+На Windows при включённом цвете консоль переводится в режим обработки ANSI, так что старый `conhost.exe` печатает цвета, а не escape-последовательности.
 
 ## Продвинутое: аргументы ffmpeg
 

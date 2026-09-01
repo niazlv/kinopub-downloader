@@ -72,6 +72,10 @@ func buildInfo() domain.BuildInfo {
 const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
 
 func main() {
+	// The color decision is made before anything can be printed: a bad flag,
+	// a missing URL, or a subcommand with no flag set of its own all produce
+	// output before any parse has happened.
+	setColorMode(detectColorMode(os.Args[1:]))
 	os.Exit(run())
 }
 
@@ -90,10 +94,10 @@ func resolveAuth(cookie, userAgent string, browserCk browserCookiesFlag, site do
 		ck, ckDomain, err := browsercookies.Load(browserCk.value, cookieDomains(site)...)
 		if err != nil {
 			if browserLoadFatal {
-				fmt.Fprintf(os.Stderr, "Error: could not load cookies from browser %q: %v\n", browserCk.value, err)
+				errorf("could not load cookies from browser %q: %v", browserCk.value, err)
 				return "", resolvedUA, true
 			}
-			fmt.Fprintf(os.Stderr, "Warning: could not load cookies from browser %q: %v\n", browserCk.value, err)
+			warnf("could not load cookies from browser %q: %v", browserCk.value, err)
 		} else {
 			resolvedCookie = ck
 			warnCookieDomainMismatch(ckDomain, site)
@@ -108,7 +112,7 @@ func resolveAuth(cookie, userAgent string, browserCk browserCookiesFlag, site do
 		stored, err := credstore.Load()
 		switch {
 		case err != nil:
-			fmt.Fprintf(os.Stderr, "Warning: could not load stored credentials: %v\n", err)
+			warnf("could not load stored credentials: %v", err)
 		case stored.IsEmpty():
 			// Nothing saved; run anonymously.
 		case !storedCredentialsAllowed(stored.Site, site):
@@ -137,8 +141,8 @@ func upgradeSiteDomain(inputURL string, site domain.Site) (string, domain.Site) 
 	if !ok {
 		return inputURL, site
 	}
-	fmt.Fprintf(os.Stderr, "Note: %s is a former domain of the site — targeting %s instead. "+
-		"Pass --no-domain-rewrite to keep the original.\n", site, upgraded)
+	notef("%s is a former domain of the site — targeting %s instead. "+
+		"Pass --no-domain-rewrite to keep the original.", site, upgraded)
 	if rewritten, changed := upgraded.RewriteURL(inputURL); changed {
 		inputURL = rewritten
 	}
@@ -166,8 +170,8 @@ func warnCookieDomainMismatch(cookieDomain string, site domain.Site) {
 	if cookieDomain == "" || site.Owns(cookieDomain) {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "Warning: loaded cookies for %s, but this run targets %s. "+
-		"If it returns 403, log in to %s in your browser and retry.\n",
+	warnf("loaded cookies for %s, but this run targets %s. "+
+		"If it returns 403, log in to %s in your browser and retry.",
 		cookieDomain, site, site)
 }
 
@@ -197,9 +201,9 @@ func warnStoredCredentialsWithheld(storedSite string, site domain.Site) {
 	if origin == "" {
 		origin = strings.Join(domain.KnownSiteHosts, " or ") + " (site not recorded at login)"
 	}
-	fmt.Fprintf(os.Stderr, "Warning: saved credentials for %s are not sent to %s — a stored session "+
+	warnf("saved credentials for %s are not sent to %s — a stored session "+
 		"is only used on the site it was created for. Continuing without them. "+
-		"To use credentials here, run `kinopub login --site %s`, or pass --cookie explicitly.\n",
+		"To use credentials here, run `kinopub login --site %s`, or pass --cookie explicitly.",
 		origin, site, site)
 }
 
@@ -295,67 +299,79 @@ func run() int {
 	fs.BoolVar(&interactive, "interactive", false, "pick quality, then audio, then subtitles interactively (implies --video-menu --audio-menu --subs-menu)")
 	fs.BoolVar(&interactive, "i", false, "interactive mode (shorthand)")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
+	registerColorFlags(fs)
 
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "kinopub %s — download full-fidelity video from kino.watch (ex-kino.pub) and its mirrors\n\n", version)
-		fmt.Fprintf(os.Stderr, "Usage:\n")
-		fmt.Fprintf(os.Stderr, "  kinopub [flags] <url>\n")
-		fmt.Fprintf(os.Stderr, "  kinopub login [flags]       — save authentication credentials\n")
-		fmt.Fprintf(os.Stderr, "  kinopub logout              — remove stored credentials\n")
-		fmt.Fprintf(os.Stderr, "  kinopub doctor [flags]      — verify files and repair state\n")
-		fmt.Fprintf(os.Stderr, "  kinopub update [flags]      — install the latest release\n")
-		fmt.Fprintf(os.Stderr, "  kinopub completion <shell>  — generate shell completion script (bash, fish)\n\n")
-		fmt.Fprintf(os.Stderr, "The <url> can be:\n")
-		fmt.Fprintf(os.Stderr, "  • A site page link:         https://kino.watch/item/view/38290\n")
-		fmt.Fprintf(os.Stderr, "                              https://kino.watch/item/view/38290/s1e1\n")
-		fmt.Fprintf(os.Stderr, "  • A podcast feed link:      https://kino.watch/podcast/get/38290/TOKEN\n")
-		fmt.Fprintf(os.Stderr, "  • A local RSS/XML file:     ./feed.xml\n\n")
-		fmt.Fprintf(os.Stderr, "Any host is accepted — the site is taken from the URL you pass, so mirrors and\n")
-		fmt.Fprintf(os.Stderr, "future domain changes work as-is. Cookies, Referer and feed URLs all follow it.\n")
-		fmt.Fprintf(os.Stderr, "Use --site only when there is no URL to derive the host from (e.g. --feed-file).\n\n")
-		fmt.Fprintf(os.Stderr, "URLs that still use a former domain of the site (kino.pub) are rewritten to the\n")
-		fmt.Fprintf(os.Stderr, "current one (%s) automatically — both the URL you pass and links found\n", domain.DefaultSiteHost)
-		fmt.Fprintf(os.Stderr, "inside feeds. Pass --no-domain-rewrite to keep every URL exactly as given.\n\n")
-		fmt.Fprintf(os.Stderr, "Page links are resolved automatically when credentials are available\n")
-		fmt.Fprintf(os.Stderr, "(via login, --cookie, or --browser-cookies).\n\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nAuthentication:\n")
-		fmt.Fprintf(os.Stderr, "  The site is behind Cloudflare. To download, you need valid session cookies.\n")
-		fmt.Fprintf(os.Stderr, "  The easiest workflow:\n")
-		fmt.Fprintf(os.Stderr, "    1. Log in to the site in your browser\n")
-		fmt.Fprintf(os.Stderr, "    2. Copy cookies from DevTools (Network tab → request header → Cookie)\n")
-		fmt.Fprintf(os.Stderr, "    3. Run: kinopub login --cookie \"paste_here\"\n")
-		fmt.Fprintf(os.Stderr, "    4. Now just: kinopub https://kino.watch/item/view/38290\n\n")
-		fmt.Fprintf(os.Stderr, "  On macOS with Full Disk Access granted to your terminal:\n")
-		fmt.Fprintf(os.Stderr, "    kinopub login --browser-cookies safari\n\n")
-		fmt.Fprintf(os.Stderr, "Examples:\n")
-		fmt.Fprintf(os.Stderr, "  # Download a series (credentials from `kinopub login`)\n")
-		fmt.Fprintf(os.Stderr, "  kinopub -o ./downloads https://kino.watch/item/view/38290\n\n")
-		fmt.Fprintf(os.Stderr, "  # Download using a direct podcast feed link (no auth needed)\n")
-		fmt.Fprintf(os.Stderr, "  kinopub -o ./downloads https://kino.watch/podcast/get/12345/token\n\n")
-		fmt.Fprintf(os.Stderr, "  # List what would be downloaded without writing files\n")
-		fmt.Fprintf(os.Stderr, "  kinopub --dry-run https://kino.watch/item/view/38290\n\n")
-		fmt.Fprintf(os.Stderr, "  # Only seasons 1 and 3-5, 1080p, through a proxy\n")
-		fmt.Fprintf(os.Stderr, "  kinopub --seasons 1,3-5 -q 1080p --proxy socks5://127.0.0.1:1080 <url>\n\n")
-		fmt.Fprintf(os.Stderr, "  # Keep only the AniLibria dub, never the Japanese original\n")
-		fmt.Fprintf(os.Stderr, "  kinopub --audio \"anilibria,!jpn\" https://kino.watch/item/view/38290\n\n")
-		fmt.Fprintf(os.Stderr, "  # Pick the audio track interactively before downloading\n")
-		fmt.Fprintf(os.Stderr, "  kinopub --audio-menu https://kino.watch/item/view/38290\n\n")
-		fmt.Fprintf(os.Stderr, "  # Keep only Russian subtitles, as separate .srt files\n")
-		fmt.Fprintf(os.Stderr, "  kinopub --subs rus --subs-external https://kino.watch/item/view/38290\n\n")
-		fmt.Fprintf(os.Stderr, "  # Pick quality, audio and subtitles interactively, then download\n")
-		fmt.Fprintf(os.Stderr, "  kinopub -i https://kino.watch/item/view/38290\n\n")
-		fmt.Fprintf(os.Stderr, "  # A link to one episode narrows the run by itself\n")
-		fmt.Fprintf(os.Stderr, "  kinopub https://kino.watch/item/view/38290/s1e1\n\n")
-		fmt.Fprintf(os.Stderr, "  # Download nothing but the Russian subtitles\n")
-		fmt.Fprintf(os.Stderr, "  kinopub --subs-only --subs rus https://kino.watch/item/view/38290\n\n")
-		fmt.Fprintf(os.Stderr, "  # One-off with explicit cookies (without saving)\n")
-		fmt.Fprintf(os.Stderr, "  kinopub --cookie \"cf_clearance=...; PHPSESSID=...\" <url>\n\n")
-		fmt.Fprintf(os.Stderr, "  # A mirror or a renamed domain — just pass its URL\n")
-		fmt.Fprintf(os.Stderr, "  kinopub https://kino.example/item/view/38290\n\n")
-		fmt.Fprintf(os.Stderr, "  # Use a locally saved feed file\n")
-		fmt.Fprintf(os.Stderr, "  kinopub --feed-file ./feed.xml -o ./downloads\n")
+		h := newHelpPrinter(os.Stderr, errStyle)
+		h.title("kinopub", version, "download full-fidelity video from kino.watch (ex-kino.pub) and its mirrors")
+
+		h.section("Usage:")
+		h.commands(
+			command{name: "kinopub [flags] <url>"},
+			command{name: "kinopub login [flags]", desc: "save authentication credentials"},
+			command{name: "kinopub logout", desc: "remove stored credentials"},
+			command{name: "kinopub doctor [flags]", desc: "verify files and repair state"},
+			command{name: "kinopub update [flags]", desc: "install the latest release"},
+			command{name: "kinopub completion <shell>", desc: "generate a shell completion script (bash, fish)"},
+		)
+
+		h.section("The <url> can be:")
+		h.bullet("A site page link:      ", "https://kino.watch/item/view/38290")
+		h.bulletCont(len("A site page link:      "), "https://kino.watch/item/view/38290/s1e1")
+		h.bullet("A podcast feed link:   ", "https://kino.watch/podcast/get/38290/TOKEN")
+		h.bullet("A local RSS/XML file:  ", "./feed.xml")
+		h.blank()
+		h.text("Any host is accepted — the site is taken from the URL you pass, so mirrors and " +
+			"future domain changes work as-is. Cookies, Referer and feed URLs all follow it. " +
+			"Use --site only when there is no URL to derive the host from (e.g. --feed-file).")
+		h.blank()
+		h.text("URLs that still use a former domain of the site (kino.pub) are rewritten to the "+
+			"current one (%s) automatically — both the URL you pass and links found inside feeds. "+
+			"Pass --no-domain-rewrite to keep every URL exactly as given.", domain.DefaultSiteHost)
+		h.blank()
+		h.text("Page links are resolved automatically when credentials are available " +
+			"(via login, --cookie, or --browser-cookies).")
+
+		h.groupedFlags(fs, mainFlagGroups)
+
+		h.section("Authentication:")
+		h.line("  The site is behind Cloudflare. To download, you need valid session cookies.")
+		h.line("  The easiest workflow:")
+		h.step(1, "Log in to the site in your browser")
+		h.step(2, "Copy cookies from DevTools (Network tab → request header → Cookie)")
+		h.step(3, "Run: kinopub login --cookie \"paste_here\"")
+		h.step(4, "Now just: kinopub https://kino.watch/item/view/38290")
+		h.blank()
+		h.line("  On macOS with Full Disk Access granted to your terminal:")
+		h.line("    %s", errStyle.Cyan("kinopub login --browser-cookies safari"))
+
+		h.section("Examples:")
+		h.example("Download a series (credentials from `kinopub login`)",
+			"kinopub -o ./downloads https://kino.watch/item/view/38290")
+		h.example("Download using a direct podcast feed link (no auth needed)",
+			"kinopub -o ./downloads https://kino.watch/podcast/get/12345/token")
+		h.example("List what would be downloaded without writing files",
+			"kinopub --dry-run https://kino.watch/item/view/38290")
+		h.example("Only seasons 1 and 3-5, 1080p, through a proxy",
+			"kinopub --seasons 1,3-5 -q 1080p --proxy socks5://127.0.0.1:1080 <url>")
+		h.example("Keep only the AniLibria dub, never the Japanese original",
+			"kinopub --audio \"anilibria,!jpn\" https://kino.watch/item/view/38290")
+		h.example("Pick the audio track interactively before downloading",
+			"kinopub --audio-menu https://kino.watch/item/view/38290")
+		h.example("Keep only Russian subtitles, as separate .srt files",
+			"kinopub --subs rus --subs-external https://kino.watch/item/view/38290")
+		h.example("Pick quality, audio and subtitles interactively, then download",
+			"kinopub -i https://kino.watch/item/view/38290")
+		h.example("A link to one episode narrows the run by itself",
+			"kinopub https://kino.watch/item/view/38290/s1e1")
+		h.example("Download nothing but the Russian subtitles",
+			"kinopub --subs-only --subs rus https://kino.watch/item/view/38290")
+		h.example("One-off with explicit cookies (without saving)",
+			"kinopub --cookie \"cf_clearance=...; PHPSESSID=...\" <url>")
+		h.example("A mirror or a renamed domain — just pass its URL",
+			"kinopub https://kino.example/item/view/38290")
+		h.example("Use a locally saved feed file",
+			"kinopub --feed-file ./feed.xml -o ./downloads")
 	}
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -381,11 +397,11 @@ func run() int {
 	if showVersion {
 		// GPL-3.0 §5(d) asks an interactive program to point users at the
 		// licence and state the absence of warranty.
-		fmt.Printf("kinopub %s\n", buildInfo().Describe())
-		fmt.Printf("Copyright (C) 2026 niazlv\n")
-		fmt.Printf("License GPL-3.0-or-later: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>\n")
-		fmt.Printf("This program comes with ABSOLUTELY NO WARRANTY.\n")
-		fmt.Printf("This is free software: you are free to change and redistribute it.\n")
+		fmt.Printf("%s %s\n", outStyle.Bold("kinopub"), buildInfo().Describe())
+		fmt.Printf("%s\n", outStyle.Gray("Copyright (C) 2026 niazlv"))
+		fmt.Printf("%s\n", outStyle.Gray("License GPL-3.0-or-later: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>"))
+		fmt.Printf("%s\n", outStyle.Gray("This program comes with ABSOLUTELY NO WARRANTY."))
+		fmt.Printf("%s\n", outStyle.Gray("This is free software: you are free to change and redistribute it."))
 		return 0
 	}
 
@@ -395,12 +411,14 @@ func run() int {
 	args := posArgs
 	if feedFile == "" {
 		if len(args) != 1 {
-			fmt.Fprintf(os.Stderr, "Error: %s\n\n", domain.ErrExactlyOneURL.Error())
+			errorf("%s", domain.ErrExactlyOneURL.Error())
+			fmt.Fprintln(os.Stderr)
 			fs.Usage()
 			return 1
 		}
 	} else if len(args) > 1 {
-		fmt.Fprintf(os.Stderr, "Error: at most one URL argument is allowed with --feed-file\n\n")
+		errorf("at most one URL argument is allowed with --feed-file")
+		fmt.Fprintln(os.Stderr)
 		fs.Usage()
 		return 1
 	}
@@ -425,40 +443,40 @@ func run() int {
 	}
 	verb, err := parseVerbosity(verbosity)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
 
 	// Parse container.
 	cont, err := parseContainer(container)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
 
 	// Parse season/episode selections.
 	seasonSel, err := kinopub.ParseSelection(seasons)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
 	episodeSel, err := kinopub.ParseSelection(episodes)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
 
 	// Parse audio-track preference.
 	audioPref, err := kinopub.ParseAudioPreference(audioSel)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
 
 	// Parse subtitle-track preference.
 	subsPref, err := kinopub.ParseSubtitlePreference(subsSel)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
 
@@ -539,7 +557,7 @@ func run() int {
 	// Apply defaults and validate.
 	kinopub.ApplyDefaults(&cfg)
 	if err := kinopub.ValidateConfig(&cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
 
@@ -547,7 +565,7 @@ func run() int {
 	// downloads are performed.
 	if !cfg.DryRun {
 		if _, err := exec.LookPath(cfg.FFmpegPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", domain.ErrFFmpegNotFound.Error())
+			errorf("%s", domain.ErrFFmpegNotFound.Error())
 			return 1
 		}
 	}
@@ -560,7 +578,7 @@ func run() int {
 	// Wire up services.
 	deps, cleanup, err := buildDependencies(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
 	defer cleanup()
@@ -568,13 +586,13 @@ func run() int {
 	// Create app and run.
 	app, err := kinopub.New(deps)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
 
 	res, runErr := app.Run(ctx, cfg)
 	if runErr != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", runErr)
+		errorf("%v", runErr)
 		return 1
 	}
 
@@ -592,18 +610,23 @@ func run() int {
 func exitCodeFor(res domain.RunResult, ctxErr error, dryRun bool) int {
 	switch {
 	case ctxErr != nil:
-		fmt.Fprintf(os.Stderr, "Interrupted: %d of %d episodes completed\n", res.Succeeded, res.Total)
+		fmt.Fprintf(os.Stderr, "%s %d of %d episodes completed\n",
+			errStyle.Yellow("Interrupted:"), res.Succeeded, res.Total)
 		return 130 // conventional status for termination by SIGINT
 	case res.Failed > 0:
-		fmt.Fprintf(os.Stderr, "Finished with errors: %d succeeded, %d failed, %d skipped\n",
-			res.Succeeded, res.Failed, res.Skipped)
+		fmt.Fprintf(os.Stderr, "%s %s succeeded, %s failed, %s skipped\n",
+			errStyle.BoldRed("Finished with errors:"),
+			errStyle.Green(fmt.Sprintf("%d", res.Succeeded)),
+			errStyle.Red(fmt.Sprintf("%d", res.Failed)),
+			errStyle.Yellow(fmt.Sprintf("%d", res.Skipped)))
 		return 1
 	case dryRun:
 		return 0
 	case res.Succeeded == 0 && res.Total > 0:
 		// Nothing failed outright, yet nothing was downloaded either — e.g. every
 		// episode was skipped after repeated media-resolution failures.
-		fmt.Fprintf(os.Stderr, "No episodes were downloaded (%d skipped of %d)\n", res.Skipped, res.Total)
+		fmt.Fprintf(os.Stderr, "%s (%d skipped of %d)\n",
+			errStyle.Yellow("No episodes were downloaded"), res.Skipped, res.Total)
 		return 1
 	default:
 		return 0
@@ -712,7 +735,7 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	// Progress reporter — choose live or log based on TTY.
 	var progReporter domain.ProgressReporter
 	if termx.IsTTY(os.Stderr) {
-		progReporter = progress.NewLive(os.Stderr, coord)
+		progReporter = progress.NewLive(os.Stderr, coord, progress.WithColor(errStyle.Enabled()))
 	} else {
 		progReporter = progress.NewLog(logger)
 	}
@@ -746,17 +769,17 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	// Interactive audio-track picker. Only meaningful when the menu is enabled
 	// and stdin/stderr are a real terminal.
 	if cfg.AudioMenu && termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr) {
-		deps.AudioChooser = audiomenu.New(os.Stdin, os.Stderr, true)
+		deps.AudioChooser = audiomenu.New(os.Stdin, os.Stderr, true, audiomenu.WithColor(errStyle.Enabled()))
 	}
 
 	// Interactive subtitle-track picker, on the same terms as the audio one.
 	if cfg.SubsMenu && termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr) {
-		deps.SubtitleChooser = audiomenu.New(os.Stdin, os.Stderr, true)
+		deps.SubtitleChooser = audiomenu.New(os.Stdin, os.Stderr, true, audiomenu.WithColor(errStyle.Enabled()))
 	}
 
 	// Interactive video-quality picker, likewise.
 	if cfg.VideoMenu && termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr) {
-		deps.VideoChooser = audiomenu.New(os.Stdin, os.Stderr, true)
+		deps.VideoChooser = audiomenu.New(os.Stdin, os.Stderr, true, audiomenu.WithColor(errStyle.Enabled()))
 	}
 
 	return deps, cleanup, nil
@@ -764,10 +787,18 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 
 // buildLogHandlers creates the console log handler based on TTY detection and verbosity.
 func buildLogHandlers(cfg domain.RunConfig, coord *logx.Coordinator) []logx.Handler {
-	if termx.IsTTY(os.Stderr) {
-		return []logx.Handler{logx.NewTTYHandler(os.Stderr, cfg.Verbosity, coord)}
+	return consoleHandlers(cfg.Verbosity, coord)
+}
+
+// consoleHandlers picks the stderr log handler every subcommand shares: the
+// compact, colored layout for a terminal, the timestamped plain one for a file
+// or a pipe. --color=always keeps the compact layout in a pipe, because asking
+// for color is asking for the terminal presentation.
+func consoleHandlers(verb domain.Verbosity, coord *logx.Coordinator) []logx.Handler {
+	if termx.IsTTY(os.Stderr) || errStyle.Enabled() {
+		return []logx.Handler{logx.NewConsoleHandler(os.Stderr, verb, coord, errStyle)}
 	}
-	return []logx.Handler{logx.NewPlainHandler(os.Stderr, cfg.Verbosity, coord)}
+	return []logx.Handler{logx.NewPlainHandler(os.Stderr, verb, coord)}
 }
 
 // parseVerbosity converts a string verbosity flag to domain.Verbosity.
@@ -939,16 +970,23 @@ func runLogin(args []string) int {
 	fs.StringVar(&userAgent, "user-agent", "", "User-Agent to store (should match the browser that issued the cookies)")
 	fs.Var(&browserCk, "browser-cookies", "auto-load cookies from a browser: safari, chrome, firefox, or auto")
 	fs.StringVar(&siteHost, "site", "", "site host to read cookies for, e.g. kino.watch (default: "+strings.Join(domain.KnownSiteHosts, ", then ")+")")
+	registerColorFlags(fs)
 
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Save site authentication credentials (encrypted, machine-bound).\n\n")
-		fmt.Fprintf(os.Stderr, "Usage:\n")
-		fmt.Fprintf(os.Stderr, "  kinopub login --cookie \"cf_clearance=...; _identity=...\" --user-agent \"Mozilla/5.0 ...\"\n")
-		fmt.Fprintf(os.Stderr, "  kinopub login --browser-cookies safari\n\n")
-		fmt.Fprintf(os.Stderr, "Credentials are stored encrypted at ~/.config/kinopub/credentials.enc\n")
-		fmt.Fprintf(os.Stderr, "and can only be decrypted on this machine.\n\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		h := newHelpPrinter(os.Stderr, errStyle)
+		h.text("Save site authentication credentials (encrypted, machine-bound).")
+
+		h.section("Usage:")
+		h.commands(
+			command{name: "kinopub login --cookie \"cf_clearance=...; _identity=...\" --user-agent \"Mozilla/5.0 ...\""},
+			command{name: "kinopub login --browser-cookies safari"},
+		)
+		h.blank()
+		h.text("Credentials are stored encrypted at ~/.config/kinopub/credentials.enc " +
+			"and can only be decrypted on this machine.")
+
+		h.section("Flags:")
+		h.flags(fs)
 	}
 
 	if err := fs.Parse(args); err != nil {
@@ -973,11 +1011,12 @@ func runLogin(args []string) int {
 	if resolvedCookie == "" && browserCk.set {
 		ck, ckDomain, err := browsercookies.Load(browserCk.value, cookieDomains(site)...)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: could not load cookies from browser %q: %v\n", browserCk.value, err)
+			errorf("could not load cookies from browser %q: %v", browserCk.value, err)
 			return 1
 		}
 		resolvedCookie = ck
-		fmt.Fprintf(os.Stderr, "Loaded cookies for %s from browser %q.\n", ckDomain, browserCk.value)
+		fmt.Fprintf(os.Stderr, "Loaded cookies for %s from browser %q.\n",
+			errStyle.Cyan(ckDomain), browserCk.value)
 		// Without --site the search covers every domain the service is known by,
 		// so the domain the cookies actually came from is the one they belong to.
 		if siteHost == "" && ckDomain != "" {
@@ -986,7 +1025,7 @@ func runLogin(args []string) int {
 	}
 
 	if resolvedCookie == "" {
-		fmt.Fprintf(os.Stderr, "Error: no cookies provided. Use --cookie or --browser-cookies.\n")
+		errorf("no cookies provided. Use --cookie or --browser-cookies.")
 		fs.Usage()
 		return 1
 	}
@@ -1005,21 +1044,22 @@ func runLogin(args []string) int {
 	}
 
 	if err := credstore.Save(creds); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
 
-	fmt.Fprintf(os.Stderr, "Credentials for %s saved (encrypted, machine-bound) to ~/.config/kinopub/credentials.enc\n", creds.Site)
+	fmt.Fprintf(os.Stderr, "%s Credentials for %s saved (encrypted, machine-bound) to ~/.config/kinopub/credentials.enc\n",
+		errStyle.Green("✓"), errStyle.Cyan(creds.Site))
 	return 0
 }
 
 // runLogout removes stored credentials.
 func runLogout() int {
 	if err := credstore.Clear(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "Stored credentials removed.\n")
+	fmt.Fprintf(os.Stderr, "%s Stored credentials removed.\n", errStyle.Green("✓"))
 	return 0
 }
 
@@ -1060,25 +1100,32 @@ func runDoctor(args []string) int {
 	fs.Var(&browserCk, "browser-cookies", "auto-load cookies: safari, chrome, firefox, or auto")
 	fs.StringVar(&proxyURL, "proxy", "", "proxy URL (http, https, or socks5)")
 	fs.StringVar(&siteHost, "site", "", "site host to target, e.g. kino.watch (default: "+domain.DefaultSiteHost+")")
+	registerColorFlags(fs)
 
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Verify downloaded files against the state file and repair inconsistencies.\n\n")
-		fmt.Fprintf(os.Stderr, "Usage:\n")
-		fmt.Fprintf(os.Stderr, "  kinopub doctor [flags]\n\n")
-		fmt.Fprintf(os.Stderr, "The doctor checks for:\n")
-		fmt.Fprintf(os.Stderr, "  • Files recorded as completed but missing on disk\n")
-		fmt.Fprintf(os.Stderr, "  • Files that are truncated (smaller than recorded size)\n")
-		fmt.Fprintf(os.Stderr, "  • Files whose duration doesn't match the source\n")
-		fmt.Fprintf(os.Stderr, "    (resolves fresh media URLs via the same pipeline as download)\n")
-		fmt.Fprintf(os.Stderr, "  • State entries with no file path (incomplete records)\n")
-		fmt.Fprintf(os.Stderr, "  • Orphan .tmp files from interrupted downloads\n\n")
-		fmt.Fprintf(os.Stderr, "Duration verification resolves the series from the source (page_link/feed_url\n")
-		fmt.Fprintf(os.Stderr, "in state metadata), gets fresh media URLs, probes them with ffprobe, and\n")
-		fmt.Fprintf(os.Stderr, "compares with local file duration. No hardcoded thresholds.\n\n")
-		fmt.Fprintf(os.Stderr, "With --fix, broken state entries are removed and corrupt files deleted,\n")
-		fmt.Fprintf(os.Stderr, "so the next download run will re-download the affected episodes.\n\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
+		h := newHelpPrinter(os.Stderr, errStyle)
+		h.text("Verify downloaded files against the state file and repair inconsistencies.")
+
+		h.section("Usage:")
+		h.commands(command{name: "kinopub doctor [flags]"})
+
+		h.section("The doctor checks for:")
+		h.bullet("Files recorded as completed but missing on disk", "")
+		h.bullet("Files that are truncated (smaller than recorded size)", "")
+		h.bullet("Files whose duration doesn't match the source", "")
+		h.line("    %s", errStyle.Gray("(resolves fresh media URLs via the same pipeline as download)"))
+		h.bullet("State entries with no file path (incomplete records)", "")
+		h.bullet("Orphan .tmp files from interrupted downloads", "")
+		h.blank()
+		h.text("Duration verification resolves the series from the source (page_link/feed_url " +
+			"in state metadata), gets fresh media URLs, probes them with ffprobe, and " +
+			"compares with local file duration. No hardcoded thresholds.")
+		h.blank()
+		h.text("With --fix, broken state entries are removed and corrupt files deleted, " +
+			"so the next download run will re-download the affected episodes.")
+
+		h.section("Flags:")
+		h.flags(fs)
 	}
 
 	if err := fs.Parse(args); err != nil {
@@ -1115,22 +1162,16 @@ func runDoctor(args []string) int {
 
 	// Set up logger.
 	coord := logx.NewCoordinator(os.Stderr)
-	var handlers []logx.Handler
 	verb := domain.VerbosityNormal
 	if verbose {
 		verb = domain.VerbosityVerbose
 	}
-	if termx.IsTTY(os.Stderr) {
-		handlers = append(handlers, logx.NewTTYHandler(os.Stderr, verb, coord))
-	} else {
-		handlers = append(handlers, logx.NewPlainHandler(os.Stderr, verb, coord))
-	}
-	logger := logx.New(handlers)
+	logger := logx.New(consoleHandlers(verb, coord))
 
 	// Wire up dependencies — same services as the main download command.
 	proxyProv, err := proxyprovider.New(proxyURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
 	httpClient := httpx.WithAuth(proxyProv.HTTPClient(), auth)
@@ -1166,7 +1207,7 @@ func runDoctor(args []string) int {
 
 	report, err := doctor.Run(context.Background(), deps, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
 
@@ -1181,25 +1222,31 @@ func runDoctor(args []string) int {
 
 // printDoctorReport outputs the doctor findings to stderr.
 func printDoctorReport(report *doctor.Report, fixed bool) {
-	fmt.Fprintf(os.Stderr, "\n")
-	fmt.Fprintf(os.Stderr, "Doctor Report\n")
-	fmt.Fprintf(os.Stderr, "─────────────\n")
+	st := errStyle
+	field := func(label, format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "%s %s\n", st.Gray(label), fmt.Sprintf(format, args...))
+	}
+
+	fmt.Fprintf(os.Stderr, "\n%s\n", st.Bold("Doctor Report"))
+	fmt.Fprintf(os.Stderr, "%s\n", st.Gray("─────────────"))
 
 	if report.SeriesTitle != "" {
-		fmt.Fprintf(os.Stderr, "Series:     %s\n", report.SeriesTitle)
+		field("Series:    ", "%s", report.SeriesTitle)
 	}
 	if report.SeriesID != "" {
-		fmt.Fprintf(os.Stderr, "Series ID:  %s\n", report.SeriesID)
+		field("Series ID: ", "%s", report.SeriesID)
 	}
-	fmt.Fprintf(os.Stderr, "State file: %s\n", report.StateFile)
-	fmt.Fprintf(os.Stderr, "Entries:    %d total, %d healthy\n", report.TotalInState, report.Healthy)
+	field("State file:", "%s", report.StateFile)
+	field("Entries:   ", "%d total, %s healthy", report.TotalInState, st.Green(fmt.Sprintf("%d", report.Healthy)))
 	if report.Skipped > 0 {
-		fmt.Fprintf(os.Stderr, "Skipped:    %d (remote links expired, could not verify duration)\n", report.Skipped)
+		field("Skipped:   ", "%s (remote links expired, could not verify duration)",
+			st.Yellow(fmt.Sprintf("%d", report.Skipped)))
 	}
 	fmt.Fprintf(os.Stderr, "\n")
 
 	if !report.HasIssues() {
-		fmt.Fprintf(os.Stderr, "✓ All files are consistent with the state file.\n\n")
+		fmt.Fprintf(os.Stderr, "%s All files are consistent with the state file.\n\n",
+			st.Green("✓"))
 		return
 	}
 
@@ -1224,21 +1271,30 @@ func printDoctorReport(report *doctor.Report, fixed bool) {
 			continue
 		}
 
-		fmt.Fprintf(os.Stderr, "  %s (%d):\n", kind.String(), len(issues))
+		// A lost or damaged file is red; the rest are bookkeeping the --fix
+		// pass can settle, so they read as warnings.
+		heading := st.Yellow(fmt.Sprintf("%s (%d):", kind.String(), len(issues)))
+		if kind == doctor.IssueMissing || kind == doctor.IssueTruncated {
+			heading = st.Red(fmt.Sprintf("%s (%d):", kind.String(), len(issues)))
+		}
+		fmt.Fprintf(os.Stderr, "  %s\n", heading)
 		for _, issue := range issues {
 			if issue.Key != "" {
-				fmt.Fprintf(os.Stderr, "    • %s: %s\n", issue.Key, issue.Detail)
+				fmt.Fprintf(os.Stderr, "    %s %s %s\n",
+					st.Gray("•"), st.Cyan(issue.Key+":"), issue.Detail)
 			} else {
-				fmt.Fprintf(os.Stderr, "    • %s\n", issue.Detail)
+				fmt.Fprintf(os.Stderr, "    %s %s\n", st.Gray("•"), issue.Detail)
 			}
 		}
 		fmt.Fprintf(os.Stderr, "\n")
 	}
 
 	if fixed {
-		fmt.Fprintf(os.Stderr, "✓ State file repaired. Run the download command again to re-download affected episodes.\n\n")
+		fmt.Fprintf(os.Stderr, "%s State file repaired. Run the download command again to re-download affected episodes.\n\n",
+			st.Green("✓"))
 	} else {
-		fmt.Fprintf(os.Stderr, "Run with --fix to repair the state file (broken entries will be removed\n")
+		fmt.Fprintf(os.Stderr, "Run with %s to repair the state file (broken entries will be removed\n",
+			st.Cyan("--fix"))
 		fmt.Fprintf(os.Stderr, "so the next download re-fetches affected episodes).\n\n")
 	}
 }
@@ -1277,13 +1333,16 @@ func runCompletion(args []string) int {
 	case "bash":
 		fmt.Print(bashCompletion)
 	default:
-		fmt.Fprintf(os.Stderr, "Usage: kinopub completion <shell>\n\n")
-		fmt.Fprintf(os.Stderr, "Available shells:\n")
-		fmt.Fprintf(os.Stderr, "  bash   — source <(kinopub completion bash)\n")
-		fmt.Fprintf(os.Stderr, "  fish   — kinopub completion fish | source\n\n")
-		fmt.Fprintf(os.Stderr, "To install permanently:\n")
-		fmt.Fprintf(os.Stderr, "  bash:  kinopub completion bash >> ~/.bashrc\n")
-		fmt.Fprintf(os.Stderr, "  fish:  kinopub completion fish > ~/.config/fish/completions/kinopub.fish\n")
+		h := newHelpPrinter(os.Stderr, errStyle)
+		h.line("%s kinopub completion <shell>", errStyle.Bold("Usage:"))
+		h.section("Available shells:")
+		h.commands(
+			command{name: "bash", desc: "source <(kinopub completion bash)"},
+			command{name: "fish", desc: "kinopub completion fish | source"},
+		)
+		h.section("To install permanently:")
+		h.line("  %s  kinopub completion bash >> ~/.bashrc", errStyle.Cyan("bash:"))
+		h.line("  %s  kinopub completion fish > ~/.config/fish/completions/kinopub.fish", errStyle.Cyan("fish:"))
 		if shell != "" {
 			return 1
 		}
@@ -1335,8 +1394,14 @@ complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l vi
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l no-domain-rewrite -d "Do not rewrite former site domains to the current one"
 complete -c kinopub -n "__fish_seen_subcommand_from update" -l check   -d "Only report whether a newer release exists"
 complete -c kinopub -n "__fish_seen_subcommand_from update" -l proxy   -d "Proxy URL" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l color          -d "When to color output" -r -a "auto\t'A terminal only (default)' always\t'Even when piped' never\t'Never'"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l no-color       -d "Never color output"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s i -l interactive    -d "Pick quality, audio and subtitles interactively"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l version        -d "Print version and exit"
+
+# Color flags are accepted by every subcommand
+complete -c kinopub -n "__fish_seen_subcommand_from login doctor update" -l color    -d "When to color output" -r -a "auto always never"
+complete -c kinopub -n "__fish_seen_subcommand_from login doctor update" -l no-color -d "Never color output"
 
 # login flags
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l cookie          -d "Cookie header to store" -r
@@ -1373,7 +1438,7 @@ _kinopub_completion() {
         --dry-run --cookie --user-agent --header --browser-cookies
         --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu \
         --subs --subs-menu --subs-external --subs-only \\
-        --video-menu --no-domain-rewrite -i --interactive --version"
+        --video-menu --no-domain-rewrite -i --interactive --color --no-color --version"
 
     # Detect which subcommand is active
     local subcmd=""
@@ -1390,9 +1455,10 @@ _kinopub_completion() {
         login)
             case "$prev" in
                 --cookie|--user-agent) return ;;
+                --color) COMPREPLY=($(compgen -W "auto always never" -- "$cur")); return ;;
                 --browser-cookies) COMPREPLY=($(compgen -W "safari chrome firefox auto" -- "$cur")); return ;;
             esac
-            COMPREPLY=($(compgen -W "--cookie --user-agent --browser-cookies" -- "$cur"))
+            COMPREPLY=($(compgen -W "--cookie --user-agent --browser-cookies --color --no-color" -- "$cur"))
             ;;
         logout)
             ;;
@@ -1400,10 +1466,12 @@ _kinopub_completion() {
             case "$prev" in
                 -o|--output|--ffprobe) COMPREPLY=($(compgen -d -- "$cur")); return ;;
                 --cookie|--user-agent|--proxy) return ;;
+                --color) COMPREPLY=($(compgen -W "auto always never" -- "$cur")); return ;;
                 --browser-cookies) COMPREPLY=($(compgen -W "safari chrome firefox auto" -- "$cur")); return ;;
             esac
             COMPREPLY=($(compgen -W "-o --output --fix --clean-tmp -v --skip-probe
-                --ffprobe --cookie --user-agent --browser-cookies --proxy" -- "$cur"))
+                --ffprobe --cookie --user-agent --browser-cookies --proxy
+                --color --no-color" -- "$cur"))
             ;;
         completion)
             COMPREPLY=($(compgen -W "bash fish" -- "$cur"))
@@ -1411,8 +1479,9 @@ _kinopub_completion() {
         update)
             case "$prev" in
                 --proxy) return ;;
+                --color) COMPREPLY=($(compgen -W "auto always never" -- "$cur")); return ;;
             esac
-            COMPREPLY=($(compgen -W "--check --proxy -v" -- "$cur"))
+            COMPREPLY=($(compgen -W "--check --proxy -v --color --no-color" -- "$cur"))
             ;;
         *)
             # Main command
@@ -1426,6 +1495,8 @@ _kinopub_completion() {
                         COMPREPLY=($(compgen -W "mkv mp4" -- "$cur")); return ;;
                     --verbosity)
                         COMPREPLY=($(compgen -W "quiet normal verbose" -- "$cur")); return ;;
+                    --color)
+                        COMPREPLY=($(compgen -W "auto always never" -- "$cur")); return ;;
                     --browser-cookies)
                         COMPREPLY=($(compgen -W "safari chrome firefox auto" -- "$cur")); return ;;
                     --cookie|--user-agent|--proxy|--header|--seasons|--episodes| \
@@ -1496,17 +1567,28 @@ func runUpdate(args []string) int {
 	fs.BoolVar(&checkOnly, "check", false, "only report whether a newer release exists, install nothing")
 	fs.BoolVar(&verbose, "v", false, "verbose output")
 	fs.StringVar(&proxyURL, "proxy", "", "proxy URL (http, https, socks5)")
+	registerColorFlags(fs)
 
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "kinopub update — install the latest release\n\n")
-		fmt.Fprintf(os.Stderr, "Usage:\n  kinopub update [--check] [--proxy URL]\n\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nOnly release builds can replace themselves, and only from the repository\n")
-		fmt.Fprintf(os.Stderr, "they were built from. Development builds report what is available and\n")
-		fmt.Fprintf(os.Stderr, "leave themselves alone.\n")
+		h := newHelpPrinter(os.Stderr, errStyle)
+		h.title("kinopub update", "", "install the latest release")
+
+		h.section("Usage:")
+		h.commands(command{name: "kinopub update [--check] [--proxy URL]"})
+
+		h.section("Flags:")
+		h.flags(fs)
+		h.blank()
+		h.text("Only release builds can replace themselves, and only from the repository " +
+			"they were built from. Development builds report what is available and " +
+			"leave themselves alone.")
 	}
 	if err := fs.Parse(args); err != nil {
+		// `update -h` asked for the help it just got: that is not a failure,
+		// and the other subcommands already treat it as success.
+		if err == flag.ErrHelp {
+			return 0
+		}
 		return 2
 	}
 
@@ -1515,17 +1597,11 @@ func runUpdate(args []string) int {
 		verb = domain.VerbosityVerbose
 	}
 	coord := logx.NewCoordinator(os.Stderr)
-	var handlers []logx.Handler
-	if termx.IsTTY(os.Stderr) {
-		handlers = append(handlers, logx.NewTTYHandler(os.Stderr, verb, coord))
-	} else {
-		handlers = append(handlers, logx.NewPlainHandler(os.Stderr, verb, coord))
-	}
-	logger := logx.New(handlers)
+	logger := logx.New(consoleHandlers(verb, coord))
 
 	proxyProv, err := proxyprovider.New(proxyURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
 
@@ -1537,41 +1613,41 @@ func runUpdate(args []string) int {
 
 	rel, newer, err := up.Check(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: could not check for updates: %v\n", err)
+		errorf("could not check for updates: %v", err)
 		return 1
 	}
 
-	fmt.Printf("Installed: %s\n", info.Describe())
-	fmt.Printf("Latest:    %s\n", rel.Tag)
+	fmt.Printf("%s %s\n", outStyle.Gray("Installed:"), info.Describe())
+	fmt.Printf("%s %s\n", outStyle.Gray("Latest:   "), outStyle.Bold(rel.Tag))
 
 	switch {
 	case domain.IsDevBuild(info.Version):
 		fmt.Printf("\nThis is a development build, so there is nothing to compare it against.\n")
-		fmt.Printf("See %s\n", rel.PageURL)
+		fmt.Printf("See %s\n", outStyle.Cyan(rel.PageURL))
 		return 0
 	case !newer:
-		fmt.Printf("\nAlready up to date.\n")
+		fmt.Printf("\n%s\n", outStyle.Green("Already up to date."))
 		return 0
 	}
 
-	fmt.Printf("\nA newer release is available: %s\n", rel.PageURL)
+	fmt.Printf("\n%s %s\n", outStyle.Yellow("A newer release is available:"), outStyle.Cyan(rel.PageURL))
 	if checkOnly {
 		return 0
 	}
 
 	if ok, why := up.CanSelfUpdate(); !ok {
 		// Not an error: the binary is doing the right thing by declining.
-		fmt.Fprintf(os.Stderr, "\nNot updating automatically — %s.\n", why)
-		fmt.Fprintf(os.Stderr, "Install it manually from %s\n", rel.PageURL)
+		fmt.Fprintln(os.Stderr)
+		notef("not updating automatically — %s. Install it manually from %s", why, rel.PageURL)
 		return 0
 	}
 
-	fmt.Printf("Downloading and verifying…\n")
+	fmt.Printf("%s\n", outStyle.Gray("Downloading and verifying…"))
 	if err := up.Apply(ctx, rel); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errorf("%v", err)
 		return 1
 	}
 
-	fmt.Printf("Updated to %s.\n", rel.Tag)
+	fmt.Printf("%s Updated to %s.\n", outStyle.Green("✓"), outStyle.Bold(rel.Tag))
 	return 0
 }

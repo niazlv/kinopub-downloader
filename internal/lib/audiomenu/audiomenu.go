@@ -23,6 +23,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
+	"github.com/niazlv/kinopub-downloader/internal/lib/termx"
 )
 
 // DefaultTimeout is the window the picker waits for input before defaulting to
@@ -35,12 +36,26 @@ type Chooser struct {
 	in          io.Reader
 	out         io.Writer
 	interactive bool
+	st          termx.Styler
+}
+
+// Option customizes a Chooser at construction.
+type Option func(*Chooser)
+
+// WithColor turns ANSI coloring of the menu on or off. It is off by default so
+// that a caller which has not thought about the terminal writes plain text.
+func WithColor(on bool) Option {
+	return func(c *Chooser) { c.st = termx.NewStyler(on) }
 }
 
 // New builds a Chooser. interactive should be true only when in is a real TTY;
 // when false, ChooseAudio immediately keeps all tracks without prompting.
-func New(in io.Reader, out io.Writer, interactive bool) *Chooser {
-	return &Chooser{in: in, out: out, interactive: interactive}
+func New(in io.Reader, out io.Writer, interactive bool, opts ...Option) *Chooser {
+	c := &Chooser{in: in, out: out, interactive: interactive}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // rawTTY reports whether in is a real terminal whose file descriptor we can
@@ -93,32 +108,35 @@ func (c *Chooser) ChooseVideo(qualities []domain.VideoQualityInfo, timeout time.
 		timeout = DefaultTimeout
 	}
 
-	fmt.Fprintf(c.out, "\nAvailable video qualities (choose within %s, Enter or TAB = automatic):\n",
-		timeout.Round(time.Second))
+	fmt.Fprintf(c.out, "\n%s %s\n",
+		c.st.Bold("Available video qualities"),
+		c.st.Gray(fmt.Sprintf("(choose within %s, Enter or TAB = automatic):", timeout.Round(time.Second))))
 	for i, q := range qualities {
-		fmt.Fprintf(c.out, "  %d. %s\n", i+1, q.Label())
+		fmt.Fprintf(c.out, "  %s %s\n", c.st.Cyan(fmt.Sprintf("%d.", i+1)), q.Label())
 	}
-	fmt.Fprint(c.out, "Selection (e.g. 1; Enter/TAB or 'auto' to keep automatic): ")
+	fmt.Fprintf(c.out, "%s %s ",
+		c.st.Bold("Selection"),
+		c.st.Gray("(e.g. 1; Enter/TAB or 'auto' to keep automatic):"))
 
 	line, ok := c.readSelection(timeout)
 	if !ok {
-		fmt.Fprintln(c.out, "\nNo selection — keeping the automatic quality.")
+		fmt.Fprintln(c.out, "\n"+c.st.Yellow("No selection — keeping the automatic quality."))
 		return -1, nil
 	}
 
 	sel := strings.ToLower(strings.TrimSpace(line))
 	switch sel {
 	case "", "auto", "automatic", "optimal":
-		fmt.Fprintln(c.out, "Keeping the automatic quality.")
+		fmt.Fprintln(c.out, c.st.Gray("Keeping the automatic quality."))
 		return -1, nil
 	}
 
 	n, err := strconv.Atoi(sel)
 	if err != nil || n < 1 || n > len(qualities) {
-		fmt.Fprintf(c.out, "Invalid selection — keeping the automatic quality.\n")
+		fmt.Fprintf(c.out, "%s\n", c.st.Yellow("Invalid selection — keeping the automatic quality."))
 		return -1, nil
 	}
-	fmt.Fprintf(c.out, "Using %s for every episode.\n", qualities[n-1].Label())
+	fmt.Fprintf(c.out, "%s\n", c.st.Green(fmt.Sprintf("Using %s for every episode.", qualities[n-1].Label())))
 	return n - 1, nil
 }
 
@@ -142,20 +160,20 @@ func (c *Chooser) chooseTracks(tracks []domain.TrackInfo, timeout time.Duration,
 
 	line, ok := c.readSelection(timeout)
 	if !ok {
-		fmt.Fprintf(c.out, "\nNo selection — keeping all %s tracks.\n", kind.noun)
+		fmt.Fprintf(c.out, "\n%s\n", c.st.Yellow(fmt.Sprintf("No selection — keeping all %s tracks.", kind.noun)))
 		return nil, nil
 	}
 
 	sel := strings.ToLower(strings.TrimSpace(line))
 	switch sel {
 	case "", "all", "*", "none":
-		fmt.Fprintf(c.out, "Keeping all %s tracks.\n", kind.noun)
+		fmt.Fprintf(c.out, "%s\n", c.st.Gray(fmt.Sprintf("Keeping all %s tracks.", kind.noun)))
 		return nil, nil
 	}
 
 	idx, err := parseIndexSelection(sel, len(tracks))
 	if err != nil {
-		fmt.Fprintf(c.out, "Invalid selection (%v) — keeping all %s tracks.\n", err, kind.noun)
+		fmt.Fprintf(c.out, "%s\n", c.st.Yellow(fmt.Sprintf("Invalid selection (%v) — keeping all %s tracks.", err, kind.noun)))
 		return nil, nil
 	}
 	if len(idx) == 0 {
@@ -166,8 +184,9 @@ func (c *Chooser) chooseTracks(tracks []domain.TrackInfo, timeout time.Duration,
 
 // render prints the prompt and track list.
 func (c *Chooser) render(tracks []domain.TrackInfo, timeout time.Duration, kind trackKind) {
-	fmt.Fprintf(c.out, "\nAvailable %s tracks (choose within %s, Enter or TAB = all):\n",
-		kind.noun, timeout.Round(time.Second))
+	fmt.Fprintf(c.out, "\n%s %s\n",
+		c.st.Bold(fmt.Sprintf("Available %s tracks", kind.noun)),
+		c.st.Gray(fmt.Sprintf("(choose within %s, Enter or TAB = all):", timeout.Round(time.Second))))
 	for i, t := range tracks {
 		label := t.Name
 		if label == "" {
@@ -179,9 +198,11 @@ func (c *Chooser) render(tracks []domain.TrackInfo, timeout time.Duration, kind 
 		if t.Language != "" && !strings.Contains(strings.ToLower(label), strings.ToLower(t.Language)) {
 			label = fmt.Sprintf("%s [%s]", label, t.Language)
 		}
-		fmt.Fprintf(c.out, "  %d. %s\n", i+1, label)
+		fmt.Fprintf(c.out, "  %s %s\n", c.st.Cyan(fmt.Sprintf("%d.", i+1)), label)
 	}
-	fmt.Fprint(c.out, "Selection (e.g. 1,3 or 2-3; Enter/TAB or 'all' to keep everything): ")
+	fmt.Fprintf(c.out, "%s %s ",
+		c.st.Bold("Selection"),
+		c.st.Gray("(e.g. 1,3 or 2-3; Enter/TAB or 'all' to keep everything):"))
 }
 
 // readSelection reads the user's selection within timeout. When in is a real
