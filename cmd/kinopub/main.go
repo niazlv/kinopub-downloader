@@ -116,8 +116,10 @@ func resolveAuth(cookie, userAgent string, browserCk browserCookiesFlag, site do
 		switch {
 		case err != nil:
 			warnf("could not load stored credentials: %v", err)
-		case stored.IsEmpty():
-			// Nothing saved; run anonymously.
+		case !stored.HasCookie():
+			// No website session saved; run anonymously. An app-token-only
+			// login lands here: its User-Agent belongs to the Android client
+			// and must not be attached to website requests.
 		case !storedCredentialsAllowed(stored.Site, site):
 			warnStoredCredentialsWithheld(stored.Site, site)
 		default:
@@ -260,10 +262,10 @@ func run() int {
 		interactive bool
 		siteHost    string
 		keepDomains bool
-		apiMode     bool
-		apiToken    string
-		apiBase     string
-		apiCodec    string
+		appMode     bool
+		appToken    string
+		appBase     string
+		appCodec    string
 	)
 
 	fs := flag.NewFlagSet("kinopub", flag.ContinueOnError)
@@ -305,10 +307,10 @@ func run() int {
 	fs.BoolVar(&videoMenu, "video-menu", false, "show an interactive video-quality picker before downloading (TTY only)")
 	fs.BoolVar(&interactive, "interactive", false, "pick quality, then audio, then subtitles interactively (implies --video-menu --audio-menu --subs-menu)")
 	fs.BoolVar(&interactive, "i", false, "interactive mode (shorthand)")
-	fs.BoolVar(&apiMode, "api", false, "use the kino.pub JSON API with a mobile-app access token instead of website cookies (reuses the app's device slot)")
-	fs.StringVar(&apiToken, "api-token", "", "kino.pub API access token for --api (default: read from the installed mobile app on a rooted device)")
-	fs.StringVar(&apiBase, "api-base", "", "override the kino.pub JSON API base URL (default: "+kinopubapp.DefaultAPIBase+")")
-	fs.StringVar(&apiCodec, "api-codec", "", "preferred codec family for --api downloads: h264 (default) or h265")
+	fs.BoolVar(&appMode, "app", false, "download using the installed kino.pub app's session (its API token) instead of website cookies — reuses the app's device slot, no new login")
+	fs.StringVar(&appToken, "app-token", "", "app access token for --app (default: the token saved by `login --app`, else read from the installed app when run as root)")
+	fs.StringVar(&appBase, "app-base", "", "override the kino.pub JSON API base URL for --app (default: "+kinopubapp.DefaultAPIBase+")")
+	fs.StringVar(&appCodec, "app-codec", "", "preferred codec family for --app downloads: h264 (default) or h265")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 	registerColorFlags(fs)
 
@@ -346,15 +348,23 @@ func run() int {
 		h.groupedFlags(fs, mainFlagGroups)
 
 		h.section("Authentication:")
-		h.line("  The site is behind Cloudflare. To download, you need valid session cookies.")
-		h.line("  The easiest workflow:")
+		h.line("  Two ways to authenticate — pick one:")
+		h.blank()
+		h.line("  %s the site is behind Cloudflare, so you need valid session cookies:", errStyle.Bold("A) Website cookies —"))
 		h.step(1, "Log in to the site in your browser")
 		h.step(2, "Copy cookies from DevTools (Network tab → request header → Cookie)")
 		h.step(3, "Run: kinopub login --cookie \"paste_here\"")
 		h.step(4, "Now just: kinopub https://kino.watch/item/view/38290")
+		h.line("     On macOS with Full Disk Access granted to your terminal:")
+		h.line("       %s", errStyle.Cyan("kinopub login --browser-cookies safari"))
 		h.blank()
-		h.line("  On macOS with Full Disk Access granted to your terminal:")
-		h.line("    %s", errStyle.Cyan("kinopub login --browser-cookies safari"))
+		h.line("  %s reuse the token of the installed kino.pub Android app", errStyle.Bold("B) Mobile app session (--app) —"))
+		h.line("     (no new device slot, no browser). Reading the token needs root, which you")
+		h.line("     grant yourself — the tool never elevates:")
+		h.step(1, "Save it once under root:  su -c 'kinopub login --app'   (or: sudo kinopub login --app)")
+		h.step(2, "Then just: kinopub --app https://kino.pub/item/view/126715")
+		h.line("     No root? Pass a token you already have:")
+		h.line("       %s", errStyle.Cyan("kinopub login --app --app-token <TOKEN>"))
 
 		h.section("Examples:")
 		h.example("Download a series (credentials from `kinopub login`)",
@@ -379,6 +389,8 @@ func run() int {
 			"kinopub --subs-only --subs rus https://kino.watch/item/view/38290")
 		h.example("One-off with explicit cookies (without saving)",
 			"kinopub --cookie \"cf_clearance=...; PHPSESSID=...\" <url>")
+		h.example("Use the installed app's session (after `login --app`)",
+			"kinopub --app https://kino.pub/item/view/126715")
 		h.example("A mirror or a renamed domain — just pass its URL",
 			"kinopub https://kino.example/item/view/38290")
 		h.example("Use a locally saved feed file",
@@ -511,7 +523,7 @@ func run() int {
 	//   - --api:   a mobile-app OAuth access token used as a Bearer, with the
 	//              app's User-Agent so requests blend in. No cookie is involved.
 	var resolvedCookie string
-	if !apiMode {
+	if !appMode {
 		var fatal bool
 		resolvedCookie, userAgent, fatal = resolveAuth(cookie, userAgent, browserCk, site, true)
 		if fatal {
@@ -557,10 +569,10 @@ func run() int {
 		SubsExternal:    subsExtern,
 		SubtitlesOnly:   subsOnly,
 		VideoMenu:       videoMenu,
-		APIMode:         apiMode,
-		APIToken:        apiToken,
-		APIBase:         apiBase,
-		APICodec:        apiCodec,
+		AppMode:         appMode,
+		AppToken:        appToken,
+		APIBase:         appBase,
+		AppCodec:        appCodec,
 	}
 
 	// A page link may already point at one episode ("…/item/view/38290/s1e1");
@@ -600,8 +612,8 @@ func run() int {
 	// (reading the installed app when allowed), validate the token, and warn on
 	// any drift from the built-in baseline. Failure here is terminal: there is
 	// no cookie fallback in API mode.
-	if cfg.APIMode {
-		if code := prepareAPIConfig(ctx, &cfg); code != 0 {
+	if cfg.AppMode {
+		if code := prepareAppSession(ctx, &cfg); code != 0 {
 			return code
 		}
 	}
@@ -789,15 +801,15 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	// Optional HLS pipeline. Two ways to feed it:
 	//   - --api: the JSON API backend, which fetches items with a Bearer token
 	//     and yields signed hls4 manifests. No cookie needed; the token and the
-	//     app User-Agent were resolved into cfg by prepareAPIConfig.
+	//     app User-Agent were resolved into cfg by prepareAppSession.
 	//   - website: the HTML page scraper, available only when a cookie is
 	//     present (the player page is behind Cloudflare + auth).
 	switch {
-	case cfg.APIMode:
-		apiCli := apiclient.New(proxyProv.HTTPClient(), cfg.APIBase, cfg.APIToken,
+	case cfg.AppMode:
+		apiCli := apiclient.New(proxyProv.HTTPClient(), cfg.APIBase, cfg.AppToken,
 			apiclient.WithUserAgent(cfg.UserAgent), apiclient.WithLogger(logger))
 		deps.PageScraper = apiscraper.New(apiCli, logger,
-			apiscraper.WithPreferredCodec(cfg.APICodec))
+			apiscraper.WithPreferredCodec(cfg.AppCodec))
 		deps.HLSDownloader = hlsdownloader.New(httpClient, auth, logger,
 			hlsdownloader.WithConcurrency(cfg.MaxConcurrency),
 			hlsdownloader.WithProxy(proxyProv.ProxyURL()))
@@ -1008,23 +1020,46 @@ func runLogin(args []string) int {
 		userAgent string
 		browserCk browserCookiesFlag
 		siteHost  string
+		appMode   bool
+		appToken  string
+		appBase   string
+		proxyURL  string
 	)
 
 	fs.StringVar(&cookie, "cookie", "", "raw Cookie header value to store")
-	fs.StringVar(&userAgent, "user-agent", "", "User-Agent to store (should match the browser that issued the cookies)")
+	fs.StringVar(&userAgent, "user-agent", "", "User-Agent to store (browser UA for cookies; the app's UA for --app)")
 	fs.Var(&browserCk, "browser-cookies", "auto-load cookies from a browser: safari, chrome, firefox, or auto")
 	fs.StringVar(&siteHost, "site", "", "site host to read cookies for, e.g. kino.watch (default: "+strings.Join(domain.KnownSiteHosts, ", then ")+")")
+	fs.BoolVar(&appMode, "app", false, "save the installed kino.pub app's session (its API token) instead of a website cookie — reuses the app's device slot")
+	fs.StringVar(&appToken, "app-token", "", "app access token to save for --app (default: read from the installed app when run as root)")
+	fs.StringVar(&appBase, "app-base", "", "override the kino.pub JSON API base URL for --app (default: "+kinopubapp.DefaultAPIBase+")")
+	fs.StringVar(&proxyURL, "proxy", "", "proxy URL used to validate the --app token (http, https, socks5)")
 	registerColorFlags(fs)
 
 	fs.Usage = func() {
 		h := newHelpPrinter(os.Stderr, errStyle)
-		h.text("Save site authentication credentials (encrypted, machine-bound).")
+		h.text("Save authentication (encrypted, machine-bound). Two independent methods:")
 
-		h.section("Usage:")
+		h.section("Website cookies (Cloudflare session):")
 		h.commands(
 			command{name: "kinopub login --cookie \"cf_clearance=...; _identity=...\" --user-agent \"Mozilla/5.0 ...\""},
 			command{name: "kinopub login --browser-cookies safari"},
 		)
+
+		h.section("kino.pub mobile app session (reuses the app's device slot):")
+		h.commands(
+			command{name: "kinopub login --app", desc: "read the token from the installed app (must run as root)"},
+			command{name: "kinopub login --app --app-token <TOKEN>", desc: "save a token you already have (no root)"},
+		)
+		h.blank()
+		h.text("--app takes the access token the installed kino.pub Android app already holds, " +
+			"so no new device slot is claimed. Reading it from the app needs the process to be " +
+			"root — the tool never elevates itself, so run it under root yourself:")
+		h.line("    %s", errStyle.Cyan("su -c 'kinopub login --app'      # Android / Termux"))
+		h.line("    %s", errStyle.Cyan("sudo kinopub login --app         # Linux / desktop"))
+		h.blank()
+		h.text("Then download without root or flags:  %s", errStyle.Cyan("kinopub --app https://kino.pub/item/view/126715"))
+
 		h.blank()
 		h.text("Credentials are stored encrypted at ~/.config/kinopub/credentials.enc " +
 			"and can only be decrypted on this machine.")
@@ -1038,6 +1073,14 @@ func runLogin(args []string) int {
 			return 0
 		}
 		return 1
+	}
+
+	// The app-session method is a separate flow: resolve, validate and save the
+	// installed app's token, then stop. It shares no state with the cookie path.
+	if appMode {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return loginApp(ctx, appToken, userAgent, appBase, proxyURL)
 	}
 
 	// Handle --browser-cookies consuming the next positional arg.
@@ -1436,6 +1479,10 @@ complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l su
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-only      -d "Download only subtitles, skipping video/audio"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l video-menu     -d "Show interactive video-quality picker"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l no-domain-rewrite -d "Do not rewrite former site domains to the current one"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l app            -d "Use the installed kino.pub app's session (its API token)"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l app-token      -d "App access token for --app" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l app-base       -d "Override the kino.pub JSON API base URL" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l app-codec      -d "Preferred codec for --app: h264 or h265" -r -a "h264 h265"
 complete -c kinopub -n "__fish_seen_subcommand_from update" -l check   -d "Only report whether a newer release exists"
 complete -c kinopub -n "__fish_seen_subcommand_from update" -l proxy   -d "Proxy URL" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l color          -d "When to color output" -r -a "auto\t'A terminal only (default)' always\t'Even when piped' never\t'Never'"
@@ -1451,6 +1498,10 @@ complete -c kinopub -n "__fish_seen_subcommand_from login doctor update" -l no-c
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l cookie          -d "Cookie header to store" -r
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l user-agent      -d "User-Agent to store" -r
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l browser-cookies -d "Auto-load cookies from browser" -r -a "safari chrome firefox auto"
+complete -c kinopub -n "__fish_seen_subcommand_from login" -l app             -d "Save the installed kino.pub app's session (its API token)"
+complete -c kinopub -n "__fish_seen_subcommand_from login" -l app-token       -d "App access token to save for --app" -r
+complete -c kinopub -n "__fish_seen_subcommand_from login" -l app-base        -d "Override the kino.pub JSON API base URL" -r
+complete -c kinopub -n "__fish_seen_subcommand_from login" -l proxy           -d "Proxy URL to validate the --app token" -r
 
 # doctor flags
 complete -c kinopub -n "__fish_seen_subcommand_from doctor" -s o -l output         -d "Output directory to check" -r -F
@@ -1482,7 +1533,8 @@ _kinopub_completion() {
         --dry-run --cookie --user-agent --header --browser-cookies
         --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu \
         --subs --subs-menu --subs-external --subs-only \\
-        --video-menu --no-domain-rewrite -i --interactive --color --no-color --version"
+        --video-menu --no-domain-rewrite -i --interactive \
+        --app --app-token --app-base --app-codec --color --no-color --version"
 
     # Detect which subcommand is active
     local subcmd=""
@@ -1498,11 +1550,11 @@ _kinopub_completion() {
     case "$subcmd" in
         login)
             case "$prev" in
-                --cookie|--user-agent) return ;;
+                --cookie|--user-agent|--app-token|--app-base|--proxy) return ;;
                 --color) COMPREPLY=($(compgen -W "auto always never" -- "$cur")); return ;;
                 --browser-cookies) COMPREPLY=($(compgen -W "safari chrome firefox auto" -- "$cur")); return ;;
             esac
-            COMPREPLY=($(compgen -W "--cookie --user-agent --browser-cookies --color --no-color" -- "$cur"))
+            COMPREPLY=($(compgen -W "--cookie --user-agent --browser-cookies --app --app-token --app-base --proxy --color --no-color" -- "$cur"))
             ;;
         logout)
             ;;

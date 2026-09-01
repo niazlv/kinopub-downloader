@@ -47,12 +47,38 @@ type Credentials struct {
 	Cookie    string `json:"cookie"`
 	UserAgent string `json:"user_agent"`
 	Site      string `json:"site,omitempty"`
+
+	// AppToken is the access token taken from the installed kino.pub mobile
+	// app, used by --app runs. It is stored alongside the cookie rather than
+	// instead of it: the two authorize different backends (the JSON API vs the
+	// website) and a user may hold both. Empty when the user never ran
+	// `login --app`.
+	AppToken string `json:"app_token,omitempty"`
+
+	// AppUserAgent is the User-Agent to send with the app token — the mobile
+	// app's, not a browser's. It is kept separate from UserAgent (the browser
+	// UA that pairs with Cookie) so holding both sessions does not make one
+	// overwrite the other's User-Agent.
+	AppUserAgent string `json:"app_user_agent,omitempty"`
+
+	// APIBase is the API origin the token was validated against, so a run
+	// reuses the same one without re-specifying it. Empty means the default.
+	APIBase string `json:"api_base,omitempty"`
 }
 
 // IsEmpty reports whether the credentials carry no useful data.
 func (c Credentials) IsEmpty() bool {
-	return c.Cookie == "" && c.UserAgent == ""
+	return c.Cookie == "" && c.UserAgent == "" && c.AppToken == ""
 }
+
+// HasCookie reports whether a website session is stored. It is distinct from
+// IsEmpty because an `login --app` saves a token and the app's User-Agent but
+// no cookie: a website run must treat that as "nothing saved" rather than adopt
+// an Android User-Agent that matches no browser session.
+func (c Credentials) HasCookie() bool { return c.Cookie != "" }
+
+// HasAppToken reports whether an app session is stored.
+func (c Credentials) HasAppToken() bool { return c.AppToken != "" }
 
 // credDir returns the directory where the credential file is stored.
 func credDir() (string, error) {

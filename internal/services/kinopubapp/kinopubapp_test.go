@@ -217,8 +217,8 @@ func TestReadTokenFromApp(t *testing.T) {
 
 func TestReadTokenNoRoot(t *testing.T) {
 	app := New(nil, nopLogger())
-	if _, err := app.ReadToken(context.Background()); !errors.Is(err, domain.ErrAPITokenUnavailable) {
-		t.Fatalf("err = %v, want ErrAPITokenUnavailable", err)
+	if _, err := app.ReadToken(context.Background()); !errors.Is(err, domain.ErrAppTokenUnavailable) {
+		t.Fatalf("err = %v, want ErrAppTokenUnavailable", err)
 	}
 }
 

@@ -116,7 +116,7 @@ func (r *Runner) Available(_ context.Context) bool {
 // arguments themselves (see quote).
 func (r *Runner) Run(ctx context.Context, script string) ([]byte, error) {
 	if r.euid() != 0 {
-		return nil, fmt.Errorf("%w: not running as root (the tool never elevates itself)", domain.ErrAPITokenUnavailable)
+		return nil, fmt.Errorf("%w: not running as root (the tool never elevates itself)", domain.ErrAppTokenUnavailable)
 	}
 	return r.exec(ctx, rootShell, "-c", script)
 }

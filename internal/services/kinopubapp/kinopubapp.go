@@ -59,21 +59,21 @@ func (a *App) RootAvailable(ctx context.Context) bool {
 // ReadToken reads the OAuth session the app persisted in its SharedPreferences.
 // It requires root; without it (or without the app installed) the caller must
 // obtain the token another way. A missing or tokenless store is reported as
-// ErrAPITokenUnavailable so the CLI can print the same actionable message
+// ErrAppTokenUnavailable so the CLI can print the same actionable message
 // regardless of the underlying cause.
 func (a *App) ReadToken(ctx context.Context) (Token, error) {
 	if a.su == nil {
-		return Token{}, domain.ErrAPITokenUnavailable
+		return Token{}, domain.ErrAppTokenUnavailable
 	}
 	data, err := a.su.ReadAppFile(ctx, Package, loginPrefsPath)
 	if err != nil {
 		a.debug("cannot read app login store", domain.F("error", err.Error()))
-		return Token{}, domain.ErrAPITokenUnavailable
+		return Token{}, domain.ErrAppTokenUnavailable
 	}
 	tok, err := parseLoginXML(data)
 	if err != nil {
 		a.debug("cannot parse app login store", domain.F("error", err.Error()))
-		return Token{}, domain.ErrAPITokenUnavailable
+		return Token{}, domain.ErrAppTokenUnavailable
 	}
 	return tok, nil
 }

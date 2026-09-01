@@ -510,8 +510,8 @@ var mainFlagGroups = []flagGroup{
 		"site", "no-domain-rewrite", "proxy", "cookie", "user-agent", "header",
 		"browser-cookies", "feed-file",
 	}},
-	{title: "kino.pub app token (--api):", names: []string{
-		"api", "api-token", "api-base", "api-codec",
+	{title: "kino.pub app session (--app):", names: []string{
+		"app", "app-token", "app-base", "app-codec",
 	}},
 	{title: "Transfer and ffmpeg:", names: []string{
 		"c", "concurrency", "no-chunked", "ffmpeg", "ffmpeg-args", "x",

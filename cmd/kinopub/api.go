@@ -13,64 +13,128 @@ import (
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
 	"github.com/niazlv/kinopub-downloader/internal/lib/androidroot"
+	"github.com/niazlv/kinopub-downloader/internal/lib/credstore"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termx"
 	"github.com/niazlv/kinopub-downloader/internal/services/apiclient"
 	"github.com/niazlv/kinopub-downloader/internal/services/kinopubapp"
 	"github.com/niazlv/kinopub-downloader/internal/services/proxyprovider"
 )
 
-// prepareAPIConfig resolves everything --api needs into cfg: the access token,
-// the app-matching User-Agent, and the API base URL. It reads the installed
-// mobile app only when this process is already running as root — it never
-// elevates itself — warns on (and lets the user resolve) any drift from the
-// built-in baseline, and validates the token against the API so an expired one
-// is reported clearly up front. It returns a process exit code: 0 to continue,
-// non-zero to abort.
-func prepareAPIConfig(ctx context.Context, cfg *domain.RunConfig) int {
-	// The on-device reader uses root only if the process already holds it; it
-	// does not invoke su/sudo. When not root, the app-read paths simply fail and
-	// the user is asked to supply a token or re-run under root themselves.
-	runner := androidroot.New(androidroot.OSExec)
-	app := kinopubapp.New(runner, nil)
+// newAppIntrospector builds the reader for the installed kino.pub app. The
+// reader uses root only if the process already holds it — it never invokes
+// su/sudo — so on an unprivileged process the app-read paths simply fail and
+// the caller falls back to a stored/explicit token.
+func newAppIntrospector() *kinopubapp.App {
+	return kinopubapp.New(androidroot.New(androidroot.OSExec), nil)
+}
 
-	// Fingerprint is best-effort: OS release is read without root, the rest
-	// from the APK when readable, otherwise the baseline. It never fails.
-	fp := app.Fingerprint(ctx)
+// prepareAppSession resolves everything --app needs into cfg for a download
+// run: the access token, the app-matching User-Agent, and the API base URL. It
+// prefers, in order, an explicit flag, the session saved by `login --app`, then
+// reading the installed app (root only). It validates the token so an expired
+// one is reported up front. Returns a process exit code: 0 to continue.
+func prepareAppSession(ctx context.Context, cfg *domain.RunConfig) int {
+	app := newAppIntrospector()
 
-	// User-Agent: an explicit --user-agent always wins. Otherwise use the
-	// app's, prompting on drift.
-	if cfg.UserAgent == "" {
-		cfg.UserAgent = resolveAPIUserAgent(fp)
+	// Fill any gaps from a saved `login --app` session so a normal run needs no
+	// root and no flags. Explicit flags on cfg always take precedence.
+	if cfg.AppToken == "" || cfg.UserAgent == "" || cfg.APIBase == "" {
+		if stored, err := credstore.Load(); err == nil && stored.HasAppToken() {
+			if cfg.AppToken == "" {
+				cfg.AppToken = stored.AppToken
+			}
+			if cfg.UserAgent == "" {
+				cfg.UserAgent = stored.AppUserAgent
+			}
+			if cfg.APIBase == "" {
+				cfg.APIBase = stored.APIBase
+			}
+		}
 	}
 
-	// Access token: an explicit --api-token wins; otherwise read it from the
-	// installed app (requires root/elevation).
-	if cfg.APIToken == "" {
+	// User-Agent: explicit or stored wins; otherwise the app's fingerprint,
+	// prompting if it drifts from the baseline.
+	if cfg.UserAgent == "" {
+		cfg.UserAgent = appUserAgent(app.Fingerprint(ctx))
+	}
+
+	// Token: explicit or stored wins; otherwise read from the installed app.
+	if cfg.AppToken == "" {
 		tok, err := app.ReadToken(ctx)
 		if err != nil {
 			reportTokenUnavailable(app.RootAvailable(ctx))
 			return 1
 		}
-		cfg.APIToken = tok.Access
+		cfg.AppToken = tok.Access
 	}
 
 	if cfg.APIBase == "" {
 		cfg.APIBase = kinopubapp.DefaultAPIBase
 	}
 
-	// Validate the token now so an expired one produces an actionable message
-	// rather than a confusing mid-run failure.
-	if code := validateAPIToken(ctx, cfg); code != 0 {
+	if _, code := validateAppToken(ctx, cfg.ProxyURL, cfg.APIBase, cfg.AppToken, cfg.UserAgent); code != 0 {
 		return code
 	}
 	return 0
 }
 
-// resolveAPIUserAgent returns the User-Agent to send, handling drift from the
+// loginApp implements `login --app`: it obtains the app session (from an
+// explicit token or by reading the installed app under root), validates it, and
+// saves it encrypted so later runs need neither root nor flags. An existing
+// website (cookie) login is preserved. Returns a process exit code.
+func loginApp(ctx context.Context, explicitToken, explicitUA, apiBase, proxyURL string) int {
+	app := newAppIntrospector()
+
+	ua := explicitUA
+	if ua == "" {
+		ua = appUserAgent(app.Fingerprint(ctx))
+	}
+
+	token := explicitToken
+	if token == "" {
+		tok, err := app.ReadToken(ctx)
+		if err != nil {
+			reportTokenUnavailable(app.RootAvailable(ctx))
+			return 1
+		}
+		token = tok.Access
+	}
+
+	if apiBase == "" {
+		apiBase = kinopubapp.DefaultAPIBase
+	}
+
+	user, code := validateAppToken(ctx, proxyURL, apiBase, token, ua)
+	if code != 0 {
+		return code
+	}
+
+	// Preserve any existing website (cookie) login; only add/replace the app
+	// half.
+	creds, err := credstore.Load()
+	if err != nil {
+		creds = credstore.Credentials{}
+	}
+	creds.AppToken = token
+	creds.AppUserAgent = ua
+	creds.APIBase = apiBase
+	if err := credstore.Save(creds); err != nil {
+		errorf("%v", err)
+		return 1
+	}
+
+	fmt.Fprintf(os.Stderr, "%s kino.pub app session for %s saved (encrypted, machine-bound) to ~/.config/kinopub/credentials.enc\n",
+		errStyle.Green("✓"), errStyle.Cyan(user.Username))
+	fmt.Fprintf(os.Stderr, "  Now run without root or flags, e.g.:\n    %s --app https://kino.pub/item/view/126715\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  The token is not refreshed automatically; if it expires, open the app and run %s login --app again.\n", os.Args[0])
+	return 0
+}
+
+// appUserAgent returns the User-Agent to send, handling drift from the
 // baseline: it warns, and on a TTY asks whether to trust the app-extracted
 // values or fall back to the baseline. Off a TTY it keeps the extracted values
-// (the app is authoritative) and only warns.
-func resolveAPIUserAgent(fp kinopubapp.Fingerprint) string {
+// (the installed app is authoritative) and only warns.
+func appUserAgent(fp kinopubapp.Fingerprint) string {
 	drift := fp.DriftFromBaseline()
 	if len(drift) == 0 {
 		return fp.UserAgent
@@ -95,34 +159,34 @@ func resolveAPIUserAgent(fp kinopubapp.Fingerprint) string {
 	return fp.BaselineUserAgent()
 }
 
-// validateAPIToken confirms the token is accepted, mapping an expired token to
-// a refresh instruction. It uses the same proxy settings the run will.
-func validateAPIToken(ctx context.Context, cfg *domain.RunConfig) int {
-	pp, err := proxyprovider.New(cfg.ProxyURL)
+// validateAppToken confirms the token is accepted, mapping an expired token to
+// a refresh instruction. It returns the authenticated user and an exit code
+// (0 on success).
+func validateAppToken(ctx context.Context, proxyURL, apiBase, token, ua string) (apiclient.User, int) {
+	pp, err := proxyprovider.New(proxyURL)
 	if err != nil {
 		errorf("%v", err)
-		return 1
+		return apiclient.User{}, 1
 	}
-	client := apiclient.New(pp.HTTPClient(), cfg.APIBase, cfg.APIToken,
-		apiclient.WithUserAgent(cfg.UserAgent))
+	client := apiclient.New(pp.HTTPClient(), apiBase, token, apiclient.WithUserAgent(ua))
 	user, err := client.User(ctx)
 	switch {
 	case errors.Is(err, domain.ErrAPIUnauthorized):
-		errorf("the kino.pub access token was rejected (expired). Open the kino.pub " +
-			"app to refresh its session, then re-run. If reading the token from the " +
-			"app, make sure the app has been opened recently.")
-		return 1
+		errorf("the kino.pub app token was rejected (expired). Open the kino.pub app " +
+			"to refresh its session, then run `login --app` again (or re-run with a " +
+			"fresh --app-token).")
+		return apiclient.User{}, 1
 	case err != nil:
-		errorf("could not validate the kino.pub access token: %v", err)
-		return 1
+		errorf("could not validate the kino.pub app token: %v", err)
+		return apiclient.User{}, 1
 	}
 	if user.Subscription.Active {
-		notef("kino.pub API: authorized as %q (subscription active, %.0f days left)",
+		notef("kino.pub app session: authorized as %q (subscription active, %.0f days left)",
 			user.Username, user.Subscription.Days)
 	} else {
-		notef("kino.pub API: authorized as %q (no active subscription)", user.Username)
+		notef("kino.pub app session: authorized as %q (no active subscription)", user.Username)
 	}
-	return 0
+	return user, 0
 }
 
 // reportTokenUnavailable prints guidance tailored to why the token could not be
@@ -132,30 +196,17 @@ func reportTokenUnavailable(rootAvailable bool) {
 	if rootAvailable {
 		// Root is held but the store was unreadable — the app is likely not
 		// installed or has never been signed in.
-		errorf("could not read the access token from the kino.pub app: it may not be " +
+		errorf("could not read the token from the kino.pub app: it may not be " +
 			"installed, or has never been signed in. Sign in with the app once, or " +
-			"pass --api-token to supply a token directly.")
+			"pass --app-token to supply a token directly.")
 		return
 	}
-	errorf("no kino.pub access token, and the tool is not running as root so it " +
-		"cannot read the app's session (it will never elevate itself). Do one of:")
-	fmt.Fprintf(os.Stderr, "    • pass a token directly:   %s --api-token <TOKEN> …\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "    • re-run this command as root yourself:\n")
-	fmt.Fprintf(os.Stderr, "        Android/Termux:  su -c '%s'\n", currentCommand())
-	fmt.Fprintf(os.Stderr, "        Linux/desktop:   sudo %s\n", currentCommand())
-}
-
-// currentCommand reconstructs the invocation for the guidance above, quoting
-// arguments that contain spaces so the printed line is runnable as-is.
-func currentCommand() string {
-	parts := make([]string, len(os.Args))
-	for i, a := range os.Args {
-		if strings.ContainsAny(a, " \t") {
-			a = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
-		}
-		parts[i] = a
-	}
-	return strings.Join(parts, " ")
+	errorf("no kino.pub app session, and the tool is not running as root so it " +
+		"cannot read the app's token (it never elevates itself). Do one of:")
+	fmt.Fprintf(os.Stderr, "    • save a session once, then run normally:\n")
+	fmt.Fprintf(os.Stderr, "        Android/Termux:  su -c '%s login --app'\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "        Linux/desktop:   sudo %s login --app\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "    • or pass a token directly:   %s --app --app-token <TOKEN> …\n", os.Args[0])
 }
 
 // promptYesNo asks a yes/no question on stderr and reads a line from stdin.

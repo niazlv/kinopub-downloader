@@ -65,11 +65,11 @@ func (e *engine) run(ctx context.Context, cfg domain.RunConfig) (domain.RunResul
 		if ctx.Err() != nil {
 			return result, err
 		}
-		// APIMode has no RSS equivalent: the JSON API is the authoritative
+		// AppMode has no RSS equivalent: the JSON API is the authoritative
 		// source and the RSS feed path needs a cookie the run does not carry.
 		// Surface the real error (e.g. an expired token) instead of masking it
 		// behind a confusing feed failure.
-		if cfg.APIMode {
+		if cfg.AppMode {
 			return result, err
 		}
 		log.Warn("HLS pipeline failed, falling back to RSS pipeline",

@@ -131,28 +131,30 @@ type RunConfig struct {
 	// of the run. Implies SubsExternal.
 	SubtitlesOnly bool
 
-	// APIMode routes the run through the kino.pub JSON API instead of scraping
-	// the website. In this mode the InputURL is a kino.pub item link, the item
-	// is fetched from the API with a Bearer access token, and the resulting
-	// signed hls4 manifests feed the normal HLS download pipeline. It exists so
-	// a run can reuse the mobile app's already-authorized session (and its
-	// device slot) rather than a browser cookie. See ErrAPIUnauthorized.
-	APIMode bool
+	// AppMode runs with the session of the installed kino.pub mobile app rather
+	// than a website cookie: the item is fetched from the JSON API with the
+	// app's access token as a Bearer credential, and the signed hls4 manifests
+	// that come back feed the normal HLS download pipeline. Reusing the app's
+	// session also means no additional account device slot is claimed.
+	// See ErrAPIUnauthorized.
+	AppMode bool
 
-	// APIToken is the OAuth access token used as the Bearer credential in
-	// APIMode. When empty, the CLI reads it from the installed mobile app on a
-	// rooted device. It is never refreshed by the tool (see the apitoken flow).
-	APIToken string
+	// AppToken is the app's access token, used as the Bearer credential in
+	// AppMode. When empty the CLI falls back to the token saved by
+	// `login --app`, and failing that reads it from the installed app (which
+	// needs the process to already be root). The tool never refreshes it: a
+	// rejected token is reported so the user can renew it by opening the app.
+	AppToken string
 
 	// APIBase overrides the JSON API base URL (default
 	// "https://api.service-kp.com/v1"). The service rotates domains, so this is
 	// configurable without a rebuild.
 	APIBase string
 
-	// APICodec selects which codec family's manifest APIMode hands to the
+	// AppCodec selects which codec family's manifest AppMode hands to the
 	// download pipeline when an item offers more than one (e.g. h264 and h265).
 	// Empty means the backend default (h264, for broad compatibility).
-	APICodec string
+	AppCodec string
 }
 
 // RequestAuth carries credentials and request-shaping headers applied to every

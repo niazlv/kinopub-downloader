@@ -36,10 +36,10 @@ var (
 	// helper) so it mints a fresh one, then re-run.
 	ErrAPIUnauthorized = errors.New("kino.pub API rejected the access token")
 
-	// ErrAPITokenUnavailable reports that no access token could be obtained for
+	// ErrAppTokenUnavailable reports that no access token could be obtained for
 	// apitoken mode — neither supplied explicitly nor readable from the
 	// installed mobile app (no root, app not installed, or store unreadable).
-	ErrAPITokenUnavailable = errors.New("kino.pub API access token is unavailable")
+	ErrAppTokenUnavailable = errors.New("kino.pub API access token is unavailable")
 
 	// ErrItemIDUnrecognized reports that a URL is not a kino.pub item link the
 	// API backend can turn into an item id.
