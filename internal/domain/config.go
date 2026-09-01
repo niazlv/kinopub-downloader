@@ -130,6 +130,29 @@ type RunConfig struct {
 	// fallback, since substituting a different language would defeat the point
 	// of the run. Implies SubsExternal.
 	SubtitlesOnly bool
+
+	// APIMode routes the run through the kino.pub JSON API instead of scraping
+	// the website. In this mode the InputURL is a kino.pub item link, the item
+	// is fetched from the API with a Bearer access token, and the resulting
+	// signed hls4 manifests feed the normal HLS download pipeline. It exists so
+	// a run can reuse the mobile app's already-authorized session (and its
+	// device slot) rather than a browser cookie. See ErrAPIUnauthorized.
+	APIMode bool
+
+	// APIToken is the OAuth access token used as the Bearer credential in
+	// APIMode. When empty, the CLI reads it from the installed mobile app on a
+	// rooted device. It is never refreshed by the tool (see the apitoken flow).
+	APIToken string
+
+	// APIBase overrides the JSON API base URL (default
+	// "https://api.service-kp.com/v1"). The service rotates domains, so this is
+	// configurable without a rebuild.
+	APIBase string
+
+	// APICodec selects which codec family's manifest APIMode hands to the
+	// download pipeline when an item offers more than one (e.g. h264 and h265).
+	// Empty means the backend default (h264, for broad compatibility).
+	APICodec string
 }
 
 // RequestAuth carries credentials and request-shaping headers applied to every

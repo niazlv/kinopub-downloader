@@ -26,11 +26,14 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/lib/logx"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termuxapi"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termx"
+	"github.com/niazlv/kinopub-downloader/internal/services/apiclient"
+	"github.com/niazlv/kinopub-downloader/internal/services/apiscraper"
 	"github.com/niazlv/kinopub-downloader/internal/services/doctor"
 	"github.com/niazlv/kinopub-downloader/internal/services/downloader"
 	"github.com/niazlv/kinopub-downloader/internal/services/feedparser"
 	"github.com/niazlv/kinopub-downloader/internal/services/hlsdownloader"
 	"github.com/niazlv/kinopub-downloader/internal/services/inputresolver"
+	"github.com/niazlv/kinopub-downloader/internal/services/kinopubapp"
 	"github.com/niazlv/kinopub-downloader/internal/services/mediaresolver"
 	"github.com/niazlv/kinopub-downloader/internal/services/outputlayout"
 	"github.com/niazlv/kinopub-downloader/internal/services/pagescraper"
@@ -257,6 +260,10 @@ func run() int {
 		interactive bool
 		siteHost    string
 		keepDomains bool
+		apiMode     bool
+		apiToken    string
+		apiBase     string
+		apiCodec    string
 	)
 
 	fs := flag.NewFlagSet("kinopub", flag.ContinueOnError)
@@ -298,6 +305,10 @@ func run() int {
 	fs.BoolVar(&videoMenu, "video-menu", false, "show an interactive video-quality picker before downloading (TTY only)")
 	fs.BoolVar(&interactive, "interactive", false, "pick quality, then audio, then subtitles interactively (implies --video-menu --audio-menu --subs-menu)")
 	fs.BoolVar(&interactive, "i", false, "interactive mode (shorthand)")
+	fs.BoolVar(&apiMode, "api", false, "use the kino.pub JSON API with a mobile-app access token instead of website cookies (reuses the app's device slot)")
+	fs.StringVar(&apiToken, "api-token", "", "kino.pub API access token for --api (default: read from the installed mobile app on a rooted device)")
+	fs.StringVar(&apiBase, "api-base", "", "override the kino.pub JSON API base URL (default: "+kinopubapp.DefaultAPIBase+")")
+	fs.StringVar(&apiCodec, "api-codec", "", "preferred codec family for --api downloads: h264 (default) or h265")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 	registerColorFlags(fs)
 
@@ -495,11 +506,17 @@ func run() int {
 		inputURL, site = upgradeSiteDomain(inputURL, site)
 	}
 
-	// Resolve the Cookie header and User-Agent. A browser-load failure is fatal
-	// here: the download cannot proceed without the cookies the user requested.
-	resolvedCookie, userAgent, fatal := resolveAuth(cookie, userAgent, browserCk, site, true)
-	if fatal {
-		return 1
+	// Resolve authentication. Two independent modes:
+	//   - website: a Cloudflare-passing Cookie + matching User-Agent;
+	//   - --api:   a mobile-app OAuth access token used as a Bearer, with the
+	//              app's User-Agent so requests blend in. No cookie is involved.
+	var resolvedCookie string
+	if !apiMode {
+		var fatal bool
+		resolvedCookie, userAgent, fatal = resolveAuth(cookie, userAgent, browserCk, site, true)
+		if fatal {
+			return 1
+		}
 	}
 
 	// Build RunConfig.
@@ -540,6 +557,10 @@ func run() int {
 		SubsExternal:    subsExtern,
 		SubtitlesOnly:   subsOnly,
 		VideoMenu:       videoMenu,
+		APIMode:         apiMode,
+		APIToken:        apiToken,
+		APIBase:         apiBase,
+		APICodec:        apiCodec,
 	}
 
 	// A page link may already point at one episode ("…/item/view/38290/s1e1");
@@ -574,6 +595,16 @@ func run() int {
 	// cancels ctx on the first SIGINT/SIGTERM; stop() restores default handling.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// In --api mode, resolve the access token and the app-matching User-Agent
+	// (reading the installed app when allowed), validate the token, and warn on
+	// any drift from the built-in baseline. Failure here is terminal: there is
+	// no cookie fallback in API mode.
+	if cfg.APIMode {
+		if code := prepareAPIConfig(ctx, &cfg); code != 0 {
+			return code
+		}
+	}
 
 	// Wire up services.
 	deps, cleanup, err := buildDependencies(cfg)
@@ -755,9 +786,22 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 		AuthedHTTPClient: httpClient,
 	}
 
-	// Optional HLS pipeline: only available when auth is present (page scraping
-	// requires cookies to access the player page).
-	if auth.HasCredentials() {
+	// Optional HLS pipeline. Two ways to feed it:
+	//   - --api: the JSON API backend, which fetches items with a Bearer token
+	//     and yields signed hls4 manifests. No cookie needed; the token and the
+	//     app User-Agent were resolved into cfg by prepareAPIConfig.
+	//   - website: the HTML page scraper, available only when a cookie is
+	//     present (the player page is behind Cloudflare + auth).
+	switch {
+	case cfg.APIMode:
+		apiCli := apiclient.New(proxyProv.HTTPClient(), cfg.APIBase, cfg.APIToken,
+			apiclient.WithUserAgent(cfg.UserAgent), apiclient.WithLogger(logger))
+		deps.PageScraper = apiscraper.New(apiCli, logger,
+			apiscraper.WithPreferredCodec(cfg.APICodec))
+		deps.HLSDownloader = hlsdownloader.New(httpClient, auth, logger,
+			hlsdownloader.WithConcurrency(cfg.MaxConcurrency),
+			hlsdownloader.WithProxy(proxyProv.ProxyURL()))
+	case auth.HasCredentials():
 		scraper := pagescraper.New(httpClient, logger)
 		hlsDl := hlsdownloader.New(httpClient, auth, logger,
 			hlsdownloader.WithConcurrency(cfg.MaxConcurrency),

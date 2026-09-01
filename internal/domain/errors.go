@@ -29,4 +29,19 @@ var (
 	// subtitles --subs-only asked for. Only strict (subtitles-only) runs raise
 	// it: elsewhere subtitles are optional and a missing track falls back.
 	ErrNoSubtitlesMatched = errors.New("no subtitles matched the selection")
+
+	// ErrAPIUnauthorized reports that the kino.pub JSON API rejected the access
+	// token (HTTP 401). In apitoken mode this means the token read from the
+	// mobile app has expired: the user must open the app (or run the su refresh
+	// helper) so it mints a fresh one, then re-run.
+	ErrAPIUnauthorized = errors.New("kino.pub API rejected the access token")
+
+	// ErrAPITokenUnavailable reports that no access token could be obtained for
+	// apitoken mode — neither supplied explicitly nor readable from the
+	// installed mobile app (no root, app not installed, or store unreadable).
+	ErrAPITokenUnavailable = errors.New("kino.pub API access token is unavailable")
+
+	// ErrItemIDUnrecognized reports that a URL is not a kino.pub item link the
+	// API backend can turn into an item id.
+	ErrItemIDUnrecognized = errors.New("URL is not a recognizable kino.pub item link")
 )
