@@ -127,6 +127,24 @@ func resolveAuth(cookie, userAgent string, browserCk browserCookiesFlag, site do
 	return resolvedCookie, resolvedUA, false
 }
 
+// upgradeSiteDomain moves a run that targets a former domain of the service
+// (kino.pub) onto the newest known one, rewriting the input URL to match. It
+// says so on stderr, because the run will visibly talk to a different host
+// than the one the user named; --no-domain-rewrite skips the call entirely.
+// Mirrors and the current domain pass through unchanged.
+func upgradeSiteDomain(inputURL string, site domain.Site) (string, domain.Site) {
+	upgraded, ok := site.Upgraded()
+	if !ok {
+		return inputURL, site
+	}
+	fmt.Fprintf(os.Stderr, "Note: %s is a former domain of the site — targeting %s instead. "+
+		"Pass --no-domain-rewrite to keep the original.\n", site, upgraded)
+	if rewritten, changed := upgraded.RewriteURL(inputURL); changed {
+		inputURL = rewritten
+	}
+	return inputURL, upgraded
+}
+
 // cookieDomains lists the domains to look for browser cookies under, most
 // preferred first: the site this run targets, then the other domains the
 // service is known by — so a session saved before a rename (kino.pub →
@@ -234,6 +252,7 @@ func run() int {
 		videoMenu   bool
 		interactive bool
 		siteHost    string
+		keepDomains bool
 	)
 
 	fs := flag.NewFlagSet("kinopub", flag.ContinueOnError)
@@ -261,6 +280,7 @@ func run() int {
 	fs.Var(&headerVals, "header", "extra HTTP header 'Name: Value' (repeatable)")
 	fs.Var(&browserCk, "browser-cookies", "auto-load site cookies from a browser: safari, chrome, firefox, or auto (default auto when given without a value)")
 	fs.StringVar(&siteHost, "site", "", "site host to target, e.g. kino.watch (default: taken from the <url>, else "+domain.DefaultSiteHost+")")
+	fs.BoolVar(&keepDomains, "no-domain-rewrite", false, "keep URLs exactly as given: do not rewrite the site's former domains (e.g. kino.pub) to the current one ("+domain.DefaultSiteHost+")")
 	fs.StringVar(&feedFile, "feed-file", "", "read the RSS feed from a local file instead of fetching it over the network")
 	fs.StringVar(&ffmpegArgs, "ffmpeg-args", "", "extra ffmpeg arguments as a single string (advanced, e.g. \"-c:v libx265 -crf 28\")")
 	fs.Var(&ffmpegX, "x", "extra ffmpeg argument (repeatable, advanced, e.g. --x \"-c:v\" --x libx265)")
@@ -293,6 +313,9 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "Any host is accepted — the site is taken from the URL you pass, so mirrors and\n")
 		fmt.Fprintf(os.Stderr, "future domain changes work as-is. Cookies, Referer and feed URLs all follow it.\n")
 		fmt.Fprintf(os.Stderr, "Use --site only when there is no URL to derive the host from (e.g. --feed-file).\n\n")
+		fmt.Fprintf(os.Stderr, "URLs that still use a former domain of the site (kino.pub) are rewritten to the\n")
+		fmt.Fprintf(os.Stderr, "current one (%s) automatically — both the URL you pass and links found\n", domain.DefaultSiteHost)
+		fmt.Fprintf(os.Stderr, "inside feeds. Pass --no-domain-rewrite to keep every URL exactly as given.\n\n")
 		fmt.Fprintf(os.Stderr, "Page links are resolved automatically when credentials are available\n")
 		fmt.Fprintf(os.Stderr, "(via login, --cookie, or --browser-cookies).\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
@@ -447,6 +470,13 @@ func run() int {
 		site = domain.SiteFromHost(siteHost)
 	}
 
+	// Old bookmarks and shared links outlive a domain the service has left
+	// behind; a run against one would form every request URL with the dead
+	// host. Move such a run onto the current domain, unless the user forbids it.
+	if !keepDomains {
+		inputURL, site = upgradeSiteDomain(inputURL, site)
+	}
+
 	// Resolve the Cookie header and User-Agent. A browser-load failure is fatal
 	// here: the download cannot proceed without the cookies the user requested.
 	resolvedCookie, userAgent, fatal := resolveAuth(cookie, userAgent, browserCk, site, true)
@@ -465,6 +495,7 @@ func run() int {
 	cfg := domain.RunConfig{
 		InputURL:        inputURL,
 		Site:            site,
+		NoDomainRewrite: keepDomains,
 		OutputPath:      output,
 		MaxConcurrency:  concurrency,
 		ProxyURL:        proxyURL,
@@ -641,8 +672,10 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	}
 	inputRes := inputresolver.New(logger, resolverOpts...)
 
-	// Feed parser.
-	feedPars := feedparser.New(httpClient, logger)
+	// Feed parser. Links inside the feed that still name a former site domain
+	// are moved onto the current one, unless --no-domain-rewrite says otherwise.
+	feedPars := feedparser.New(httpClient, logger,
+		feedparser.WithDomainRewrite(!cfg.NoDomainRewrite))
 
 	// Media resolver — needs a RunOutput function for ffprobe. Its m3u8 fetches
 	// go straight to the CDN, which gates HLS on cf_clearance, so this client
@@ -1299,6 +1332,7 @@ complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l su
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-external  -d "Write subtitles as separate .srt files"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-only      -d "Download only subtitles, skipping video/audio"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l video-menu     -d "Show interactive video-quality picker"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l no-domain-rewrite -d "Do not rewrite former site domains to the current one"
 complete -c kinopub -n "__fish_seen_subcommand_from update" -l check   -d "Only report whether a newer release exists"
 complete -c kinopub -n "__fish_seen_subcommand_from update" -l proxy   -d "Proxy URL" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s i -l interactive    -d "Pick quality, audio and subtitles interactively"
@@ -1339,7 +1373,7 @@ _kinopub_completion() {
         --dry-run --cookie --user-agent --header --browser-cookies
         --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu \
         --subs --subs-menu --subs-external --subs-only \\
-        --video-menu -i --interactive --version"
+        --video-menu --no-domain-rewrite -i --interactive --version"
 
     # Detect which subcommand is active
     local subcmd=""

@@ -325,3 +325,77 @@ func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	return t.base.RoundTrip(newReq)
 }
+
+func TestParseRSS_RewritesFormerDomainLinks(t *testing.T) {
+	p := New(&http.Client{}, testLogger())
+	src := domain.FeedSource{ID: "123", Token: "abc", Site: domain.Site{Host: "kino.watch"}}
+
+	series, err := p.parseRSS([]byte(testRSSFeed), src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ep := series.Seasons[0].Episodes[0]
+	if want := "https://kino.watch/item/view/123/s1e1/pilot"; ep.PageLink != want {
+		t.Errorf("PageLink = %q, want %q", ep.PageLink, want)
+	}
+	// Enclosures on the CDN are not the site's links and must stay untouched.
+	if want := "https://cdn.example.com/s01e01.mp4"; ep.MediaSources[0].URL != want {
+		t.Errorf("MediaSources[0].URL = %q, want %q", ep.MediaSources[0].URL, want)
+	}
+	if want := "https://example.com/poster.jpg"; series.PosterURL != want {
+		t.Errorf("PosterURL = %q, want %q", series.PosterURL, want)
+	}
+}
+
+func TestParseRSS_DomainRewriteDisabled(t *testing.T) {
+	p := New(&http.Client{}, testLogger(), WithDomainRewrite(false))
+	src := domain.FeedSource{ID: "123", Token: "abc", Site: domain.Site{Host: "kino.watch"}}
+
+	series, err := p.parseRSS([]byte(testRSSFeed), src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ep := series.Seasons[0].Episodes[0]
+	if want := "https://kino.pub/item/view/123/s1e1/pilot"; ep.PageLink != want {
+		t.Errorf("PageLink = %q, want %q", ep.PageLink, want)
+	}
+}
+
+func TestParse_UpgradesFormerFeedSite(t *testing.T) {
+	// The transport records which host the feed request was formed against; a
+	// source naming the former domain must be fetched from the current one.
+	var gotHost string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		gotHost = req.URL.Host
+		rec := httptest.NewRecorder()
+		rec.Header().Set("Content-Type", "application/xml")
+		rec.WriteString(testRSSFeed)
+		return rec.Result(), nil
+	})
+
+	p := New(&http.Client{Transport: transport}, testLogger())
+	src := domain.FeedSource{ID: "42", Token: "tok", Site: domain.Site{Host: "kino.pub"}}
+
+	if _, err := p.Parse(context.Background(), src); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotHost != domain.DefaultSiteHost {
+		t.Errorf("feed fetched from %q, want %q", gotHost, domain.DefaultSiteHost)
+	}
+
+	// With rewriting disabled, the source's own host is honoured.
+	p = New(&http.Client{Transport: transport}, testLogger(), WithDomainRewrite(false))
+	if _, err := p.Parse(context.Background(), src); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotHost != "kino.pub" {
+		t.Errorf("feed fetched from %q, want %q", gotHost, "kino.pub")
+	}
+}
+
+// roundTripFunc adapts a function to http.RoundTripper.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }

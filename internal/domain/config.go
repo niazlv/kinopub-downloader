@@ -57,6 +57,13 @@ type RunConfig struct {
 	// from. The zero value means DefaultSiteHost.
 	Site Site
 
+	// NoDomainRewrite keeps every URL exactly as given. Links pointing at a
+	// former domain of the site (kino.pub) are normally rewritten to the
+	// current one before use — the input URL, the target site, and links found
+	// inside feeds. --no-domain-rewrite disables that correction, e.g. when the
+	// old domain is alive again or the raw links themselves are under scrutiny.
+	NoDomainRewrite bool
+
 	// Authentication / request shaping. The site sits behind Cloudflare and may
 	// return HTTP 403 for unauthenticated requests. These fields let the user
 	// supply credentials captured from a logged-in browser session so the tool

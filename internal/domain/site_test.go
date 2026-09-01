@@ -146,3 +146,91 @@ func TestSeriesIDFromURL(t *testing.T) {
 		})
 	}
 }
+
+func TestSiteRewriteHost(t *testing.T) {
+	tests := []struct {
+		name   string
+		site   Site
+		host   string
+		want   string
+		wantOK bool
+	}{
+		{"former to current", Site{Host: "kino.watch"}, "kino.pub", "kino.watch", true},
+		{"subdomain preserved", Site{Host: "kino.watch"}, "api.kino.pub", "api.kino.watch", true},
+		{"case and port dropped", Site{Host: "kino.watch"}, "WWW.KINO.PUB:443", "www.kino.watch", true},
+		{"current to mirror", Site{Host: "kino.example"}, "kino.watch", "kino.example", true},
+		{"already owned", Site{Host: "kino.watch"}, "kino.watch", "kino.watch", false},
+		{"owned subdomain", Site{Host: "kino.watch"}, "cdn.kino.watch", "cdn.kino.watch", false},
+		{"unknown host untouched", Site{Host: "kino.watch"}, "digital-cdn.net", "digital-cdn.net", false},
+		{"lookalike untouched", Site{Host: "kino.watch"}, "notkino.pub", "notkino.pub", false},
+		{"empty host", Site{Host: "kino.watch"}, "", "", false},
+		{"zero site targets default", Site{}, "kino.pub", DefaultSiteHost, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := tt.site.RewriteHost(tt.host)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("RewriteHost(%q) = (%q, %v), want (%q, %v)", tt.host, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestSiteRewriteURL(t *testing.T) {
+	site := Site{Host: "kino.watch"}
+
+	tests := []struct {
+		name   string
+		rawURL string
+		want   string
+		wantOK bool
+	}{
+		{"page link", "https://kino.pub/item/view/38290/s1e1", "https://kino.watch/item/view/38290/s1e1", true},
+		{"feed link with query", "https://kino.pub/podcast/get/1/tok?x=1", "https://kino.watch/podcast/get/1/tok?x=1", true},
+		{"subdomain preserved", "https://api.kino.pub/v1/file", "https://api.kino.watch/v1/file", true},
+		{"current domain untouched", "https://kino.watch/item/view/1", "https://kino.watch/item/view/1", false},
+		{"cdn untouched", "https://cdn.example.com/s01e01.mp4", "https://cdn.example.com/s01e01.mp4", false},
+		{"relative untouched", "/item/view/1", "/item/view/1", false},
+		{"empty untouched", "", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := site.RewriteURL(tt.rawURL)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("RewriteURL(%q) = (%q, %v), want (%q, %v)", tt.rawURL, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestSiteUpgraded(t *testing.T) {
+	tests := []struct {
+		name   string
+		site   Site
+		want   string
+		wantOK bool
+	}{
+		{"former domain upgrades", Site{Host: "kino.pub"}, KnownSiteHosts[0], true},
+		{"former subdomain upgrades", Site{Host: "www.kino.pub"}, "www." + KnownSiteHosts[0], true},
+		{"current stays", Site{Host: "kino.watch"}, "kino.watch", false},
+		{"mirror stays", Site{Host: "kino.example"}, "kino.example", false},
+		{"zero site stays", Site{}, DefaultSiteHost, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := tt.site.Upgraded()
+			if got.String() != tt.want || ok != tt.wantOK {
+				t.Fatalf("Upgraded() = (%q, %v), want (%q, %v)", got.String(), ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+
+	// The scheme survives the upgrade: an http mirror bookmark stays http.
+	up, ok := (Site{Scheme: "http", Host: "kino.pub"}).Upgraded()
+	if !ok || up.Origin() != "http://"+KnownSiteHosts[0] {
+		t.Fatalf("Upgraded() Origin = %q (ok=%v), want %q", up.Origin(), ok, "http://"+KnownSiteHosts[0])
+	}
+}

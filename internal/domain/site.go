@@ -165,6 +165,55 @@ func EpisodeRefFromURL(rawURL string) EpisodeRef {
 	return ref
 }
 
+// RewriteHost moves rawHost onto this site when it belongs to a different
+// known site host — the shape links take when they were generated against a
+// former domain (kino.pub after the rename to kino.watch). A subdomain prefix
+// survives the move (api.kino.pub → api.kino.watch); any port does not, since
+// the known sites serve on default ports. Hosts this site already owns and
+// hosts outside KnownSiteHosts (mirrors, the CDN) come back unchanged with
+// ok=false.
+func (s Site) RewriteHost(rawHost string) (newHost string, ok bool) {
+	h := hostOnly(rawHost)
+	if h == "" || s.Owns(h) {
+		return rawHost, false
+	}
+	for _, known := range KnownSiteHosts {
+		if (Site{Host: known}).Owns(h) {
+			return strings.TrimSuffix(h, known) + s.String(), true
+		}
+	}
+	return rawHost, false
+}
+
+// RewriteURL applies RewriteHost to rawURL's host, leaving the rest of the
+// URL — scheme, path, query — intact. A URL that needs no rewrite, or that
+// cannot be parsed, comes back unchanged with ok=false.
+func (s Site) RewriteURL(rawURL string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		return rawURL, false
+	}
+	newHost, ok := s.RewriteHost(u.Host)
+	if !ok {
+		return rawURL, false
+	}
+	u.Host = newHost
+	return u.String(), true
+}
+
+// Upgraded moves a site whose host is a former domain of the service onto the
+// newest known host, so a run driven by an old bookmark (kino.pub) talks to
+// the host the service lives on today. A site that is already current, a
+// mirror, and the zero site come back unchanged with ok=false.
+func (s Site) Upgraded() (Site, bool) {
+	newest := Site{Host: KnownSiteHosts[0]}
+	host, ok := newest.RewriteHost(s.resolve().Host)
+	if !ok {
+		return s, false
+	}
+	return Site{Scheme: s.Scheme, Host: host}, true
+}
+
 // Owns reports whether rawHost belongs to this site, i.e. it is the site host
 // itself or a subdomain of it. Session cookies are only ever sent to hosts the
 // site owns — never to the CDN, which throttles or stalls requests carrying

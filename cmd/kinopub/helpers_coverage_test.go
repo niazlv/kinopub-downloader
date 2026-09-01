@@ -316,3 +316,63 @@ func TestExitCodeFor(t *testing.T) {
 		})
 	}
 }
+
+// --- upgradeSiteDomain ---
+
+func TestUpgradeSiteDomain(t *testing.T) {
+	tests := []struct {
+		name     string
+		inputURL string
+		site     domain.Site
+		wantURL  string
+		wantSite string
+	}{
+		{
+			"former domain rewritten",
+			"https://kino.pub/item/view/38290/s1e1",
+			domain.SiteFromURL("https://kino.pub/item/view/38290/s1e1"),
+			"https://kino.watch/item/view/38290/s1e1",
+			"kino.watch",
+		},
+		{
+			"current domain untouched",
+			"https://kino.watch/item/view/38290",
+			domain.SiteFromURL("https://kino.watch/item/view/38290"),
+			"https://kino.watch/item/view/38290",
+			"kino.watch",
+		},
+		{
+			"mirror untouched",
+			"https://kino.example/item/view/38290",
+			domain.SiteFromURL("https://kino.example/item/view/38290"),
+			"https://kino.example/item/view/38290",
+			"kino.example",
+		},
+		{
+			"explicit --site upgraded without URL",
+			"",
+			domain.SiteFromHost("kino.pub"),
+			"",
+			"kino.watch",
+		},
+		{
+			"no URL, default site untouched",
+			"",
+			domain.Site{},
+			"",
+			domain.DefaultSiteHost,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotURL, gotSite := upgradeSiteDomain(tt.inputURL, tt.site)
+			if gotURL != tt.wantURL {
+				t.Errorf("inputURL = %q, want %q", gotURL, tt.wantURL)
+			}
+			if gotSite.String() != tt.wantSite {
+				t.Errorf("site = %q, want %q", gotSite.String(), tt.wantSite)
+			}
+		})
+	}
+}

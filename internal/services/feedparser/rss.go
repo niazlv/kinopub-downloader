@@ -32,17 +32,34 @@ func feedURL(src domain.FeedSource) string {
 
 // Parser implements domain.FeedParser.
 type Parser struct {
-	client *http.Client
-	log    domain.Logger
+	client         *http.Client
+	log            domain.Logger
+	rewriteDomains bool
 }
 
 // New creates a new feed parser with the given HTTP client and logger.
 // The client should already carry any proxy configuration.
-func New(client *http.Client, log domain.Logger) *Parser {
-	return &Parser{
-		client: client,
-		log:    log.Component("feedparser"),
+func New(client *http.Client, log domain.Logger, opts ...Option) *Parser {
+	p := &Parser{
+		client:         client,
+		log:            log.Component("feedparser"),
+		rewriteDomains: true,
 	}
+	for _, o := range opts {
+		o(p)
+	}
+	return p
+}
+
+// Option configures the Parser.
+type Option func(*Parser)
+
+// WithDomainRewrite enables or disables moving links that still point at a
+// former site domain (kino.pub) onto the feed's current site — the feed URL
+// itself and the page/media/poster links inside the feed. It is on by default
+// and turned off by --no-domain-rewrite.
+func WithDomainRewrite(enabled bool) Option {
+	return func(p *Parser) { p.rewriteDomains = enabled }
 }
 
 // Parse retrieves and parses the RSS feed into a Series (Req 2.1, 2.2).
@@ -53,6 +70,19 @@ func New(client *http.Client, log domain.Logger) *Parser {
 // When src.LocalPath is set, the feed is read from that file instead of being
 // fetched over the network — useful when the feed URL returns 403.
 func (p *Parser) Parse(ctx context.Context, src domain.FeedSource) (domain.Series, error) {
+	// A source resolved from an old bookmark or stale state metadata still names
+	// a former domain of the site; fetching the feed there fails, so the run is
+	// moved onto the current domain first (unless --no-domain-rewrite).
+	if p.rewriteDomains {
+		if upgraded, ok := src.Site.Upgraded(); ok {
+			p.log.Info("feed site is a former domain of the service — using the current one",
+				domain.F("from", src.Site.String()),
+				domain.F("to", upgraded.String()),
+			)
+			src.Site = upgraded
+		}
+	}
+
 	if src.LocalPath != "" {
 		return p.parseLocalFile(src)
 	}
@@ -126,7 +156,7 @@ func (p *Parser) parseRSS(data []byte, src domain.FeedSource) (domain.Series, er
 		Title:         ch.Title,
 		OriginalTitle: ch.originalTitle(),
 		Description:   ch.Description,
-		PosterURL:     ch.Image.Href,
+		PosterURL:     p.rewriteURL(src.Site, ch.Image.Href),
 	}
 
 	// Parse items into episodes, grouping by season.
@@ -142,7 +172,7 @@ func (p *Parser) parseRSS(data []byte, src domain.FeedSource) (domain.Series, er
 			continue
 		}
 
-		mediaSource := classifyEnclosure(item.Enclosure.URL)
+		mediaSource := classifyEnclosure(p.rewriteURL(src.Site, item.Enclosure.URL))
 
 		ep := domain.Episode{
 			Key: domain.EpisodeKey{
@@ -152,7 +182,7 @@ func (p *Parser) parseRSS(data []byte, src domain.FeedSource) (domain.Series, er
 			},
 			Title:        item.Title,
 			Quality:      item.Summary,
-			PageLink:     item.Link,
+			PageLink:     p.rewriteURL(src.Site, item.Link),
 			MediaSources: []domain.MediaSource{mediaSource},
 		}
 
@@ -290,6 +320,26 @@ type rssItem struct {
 
 type rssEnclosure struct {
 	URL string `xml:"url,attr"`
+}
+
+// rewriteURL moves a feed link that still points at a former site domain
+// (kino.pub) onto the feed's own site. The feed source keeps emitting links
+// against the domain it was generated under, which outlives the domain itself
+// — old saved feeds and stale server templates both produce them. Disabled by
+// --no-domain-rewrite; links on other hosts (the CDN, mirrors) pass through
+// untouched either way.
+func (p *Parser) rewriteURL(site domain.Site, rawURL string) string {
+	if !p.rewriteDomains {
+		return rawURL
+	}
+	rewritten, ok := site.RewriteURL(rawURL)
+	if ok {
+		p.log.Debug("rewrote former site domain in feed link",
+			domain.F("from", rawURL),
+			domain.F("to", rewritten),
+		)
+	}
+	return rewritten
 }
 
 // truncate returns at most n characters of s, appending "…" if truncated.
