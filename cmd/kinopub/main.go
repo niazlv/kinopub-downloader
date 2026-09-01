@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/app/kinopub"
 	"github.com/niazlv/kinopub-downloader/internal/domain"
@@ -522,6 +523,17 @@ func run() int {
 	//   - website: a Cloudflare-passing Cookie + matching User-Agent;
 	//   - --api:   a mobile-app OAuth access token used as a Bearer, with the
 	//              app's User-Agent so requests blend in. No cookie is involved.
+	// With no method named on the command line, reach for whichever stored
+	// credentials the user last logged in or downloaded with, so neither --app
+	// nor --cookie has to be repeated on every run.
+	if !appMode && feedFile == "" {
+		if use, reason := chooseSavedAppSession(inputURL, cookie != "" || browserCk.set); use {
+			appMode = true
+			notef("using the saved kino.pub app session (%s). Pass --cookie or "+
+				"`login --cookie` to use the website instead.", reason)
+		}
+	}
+
 	var resolvedCookie string
 	if !appMode {
 		var fatal bool
@@ -648,6 +660,15 @@ func run() int {
 	if runErr != nil {
 		errorf("%v", runErr)
 		return 1
+	}
+
+	// Remember which credentials worked, so a later run with no flags reaches
+	// for the same ones first.
+	switch {
+	case cfg.AppMode:
+		recordAuthMethodUsed(credstore.MethodApp)
+	case resolvedCookie != "":
+		recordAuthMethodUsed(credstore.MethodCookie)
 	}
 
 	return exitCodeFor(res, ctx.Err(), cfg.DryRun)
@@ -794,7 +815,7 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 		progReporter = progress.NewLog(logger)
 	}
 	// Wrap with Termux notifications if termux-notification is available.
-	progReporter = termuxapi.Wrap(progReporter)
+	progReporter = termuxapi.Wrap(progReporter, termuxapi.WithLogger(logger))
 
 	deps := kinopub.Dependencies{
 		Logger:           logger,
@@ -1135,11 +1156,18 @@ func runLogin(args []string) int {
 
 	// Bind the credentials to the site they were obtained for: later runs send
 	// them to that site only, never to some other host a URL happens to name.
-	creds := credstore.Credentials{
-		Cookie:    resolvedCookie,
-		UserAgent: userAgent,
-		Site:      site.String(),
+	//
+	// Only the website half is replaced. The two methods are independent, so
+	// saving cookies must not throw away an app session stored earlier (and
+	// vice versa) — a user may hold both and switch between them.
+	creds, err := credstore.Load()
+	if err != nil {
+		creds = credstore.Credentials{}
 	}
+	creds.Cookie = resolvedCookie
+	creds.UserAgent = userAgent
+	creds.Site = site.String()
+	creds.CookieSavedAt = time.Now()
 
 	if err := credstore.Save(creds); err != nil {
 		errorf("%v", err)

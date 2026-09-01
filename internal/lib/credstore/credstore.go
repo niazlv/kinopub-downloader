@@ -31,6 +31,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/crypto/pbkdf2"
 )
@@ -64,6 +65,57 @@ type Credentials struct {
 	// APIBase is the API origin the token was validated against, so a run
 	// reuses the same one without re-specifying it. Empty means the default.
 	APIBase string `json:"api_base,omitempty"`
+
+	// CookieSavedAt and AppSavedAt record when each half was last stored, and
+	// LastUsed/LastUsedAt which one last authorized a run. Together they let a
+	// run with no explicit flag pick the credentials the user actually works
+	// with, instead of always preferring one kind and failing on a stale
+	// session while a fresh one sits unused. Absent in stores written before
+	// this was tracked, which PreferredMethod treats as "no opinion".
+	CookieSavedAt time.Time `json:"cookie_saved_at,omitempty"`
+	AppSavedAt    time.Time `json:"app_saved_at,omitempty"`
+	LastUsed      string    `json:"last_used,omitempty"` // MethodCookie or MethodApp
+	LastUsedAt    time.Time `json:"last_used_at,omitempty"`
+}
+
+// The authentication methods a run can use.
+const (
+	MethodCookie = "cookie"
+	MethodApp    = "app"
+)
+
+// PreferredMethod reports which stored credentials a run should reach for when
+// the user named none: whichever was most recently saved or last worked. It
+// returns "" when nothing is stored.
+//
+// With both stored and no timestamps at all — a store written before they were
+// recorded — it answers MethodCookie, matching the behaviour those stores were
+// created under.
+func (c Credentials) PreferredMethod() string {
+	switch {
+	case !c.HasCookie() && !c.HasAppToken():
+		return ""
+	case !c.HasAppToken():
+		return MethodCookie
+	case !c.HasCookie():
+		return MethodApp
+	}
+	if c.freshness(MethodApp).After(c.freshness(MethodCookie)) {
+		return MethodApp
+	}
+	return MethodCookie
+}
+
+// freshness is the most recent moment a method was saved or successfully used.
+func (c Credentials) freshness(method string) time.Time {
+	at := c.CookieSavedAt
+	if method == MethodApp {
+		at = c.AppSavedAt
+	}
+	if c.LastUsed == method && c.LastUsedAt.After(at) {
+		return c.LastUsedAt
+	}
+	return at
 }
 
 // IsEmpty reports whether the credentials carry no useful data.

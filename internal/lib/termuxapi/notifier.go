@@ -9,11 +9,13 @@
 package termuxapi
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
@@ -21,7 +23,20 @@ import (
 // termux-notification --id requires an integer.
 const notificationID = "42314"
 
-// Available reports whether Termux:API tools are present in PATH.
+// helperTimeout bounds every termux-* invocation.
+//
+// The termux-api CLI scripts are thin wrappers that broadcast an intent to the
+// Termux:API *app* and wait for it to answer. The scripts are installed by the
+// `termux-api` package, but the app is a separate install — and when it is
+// missing nothing ever answers, so the helper blocks forever. That used to
+// strand a finished download: the episode was written and muxed, then the
+// completion notification hung with no output, looking exactly like a freeze.
+const helperTimeout = 3 * time.Second
+
+// Available reports whether the Termux:API command-line tools are present in
+// PATH. It cannot tell whether the companion app is installed — that is
+// discovered at the first call, which is why every invocation is bounded by
+// helperTimeout and failures disable notifications for the rest of the run.
 func Available() bool {
 	_, err := exec.LookPath("termux-notification")
 	return err == nil
@@ -46,6 +61,11 @@ type Notifier struct {
 	currentEp  atomic.Value // string
 	currentPct atomic.Int32
 
+	// disabled is set once a helper times out: the CLI is installed but the
+	// Termux:API app is not answering, so further calls would only stall.
+	disabled atomic.Bool
+	logger   domain.Logger
+
 	// throttle: skip notification if previous goroutine is still running
 	notifying atomic.Bool
 	// wg tracks in-flight refresh goroutines so Stop() can wait for them before
@@ -53,13 +73,30 @@ type Notifier struct {
 	wg sync.WaitGroup
 }
 
+// Option configures a Notifier.
+type Option func(*Notifier)
+
+// WithLogger attaches a logger, used to report once that notifications were
+// switched off because the Termux:API app did not respond.
+func WithLogger(l domain.Logger) Option {
+	return func(n *Notifier) {
+		if l != nil {
+			n.logger = l.Component("termuxapi")
+		}
+	}
+}
+
 // Wrap returns a new Notifier that delegates to inner and adds Termux
 // notifications. If Termux:API is not available, inner is returned as-is.
-func Wrap(inner domain.ProgressReporter) domain.ProgressReporter {
+func Wrap(inner domain.ProgressReporter, opts ...Option) domain.ProgressReporter {
 	if !Available() {
 		return inner
 	}
-	return &Notifier{inner: inner}
+	n := &Notifier{inner: inner}
+	for _, o := range opts {
+		o(n)
+	}
+	return n
 }
 
 // ---------------------------------------------------------------------------
@@ -132,14 +169,14 @@ func (n *Notifier) Stop() {
 	n.wg.Wait()
 
 	if done > 0 && done >= total {
-		exec.Command("termux-notification", //nolint:errcheck
+		n.runHelper("termux-notification",
 			"--id", notificationID,
 			"--title", fmt.Sprintf("✓ %s", title),
 			"--content", fmt.Sprintf("Скачано %d эпизодов", done),
-		).Run()
-		exec.Command("termux-vibrate", "-d", "400").Run() //nolint:errcheck
+		)
+		n.runHelper("termux-vibrate", "-d", "400")
 	} else {
-		exec.Command("termux-notification-remove", notificationID).Run() //nolint:errcheck
+		n.runHelper("termux-notification-remove", notificationID)
 	}
 }
 
@@ -204,7 +241,7 @@ func (n *Notifier) refresh() {
 	go func() {
 		defer n.wg.Done()
 		defer n.notifying.Store(false)
-		exec.Command("termux-notification", //nolint:errcheck
+		n.runHelper("termux-notification",
 			"--id", notificationID,
 			"--title", titleStr,
 			"--content", content,
@@ -212,12 +249,12 @@ func (n *Notifier) refresh() {
 			"--priority", "low",
 			"--progress-max", "100",
 			"--progress", strconv.Itoa(seriesPct),
-		).Run()
+		)
 	}()
 }
 
 func (n *Notifier) notify(title, content string, pct int) {
-	exec.Command("termux-notification", //nolint:errcheck
+	n.runHelper("termux-notification",
 		"--id", notificationID,
 		"--title", title,
 		"--content", content,
@@ -225,5 +262,71 @@ func (n *Notifier) notify(title, content string, pct int) {
 		"--priority", "low",
 		"--progress-max", "100",
 		"--progress", strconv.Itoa(pct),
-	).Run()
+	)
+}
+
+// runHelper invokes a termux-* helper, bounded by helperTimeout.
+//
+// A helper that does not return in time means the Termux:API app is absent or
+// wedged; notifications are then switched off for the rest of the run so a
+// finished download is never held up by a decoration. Ordinary non-zero exits
+// are ignored — a missing notification must never affect the download.
+func (n *Notifier) runHelper(name string, args ...string) {
+	if n.disabled.Load() {
+		return
+	}
+
+	cmd := exec.Command(name, args...)
+	// Its own process group, so a wedged helper can be torn down together with
+	// the broadcast it spawned rather than leaving a grandchild behind.
+	setProcessGroup(cmd)
+
+	if err := cmd.Start(); err != nil {
+		n.disable(name, "helper could not be started")
+		return
+	}
+
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+
+	select {
+	case err := <-waited:
+		if killedBySignal(err) {
+			// Ctrl+C reaches the whole foreground process group, so a helper
+			// killed by a signal means the run is shutting down. Stop posting:
+			// the final notification would otherwise block again and demand a
+			// second Ctrl+C.
+			n.disable(name, "interrupted")
+		}
+	case <-time.After(helperTimeout):
+		// Signal the group and return without waiting for it: reaping is left
+		// to the goroutine above, so a decoration can never hold up a finished
+		// download.
+		killProcessGroup(cmd)
+		n.disable(name, "the Termux:API app did not respond")
+	}
+}
+
+// disable turns notifications off for the rest of the run, reporting why once.
+func (n *Notifier) disable(helper, reason string) {
+	if !n.disabled.CompareAndSwap(false, true) {
+		return
+	}
+	if n.logger != nil {
+		n.logger.Warn("Termux notifications disabled",
+			domain.F("reason", reason),
+			domain.F("helper", helper),
+			domain.F("hint", "install the Termux:API app, or ignore — downloads are unaffected"),
+		)
+	}
+}
+
+// killedBySignal reports whether a helper was terminated by a signal rather
+// than exiting on its own. ExitCode is -1 in exactly that case.
+func killedBySignal(err error) bool {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ProcessState == nil {
+		return false
+	}
+	return ee.ProcessState.ExitCode() == -1
 }

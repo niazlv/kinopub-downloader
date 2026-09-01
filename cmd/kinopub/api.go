@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
 	"github.com/niazlv/kinopub-downloader/internal/lib/androidroot"
@@ -119,6 +120,7 @@ func loginApp(ctx context.Context, explicitToken, explicitUA, apiBase, proxyURL 
 	creds.AppToken = token
 	creds.AppUserAgent = ua
 	creds.APIBase = apiBase
+	creds.AppSavedAt = time.Now()
 	if err := credstore.Save(creds); err != nil {
 		errorf("%v", err)
 		return 1
@@ -234,14 +236,70 @@ func promptYesNo(question string, def bool) bool {
 	}
 }
 
-// savedAppSessionApplies reports whether a run with no website cookie should
-// fall back to a saved `login --app` session. It requires both a stored token
-// and an input the API backend can actually resolve — an item link — so a
-// podcast feed run still fails with its own, accurate error.
+// chooseSavedAppSession decides whether a run that named no method on the
+// command line should use the stored app session, and returns the reason to
+// show the user.
+//
+// It answers yes when the app session is the only one stored, or when it is the
+// more recent of the two — so whichever credentials the user last logged in
+// with (or last downloaded with) are the ones a bare `kinopub <url>` uses,
+// rather than always trying the website and failing on a stale cookie. An
+// explicit --cookie/--browser-cookies always wins, and the input must be an
+// item link the API backend can resolve, so podcast-feed runs keep their own
+// accurate error.
+func chooseSavedAppSession(inputURL string, explicitCookie bool) (use bool, reason string) {
+	if explicitCookie {
+		return false, ""
+	}
+	if _, err := apiscraper.ParseItemID(inputURL); err != nil {
+		return false, ""
+	}
+	stored, err := credstore.Load()
+	if err != nil || !stored.HasAppToken() {
+		return false, ""
+	}
+	switch {
+	case !stored.HasCookie():
+		return true, "no website cookies stored"
+	case stored.PreferredMethod() == credstore.MethodApp:
+		return true, "the more recent login"
+	default:
+		return false, ""
+	}
+}
+
+// savedAppSessionApplies reports whether a saved app session could authorize
+// this input at all. It backs the late fallback taken once the website path has
+// produced no usable cookie.
 func savedAppSessionApplies(inputURL string) bool {
 	if _, err := apiscraper.ParseItemID(inputURL); err != nil {
 		return false
 	}
 	stored, err := credstore.Load()
 	return err == nil && stored.HasAppToken()
+}
+
+// preferredStoredMethod reports which stored credentials a run should use when
+// the user named none — the most recently saved or last successful of the two.
+// It returns "" when nothing is stored or the store cannot be read.
+func preferredStoredMethod() string {
+	stored, err := credstore.Load()
+	if err != nil {
+		return ""
+	}
+	return stored.PreferredMethod()
+}
+
+// recordAuthMethodUsed remembers which credentials just authorized a run, so a
+// later run with no flags reaches for the same ones. It writes only when the
+// recorded method actually changes, keeping an ordinary run free of a needless
+// re-encrypt, and stays silent on failure: this is a convenience, not a result.
+func recordAuthMethodUsed(method string) {
+	stored, err := credstore.Load()
+	if err != nil || stored.LastUsed == method {
+		return
+	}
+	stored.LastUsed = method
+	stored.LastUsedAt = time.Now()
+	_ = credstore.Save(stored)
 }

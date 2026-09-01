@@ -11,6 +11,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The stored file is machine-bound, so Save/Load cannot be exercised without
@@ -211,5 +212,90 @@ func TestDecryptWithWrongSeedFails(t *testing.T) {
 func TestDecryptWithTruncatedBlob(t *testing.T) {
 	if _, err := decryptWith([]byte("seed"), []byte("short")); err == nil {
 		t.Fatal("want error for a blob shorter than the nonce")
+	}
+}
+
+func TestPreferredMethod(t *testing.T) {
+	early := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	late := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name  string
+		creds Credentials
+		want  string
+	}{
+		{
+			name:  "nothing stored",
+			creds: Credentials{},
+			want:  "",
+		},
+		{
+			name:  "only a cookie",
+			creds: Credentials{Cookie: "cf=1"},
+			want:  MethodCookie,
+		},
+		{
+			name:  "only an app token",
+			creds: Credentials{AppToken: "tok"},
+			want:  MethodApp,
+		},
+		{
+			name:  "both, app saved more recently",
+			creds: Credentials{Cookie: "cf=1", CookieSavedAt: early, AppToken: "tok", AppSavedAt: late},
+			want:  MethodApp,
+		},
+		{
+			name:  "both, cookie saved more recently",
+			creds: Credentials{Cookie: "cf=1", CookieSavedAt: late, AppToken: "tok", AppSavedAt: early},
+			want:  MethodCookie,
+		},
+		{
+			// Last successful use outranks an older save of the other method.
+			name: "app used after the cookie was saved",
+			creds: Credentials{
+				Cookie: "cf=1", CookieSavedAt: late,
+				AppToken: "tok", AppSavedAt: early,
+				LastUsed: MethodApp, LastUsedAt: late.Add(time.Hour),
+			},
+			want: MethodApp,
+		},
+		{
+			// A store written before timestamps existed keeps the behaviour it
+			// was created under: the website session.
+			name:  "both, no timestamps at all",
+			creds: Credentials{Cookie: "cf=1", AppToken: "tok"},
+			want:  MethodCookie,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.creds.PreferredMethod(); got != tt.want {
+				t.Errorf("PreferredMethod() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// Saving one method must never discard the other: a user may hold both a
+// website login and an app session and switch between them.
+func TestBothMethodsCoexistThroughSerialization(t *testing.T) {
+	both := Credentials{
+		Cookie: "cf=1", UserAgent: "Mozilla/5.0", Site: "kino.watch",
+		AppToken: "tok", AppUserAgent: "Android KinoPub/1.34",
+	}
+	blob, err := json.Marshal(both)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got Credentials
+	if err := json.Unmarshal(blob, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.HasCookie() || !got.HasAppToken() {
+		t.Errorf("a method was lost: %+v", got)
+	}
+	if got.UserAgent == got.AppUserAgent {
+		t.Error("browser and app User-Agents must stay distinct")
 	}
 }
