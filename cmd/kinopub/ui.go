@@ -514,7 +514,7 @@ var mainFlagGroups = []flagGroup{
 		"app", "app-token", "app-base", "app-codec",
 	}},
 	{title: "Transfer and ffmpeg:", names: []string{
-		"c", "concurrency", "no-chunked", "ffmpeg", "ffmpeg-args", "x",
+		"c", "concurrency", "limit-rate", "no-chunked", "ffmpeg", "ffmpeg-args", "x",
 	}},
 	{title: "Output and diagnostics:", names: []string{
 		"v", "verbosity", "log-file", "color", "no-color", "version",

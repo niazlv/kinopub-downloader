@@ -42,6 +42,7 @@ type RunConfig struct {
 	OutputPath      string // "" → cwd (Req 11.1)
 	MaxConcurrency  int    // [1,16], default 2 (Req 4.1, 4.2)
 	ProxyURL        string // explicit proxy; "" → system/direct
+	RateLimit       int64  // aggregate download cap in bytes/sec; 0 → unlimited
 	Quality         Quality
 	Verbosity       Verbosity // default Normal (Req 14.1)
 	FFmpegPath      string    // default "ffmpeg" on PATH (Req 7.3)

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/domain"
 	"github.com/niazlv/kinopub-downloader/internal/lib/fsutil"
 	"github.com/niazlv/kinopub-downloader/internal/lib/httpx"
+	"github.com/niazlv/kinopub-downloader/internal/lib/ratelimit"
 	"github.com/niazlv/kinopub-downloader/internal/lib/webvtt"
 )
 
@@ -39,6 +41,10 @@ const (
 	// variantMarkerName is the file written inside the resume temp dir to record
 	// which renditions the cached segments were downloaded from.
 	variantMarkerName = "variant.id"
+
+	// maxRetryAfter caps how long a server-provided Retry-After can hold up a
+	// segment, so a hostile or mistaken header cannot stall a run indefinitely.
+	maxRetryAfter = 60 * time.Second
 )
 
 // Downloader downloads HLS streams by fetching individual segments.
@@ -48,6 +54,7 @@ type Downloader struct {
 	logger      domain.Logger
 	concurrency int
 	proxyURL    *url.URL
+	limiter     *ratelimit.Limiter // nil = no bandwidth cap
 
 	mu        sync.RWMutex
 	audioPref domain.AudioPreference
@@ -71,6 +78,14 @@ func WithConcurrency(n int) Option {
 func WithProxy(proxyURL *url.URL) Option {
 	return func(d *Downloader) {
 		d.proxyURL = proxyURL
+	}
+}
+
+// WithRateLimit caps aggregate download throughput to bytesPerSec across every
+// segment of every episode. Zero or negative means no cap.
+func WithRateLimit(bytesPerSec int64) Option {
+	return func(d *Downloader) {
+		d.limiter = ratelimit.NewLimiter(bytesPerSec)
 	}
 }
 
@@ -618,7 +633,10 @@ func (d *Downloader) downloadEpisodeInternal(
 	if nTracks := 1 + len(audioJobs) + len(subsJobs); concurrency < nTracks {
 		concurrency = nTracks
 	}
-	sem := make(chan struct{}, concurrency)
+	// Adaptive gate: starts at `concurrency` and narrows itself when the CDN
+	// answers 429, widening back once the pushback stops. Shared across all
+	// tracks so audio downloads alongside video under one budget.
+	gate := ratelimit.NewGate(concurrency)
 
 	// downloadTrack fetches every segment of a single track into segDir (with
 	// resume + bounded concurrency), then hands the segment list to join, which
@@ -664,23 +682,18 @@ func (d *Downloader) downloadEpisodeInternal(
 				continue
 			}
 
-			// Acquire a concurrency slot (or stop on cancellation).
-			select {
-			case sem <- struct{}{}:
-			case <-gctx.Done():
-				continue
-			}
-			if gctx.Err() != nil {
-				<-sem // release the slot we just took
+			// Acquire an admission slot from the adaptive gate (or stop on
+			// cancellation).
+			if err := gate.Acquire(gctx); err != nil {
 				break
 			}
 
 			wg.Add(1)
 			go func(seg Segment, segPath string) {
 				defer wg.Done()
-				defer func() { <-sem }()
+				defer gate.Release()
 
-				n, err := d.downloadSegment(gctx, seg, segPath)
+				n, err := d.downloadSegment(gctx, seg, segPath, gate)
 				if err != nil {
 					// fetchSegment removes its own temp file on every failure
 					// path; this is a belt-and-braces sweep so a leftover
@@ -871,7 +884,7 @@ func mergeVTTSegmentsDir(segments []Segment, segDir, outPath string) (err error)
 }
 
 // downloadSegment downloads a single segment with retries.
-func (d *Downloader) downloadSegment(ctx context.Context, seg Segment, outPath string) (int64, error) {
+func (d *Downloader) downloadSegment(ctx context.Context, seg Segment, outPath string, gate *ratelimit.Gate) (int64, error) {
 	var lastErr error
 
 	for attempt := 0; attempt < maxSegmentRetries; attempt++ {
@@ -884,6 +897,15 @@ func (d *Downloader) downloadSegment(ctx context.Context, seg Segment, outPath s
 			if delay > 15*time.Second {
 				delay = 15 * time.Second
 			}
+			// A 429/503 with a Retry-After overrides the exponential backoff:
+			// the server told us exactly how long to wait, so honour it (capped).
+			var thr *throttleError
+			if errors.As(lastErr, &thr) && thr.retryAfter > 0 {
+				delay = thr.retryAfter
+				if delay > maxRetryAfter {
+					delay = maxRetryAfter
+				}
+			}
 			select {
 			case <-ctx.Done():
 				return 0, ctx.Err()
@@ -893,10 +915,32 @@ func (d *Downloader) downloadSegment(ctx context.Context, seg Segment, outPath s
 
 		n, err := d.fetchSegment(ctx, seg.URL, outPath)
 		if err == nil {
+			// A clean fetch is the signal the gate uses to widen back toward
+			// full concurrency after an earlier penalty.
+			if gate != nil {
+				gate.ReportSuccess()
+			}
 			return n, nil
 		}
 
 		lastErr = err
+
+		// On CDN pushback, narrow concurrency so the retry — and every other
+		// in-flight segment — eases off rather than hammering harder.
+		var thr *throttleError
+		if errors.As(err, &thr) {
+			if gate != nil {
+				gate.Penalize()
+			}
+			d.logger.Debug("segment throttled",
+				domain.F("segment", seg.Index),
+				domain.F("attempt", attempt+1),
+				domain.F("status", thr.status),
+				domain.F("retry_after", thr.retryAfter.String()),
+			)
+			continue
+		}
+
 		d.logger.Debug("segment retry",
 			domain.F("segment", seg.Index),
 			domain.F("attempt", attempt+1),
@@ -905,6 +949,42 @@ func (d *Downloader) downloadSegment(ctx context.Context, seg Segment, outPath s
 	}
 
 	return 0, fmt.Errorf("after %d attempts: %w", maxSegmentRetries, lastErr)
+}
+
+// throttleError signals the CDN asked us to slow down: HTTP 429 (Too Many
+// Requests) or 503 (Service Unavailable). retryAfter carries the server's
+// Retry-After hint when present, and is zero otherwise.
+type throttleError struct {
+	status     int
+	retryAfter time.Duration
+}
+
+func (e *throttleError) Error() string {
+	if e.retryAfter > 0 {
+		return fmt.Sprintf("HTTP %d (retry after %s)", e.status, e.retryAfter)
+	}
+	return fmt.Sprintf("HTTP %d (rate limited)", e.status)
+}
+
+// parseRetryAfter reads a Retry-After header value, which is either a number of
+// seconds or an HTTP date. It returns 0 for an empty, malformed, or past value.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 // segmentPartPath returns the scratch path a segment is streamed to before it
@@ -1036,6 +1116,14 @@ func (d *Downloader) fetchSegment(ctx context.Context, segURL, outPath string) (
 	}
 	defer resp.Body.Close()
 
+	// CDN pushback carries its own error type so the retry can back off and
+	// honour Retry-After instead of treating it like any other failure.
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		return 0, &throttleError{
+			status:     resp.StatusCode,
+			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
@@ -1046,7 +1134,8 @@ func (d *Downloader) fetchSegment(ctx context.Context, segURL, outPath string) (
 		return 0, err
 	}
 
-	n, copyErr := io.Copy(f, resp.Body)
+	// Pace the body read against the bandwidth cap (a nil limiter is a no-op).
+	n, copyErr := io.Copy(f, d.limiter.Reader(segCtx, resp.Body))
 	// Flush to stable storage before the rename: without it the rename can
 	// reach disk ahead of the data, so a power loss would publish a segment
 	// whose tail is missing — exactly the corruption the rename prevents.

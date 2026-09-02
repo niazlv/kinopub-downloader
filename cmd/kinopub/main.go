@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -23,8 +24,10 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/lib/audiomenu"
 	"github.com/niazlv/kinopub-downloader/internal/lib/browsercookies"
 	"github.com/niazlv/kinopub-downloader/internal/lib/credstore"
+	"github.com/niazlv/kinopub-downloader/internal/lib/desktopnotify"
 	"github.com/niazlv/kinopub-downloader/internal/lib/httpx"
 	"github.com/niazlv/kinopub-downloader/internal/lib/logx"
+	"github.com/niazlv/kinopub-downloader/internal/lib/ratelimit"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termuxapi"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termx"
 	"github.com/niazlv/kinopub-downloader/internal/services/apiclient"
@@ -220,7 +223,9 @@ func run() int {
 		case "login":
 			return runLogin(os.Args[2:])
 		case "logout":
-			return runLogout()
+			return runLogout(os.Args[2:])
+		case "sessions":
+			return runSessions(os.Args[2:])
 		case "doctor":
 			return runDoctor(os.Args[2:])
 		case "completion":
@@ -234,6 +239,7 @@ func run() int {
 	var (
 		output      string
 		concurrency int
+		limitRate   string
 		proxyURL    string
 		quality     string
 		verbosity   string
@@ -276,6 +282,7 @@ func run() int {
 	fs.StringVar(&output, "o", "", "output directory path (shorthand)")
 	fs.IntVar(&concurrency, "concurrency", 0, "max concurrent downloads (default: 2)")
 	fs.IntVar(&concurrency, "c", 0, "max concurrent downloads (shorthand)")
+	fs.StringVar(&limitRate, "limit-rate", "", "cap total download speed, e.g. 2M or 500k (default: unlimited)")
 	fs.StringVar(&proxyURL, "proxy", "", "proxy URL (http, https, or socks5)")
 	fs.StringVar(&quality, "quality", "", "quality preference (e.g. 1080p)")
 	fs.StringVar(&quality, "q", "", "quality preference (shorthand)")
@@ -323,7 +330,8 @@ func run() int {
 		h.commands(
 			command{name: "kinopub [flags] <url>"},
 			command{name: "kinopub login [flags]", desc: "save authentication credentials"},
-			command{name: "kinopub logout", desc: "remove stored credentials"},
+			command{name: "kinopub logout [flags]", desc: "remove stored credentials"},
+			command{name: "kinopub sessions [--check]", desc: "show stored login sessions"},
 			command{name: "kinopub doctor [flags]", desc: "verify files and repair state"},
 			command{name: "kinopub update [flags]", desc: "install the latest release"},
 			command{name: "kinopub completion <shell>", desc: "generate a shell completion script (bash, fish)"},
@@ -504,6 +512,14 @@ func run() int {
 		return 1
 	}
 
+	// Parse the bandwidth cap up front so a typo fails fast, before any network
+	// work, rather than after resolving auth and scraping.
+	rateLimit, err := ratelimit.ParseRate(limitRate)
+	if err != nil {
+		errorf("%v", err)
+		return 1
+	}
+
 	// The site is whatever host the URL names, so mirrors and renamed domains
 	// need no code change; --site names it when there is no URL to derive it
 	// from (e.g. --feed-file) or to override it.
@@ -568,6 +584,7 @@ func run() int {
 		NoDomainRewrite: keepDomains,
 		OutputPath:      output,
 		MaxConcurrency:  concurrency,
+		RateLimit:       rateLimit,
 		ProxyURL:        proxyURL,
 		Quality:         domain.Quality(quality),
 		Verbosity:       verb,
@@ -658,6 +675,13 @@ func run() int {
 
 	res, runErr := app.Run(ctx, cfg)
 	if runErr != nil {
+		// A token that expires mid-run surfaces here as ErrAPIUnauthorized;
+		// translate it to the same actionable guidance the up-front check gives,
+		// rather than the raw "API rejected the access token".
+		if errors.Is(runErr, domain.ErrAPIUnauthorized) {
+			reportTokenExpired()
+			return 1
+		}
 		errorf("%v", runErr)
 		return 1
 	}
@@ -816,6 +840,9 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	}
 	// Wrap with Termux notifications if termux-notification is available.
 	progReporter = termuxapi.Wrap(progReporter, termuxapi.WithLogger(logger))
+	// And with native desktop notifications on macOS/Linux (no-op elsewhere,
+	// and on Termux, which the richer Termux notifier above already covers).
+	progReporter = desktopnotify.Wrap(progReporter)
 
 	deps := kinopub.Dependencies{
 		Logger:           logger,
@@ -844,12 +871,14 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 			apiscraper.WithPreferredCodec(cfg.AppCodec))
 		deps.HLSDownloader = hlsdownloader.New(httpClient, auth, logger,
 			hlsdownloader.WithConcurrency(cfg.MaxConcurrency),
-			hlsdownloader.WithProxy(proxyProv.ProxyURL()))
+			hlsdownloader.WithProxy(proxyProv.ProxyURL()),
+			hlsdownloader.WithRateLimit(cfg.RateLimit))
 	case auth.HasCredentials():
 		scraper := pagescraper.New(httpClient, logger)
 		hlsDl := hlsdownloader.New(httpClient, auth, logger,
 			hlsdownloader.WithConcurrency(cfg.MaxConcurrency),
-			hlsdownloader.WithProxy(proxyProv.ProxyURL()))
+			hlsdownloader.WithProxy(proxyProv.ProxyURL()),
+			hlsdownloader.WithRateLimit(cfg.RateLimit))
 		deps.PageScraper = scraper
 		deps.HLSDownloader = hlsDl
 	}
@@ -1180,13 +1209,193 @@ func runLogin(args []string) int {
 }
 
 // runLogout removes stored credentials.
-func runLogout() int {
-	if err := credstore.Clear(); err != nil {
+// runLogout removes stored credentials. With no flag it removes everything;
+// --app or --cookie removes only that method, leaving the other in place — the
+// two are independent sessions and a user may hold both.
+func runLogout(args []string) int {
+	fs := flag.NewFlagSet("kinopub logout", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var appOnly, cookieOnly bool
+	fs.BoolVar(&appOnly, "app", false, "remove only the kino.pub app session, keep the website login")
+	fs.BoolVar(&cookieOnly, "cookie", false, "remove only the website login, keep the app session")
+	registerColorFlags(fs)
+	fs.Usage = func() {
+		h := newHelpPrinter(os.Stderr, errStyle)
+		h.text("Remove stored credentials.")
+		h.section("Usage:")
+		h.commands(
+			command{name: "kinopub logout", desc: "remove everything"},
+			command{name: "kinopub logout --app", desc: "remove only the app session"},
+			command{name: "kinopub logout --cookie", desc: "remove only the website login"},
+		)
+		h.section("Flags:")
+		h.flags(fs)
+	}
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		return 1
+	}
+
+	if appOnly && cookieOnly {
+		errorf("--app and --cookie together remove everything; pass neither for that.")
+		return 1
+	}
+
+	// Whole-store removal is the simple, explicit case.
+	if !appOnly && !cookieOnly {
+		if err := credstore.Clear(); err != nil {
+			errorf("%v", err)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "%s All stored credentials removed.\n", errStyle.Green("✓"))
+		return 0
+	}
+
+	creds, err := credstore.Load()
+	if err != nil {
+		errorf("could not read stored credentials: %v", err)
+		return 1
+	}
+
+	var removed string
+	switch {
+	case appOnly:
+		if !creds.HasAppToken() {
+			fmt.Fprintf(os.Stderr, "No kino.pub app session was stored.\n")
+			return 0
+		}
+		creds.AppToken, creds.AppUserAgent, creds.APIBase = "", "", ""
+		creds.AppSavedAt = time.Time{}
+		removed = "kino.pub app session"
+	case cookieOnly:
+		if !creds.HasCookie() {
+			fmt.Fprintf(os.Stderr, "No website login was stored.\n")
+			return 0
+		}
+		creds.Cookie, creds.UserAgent, creds.Site = "", "", ""
+		creds.CookieSavedAt = time.Time{}
+		removed = "website login"
+	}
+	if creds.LastUsed == credstore.MethodApp && appOnly ||
+		creds.LastUsed == credstore.MethodCookie && cookieOnly {
+		creds.LastUsed, creds.LastUsedAt = "", time.Time{}
+	}
+
+	// If nothing is left, drop the file entirely rather than storing an empty
+	// encrypted blob.
+	if creds.IsEmpty() {
+		if err := credstore.Clear(); err != nil {
+			errorf("%v", err)
+			return 1
+		}
+	} else if err := credstore.Save(creds); err != nil {
 		errorf("%v", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "%s Stored credentials removed.\n", errStyle.Green("✓"))
+	fmt.Fprintf(os.Stderr, "%s Removed the %s.\n", errStyle.Green("✓"), removed)
 	return 0
+}
+
+// runSessions prints what is stored and which method a bare run would use. With
+// --check it also validates the app token against the API, showing the account.
+func runSessions(args []string) int {
+	fs := flag.NewFlagSet("kinopub sessions", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var check bool
+	var proxyURL string
+	fs.BoolVar(&check, "check", false, "validate the app token against the API and show the account")
+	fs.StringVar(&proxyURL, "proxy", "", "proxy URL for --check (http, https, socks5)")
+	registerColorFlags(fs)
+	fs.Usage = func() {
+		h := newHelpPrinter(os.Stderr, errStyle)
+		h.text("Show stored login sessions and which one a bare run would use.")
+		h.section("Usage:")
+		h.commands(
+			command{name: "kinopub sessions"},
+			command{name: "kinopub sessions --check", desc: "also verify the app token online"},
+		)
+		h.section("Flags:")
+		h.flags(fs)
+	}
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		return 1
+	}
+
+	creds, err := credstore.Load()
+	if err != nil {
+		errorf("could not read stored credentials: %v", err)
+		return 1
+	}
+	if creds.IsEmpty() {
+		fmt.Fprintf(os.Stderr, "No sessions stored. Log in with `%s login --cookie …` or `%s login --app`.\n",
+			os.Args[0], os.Args[0])
+		return 0
+	}
+
+	preferred := creds.PreferredMethod()
+	fmt.Fprintf(os.Stderr, "Stored sessions (a bare `%s <url>` uses the %s):\n\n", os.Args[0], sessionLabel(preferred))
+
+	// Website (cookie) session.
+	if creds.HasCookie() {
+		mark := "  "
+		if preferred == credstore.MethodCookie {
+			mark = errStyle.Green("→ ")
+		}
+		site := creds.Site
+		if site == "" {
+			site = "(site not recorded)"
+		}
+		fmt.Fprintf(os.Stderr, "%swebsite  · site %s%s\n", mark, errStyle.Cyan(site), savedSuffix(creds.CookieSavedAt))
+	}
+
+	// App session.
+	if creds.HasAppToken() {
+		mark := "  "
+		if preferred == credstore.MethodApp {
+			mark = errStyle.Green("→ ")
+		}
+		base := creds.APIBase
+		if base == "" {
+			base = "(default)"
+		}
+		fmt.Fprintf(os.Stderr, "%sapp      · API %s%s\n", mark, errStyle.Cyan(base), savedSuffix(creds.AppSavedAt))
+
+		if check {
+			ctx := context.Background()
+			user, code := validateAppToken(ctx, proxyURL, creds.APIBase, creds.AppToken, creds.AppUserAgent)
+			if code == 0 {
+				_ = user // validateAppToken already prints the account line
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "           run with --check to verify the token is still valid\n")
+		}
+	}
+	return 0
+}
+
+// sessionLabel renders a preferred-method value for a sentence.
+func sessionLabel(method string) string {
+	switch method {
+	case credstore.MethodApp:
+		return "app session"
+	case credstore.MethodCookie:
+		return "website login"
+	default:
+		return "stored session"
+	}
+}
+
+// savedSuffix renders " · saved <date>" when a timestamp is present.
+func savedSuffix(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return " · saved " + t.Local().Format("2006-01-02 15:04")
 }
 
 // ---------------------------------------------------------------------------
@@ -1479,11 +1688,12 @@ func runCompletion(args []string) int {
 const fishCompletion = `# kinopub fish shell completion
 # Install: kinopub completion fish > ~/.config/fish/completions/kinopub.fish
 
-set -l subcommands login logout doctor completion update
+set -l subcommands login logout sessions doctor completion update
 
 # Subcommands
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a login      -d "Save authentication credentials"
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a logout     -d "Remove stored credentials"
+complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a sessions   -d "Show stored login sessions"
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a doctor     -d "Verify files and repair state"
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a completion -d "Generate shell completion script"
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a update     -d "Install the latest release"
@@ -1491,6 +1701,7 @@ complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a upda
 # Main command flags
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s o -l output        -d "Output directory path" -r -F
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s c -l concurrency   -d "Max concurrent downloads" -r
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -l limit-rate      -d "Cap download speed, e.g. 2M or 500k" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l proxy          -d "Proxy URL (http, https, socks5)" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s q -l quality       -d "Quality preference" -r -a "4k 2160p 1080p 720p 480p 360p"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l verbosity      -d "Log verbosity" -r -a "quiet\t'Suppress output' normal\t'Default' verbose\t'All messages'"
@@ -1541,6 +1752,10 @@ complete -c kinopub -n "__fish_seen_subcommand_from login" -l app             -d
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l app-token       -d "App access token to save for --app" -r
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l app-base        -d "Override the kino.pub JSON API base URL" -r
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l proxy           -d "Proxy URL to validate the --app token" -r
+complete -c kinopub -n "__fish_seen_subcommand_from logout" -l app    -d "Remove only the app session" 
+complete -c kinopub -n "__fish_seen_subcommand_from logout" -l cookie -d "Remove only the website login" 
+complete -c kinopub -n "__fish_seen_subcommand_from sessions" -l check -d "Verify the app token online" 
+complete -c kinopub -n "__fish_seen_subcommand_from sessions" -l proxy -d "Proxy URL for --check" -r
 
 # doctor flags
 complete -c kinopub -n "__fish_seen_subcommand_from doctor" -s o -l output         -d "Output directory to check" -r -F
@@ -1567,7 +1782,7 @@ _kinopub_completion() {
     _init_completion || return
 
     local subcommands="login logout doctor completion update"
-    local main_flags="-o --output -c --concurrency --proxy -q --quality
+    local main_flags="-o --output -c --concurrency --limit-rate --proxy -q --quality
         --verbosity -v --ffmpeg --log-file --container --force --seasons --episodes
         --dry-run --cookie --user-agent --header --browser-cookies
         --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu \
@@ -1579,7 +1794,7 @@ _kinopub_completion() {
     local subcmd=""
     for w in "${words[@]:1}"; do
         case "$w" in
-            login|logout|doctor|completion|update)
+            login|logout|sessions|doctor|completion|update)
                 subcmd="$w"
                 break
                 ;;
@@ -1596,6 +1811,14 @@ _kinopub_completion() {
             COMPREPLY=($(compgen -W "--cookie --user-agent --browser-cookies --app --app-token --app-base --proxy --color --no-color" -- "$cur"))
             ;;
         logout)
+            COMPREPLY=($(compgen -W "--app --cookie --color --no-color" -- "$cur"))
+            ;;
+        sessions)
+            case "$prev" in
+                --proxy) return ;;
+                --color) COMPREPLY=($(compgen -W "auto always never" -- "$cur")); return ;;
+            esac
+            COMPREPLY=($(compgen -W "--check --proxy --color --no-color" -- "$cur"))
             ;;
         doctor)
             case "$prev" in
@@ -1635,7 +1858,7 @@ _kinopub_completion() {
                     --browser-cookies)
                         COMPREPLY=($(compgen -W "safari chrome firefox auto" -- "$cur")); return ;;
                     --cookie|--user-agent|--proxy|--header|--seasons|--episodes| \
-                    --ffmpeg-args|-x|-c|--concurrency|--audio|--subs)
+                    --ffmpeg-args|-x|-c|--concurrency|--limit-rate|--audio|--subs)
                         return ;;
                 esac
                 COMPREPLY=($(compgen -W "$main_flags" -- "$cur"))

@@ -175,9 +175,7 @@ func validateAppToken(ctx context.Context, proxyURL, apiBase, token, ua string) 
 	user, err := client.User(ctx)
 	switch {
 	case errors.Is(err, domain.ErrAPIUnauthorized):
-		errorf("the kino.pub app token was rejected (expired). Open the kino.pub app " +
-			"to refresh its session, then run `login --app` again (or re-run with a " +
-			"fresh --app-token).")
+		reportTokenExpired()
 		return apiclient.User{}, 1
 	case err != nil:
 		errorf("could not validate the kino.pub app token: %v", err)
@@ -302,4 +300,17 @@ func recordAuthMethodUsed(method string) {
 	stored.LastUsed = method
 	stored.LastUsedAt = time.Now()
 	_ = credstore.Save(stored)
+}
+
+// reportTokenExpired prints the guidance for a rejected app token. The tool
+// never refreshes the token itself — that is the phone app's job, and rotating
+// it here would invalidate the app's own session — so the fix is always to open
+// the app (which refreshes on its own) and re-save.
+func reportTokenExpired() {
+	errorf("the kino.pub app token has expired — the API rejected it (HTTP 401).\n"+
+		"  Open the kino.pub app on your phone once (it refreshes its own session),\n"+
+		"  then save the new token:  %s login --app\n"+
+		"  (or pass a fresh token directly with --app-token).\n"+
+		"  The token is deliberately never refreshed here, so the app's own login stays valid.",
+		os.Args[0])
 }
