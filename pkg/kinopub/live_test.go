@@ -21,8 +21,10 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -358,6 +360,166 @@ func TestLive_DiscoverRefIDTypes(t *testing.T) {
 		t.Logf("%-9s id=%s title=%s type=%s", path,
 			kindOf(first["id"]), kindOf(first["title"]), kindOf(first["type"]))
 	}
+}
+
+// TestLive_DiscoverPlaybackPlane разбирает вторую половину API — ту, что
+// отдаёт подписанные ссылки. От неё зависит схема доставки (ADR-0003).
+//
+// Значения URL не печатаются: они дают доступ к контенту. В вывод идут
+// только хост, набор заполненных полей, дорожки и качества.
+func TestLive_DiscoverPlaybackPlane(t *testing.T) {
+	c := liveClient(t)
+	ctx := context.Background()
+
+	// Берём фильм: у него один Video, разбирать проще, чем сериал.
+	page, err := c.Items(ctx, kinopub.ItemsQuery{Type: "movie", PerPage: 1, Sort: kinopub.SortViewsDesc})
+	if err != nil || len(page.Items) == 0 {
+		t.Fatalf("листинг фильмов: %v", err)
+	}
+	id := page.Items[0].ID
+
+	item, err := c.Item(ctx, strconv.Itoa(id))
+	if err != nil {
+		t.Fatalf("Item(%d): %v", id, err)
+	}
+	t.Logf("item %d %q (%d), type=%s videos=%d seasons=%d",
+		item.ID, item.Title, item.Year, item.Type, len(item.Videos), len(item.Seasons))
+
+	if len(item.Videos) == 0 {
+		t.Fatal("у фильма нет videos — модель расходится с API")
+	}
+	v := item.Videos[0]
+	t.Logf("video: duration=%dс files=%d", v.Duration, len(v.Files))
+	if len(v.Files) == 0 {
+		t.Fatal("нет файлов — доставлять нечего")
+	}
+
+	for _, f := range v.Files {
+		t.Logf("  файл: codec=%-5s %s %dx%d | http=%v hls=%v hls4=%v hls2=%v | хост=%s",
+			f.Codec, f.Quality, f.W, f.H,
+			f.URL.HTTP != "", f.URL.HLS != "", f.URL.HLS4 != "", f.URL.HLS2 != "",
+			hostOf(firstNonEmpty(f.URL.HLS4, f.URL.HLS, f.URL.HTTP)))
+	}
+
+	// Сырой ответ — за дорожками озвучки и субтитрами: в модели их пока нет,
+	// а для платформы переключение дубляжей обязательно.
+	raw, _, err := rawGet(t, c, fmt.Sprintf("/items/%d", id))
+	if err != nil {
+		t.Fatalf("сырой item: %v", err)
+	}
+	var de struct {
+		Item struct {
+			Videos []map[string]any `json:"videos"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(raw, &de); err == nil && len(de.Item.Videos) > 0 {
+		t.Log("поля video в сыром ответе —")
+		for _, k := range allKeys(de.Item.Videos[0]) {
+			t.Logf("    %-14s %s", k, kindOf(de.Item.Videos[0][k]))
+		}
+	}
+
+	// Ссылку для фазы 0 отдаём ЧЕРЕЗ ФАЙЛ, а не через stdout и не через
+	// argv: подписанный URL — это доступ к контенту, ему не место ни в
+	// логах теста, ни в списке процессов.
+	if out := os.Getenv("KINOPUB_URL_OUT"); out != "" {
+		u := firstNonEmpty(v.Files[0].URL.HLS4, v.Files[0].URL.HLS, v.Files[0].URL.HTTP)
+		if err := os.WriteFile(out, []byte(u), 0o600); err != nil {
+			t.Fatalf("запись URL: %v", err)
+		}
+		t.Logf("ссылка записана в %s (0600), хост %s", out, hostOf(u))
+	}
+}
+
+// TestLive_DiscoverLinkLifetime закрывает пункт (в) фазы 0 авторитетно:
+// срок жизни приходит полем API, а не выковыривается из query подписи.
+// Заодно выясняет хост сегментов — allowed_origins обязан включать и его.
+func TestLive_DiscoverLinkLifetime(t *testing.T) {
+	c := liveClient(t)
+	ctx := context.Background()
+
+	page, err := c.Items(ctx, kinopub.ItemsQuery{Type: "movie", PerPage: 1, Sort: kinopub.SortViewsDesc})
+	if err != nil || len(page.Items) == 0 {
+		t.Fatalf("листинг: %v", err)
+	}
+	raw, _, err := rawGet(t, c, fmt.Sprintf("/items/%d", page.Items[0].ID))
+	if err != nil {
+		t.Fatalf("item: %v", err)
+	}
+	var de struct {
+		Item struct {
+			Videos []struct {
+				Files []struct {
+					Quality   string `json:"quality"`
+					Codec     string `json:"codec"`
+					ExpiresAt int64  `json:"expires_at"`
+					URL       struct {
+						HLS4 string `json:"hls4"`
+					} `json:"url"`
+				} `json:"files"`
+			} `json:"videos"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(raw, &de); err != nil || len(de.Item.Videos) == 0 {
+		t.Fatalf("разбор: %v", err)
+	}
+	files := de.Item.Videos[0].Files
+	if len(files) == 0 {
+		t.Fatal("нет файлов")
+	}
+	for _, f := range files[:min(3, len(files))] {
+		exp := time.Unix(f.ExpiresAt, 0)
+		t.Logf("%-5s %-6s expires_at=%d -> через %s",
+			f.Codec, f.Quality, f.ExpiresAt, time.Until(exp).Round(time.Minute))
+	}
+
+	// Хост сегментов: тянем мастер-плейлист и смотрим, куда он указывает.
+	master, code, err := rawGet2(t, files[0].URL.HLS4)
+	if err != nil || code != 200 {
+		t.Fatalf("мастер-плейлист: код %d %v", code, err)
+	}
+	base, _ := url.Parse(files[0].URL.HLS4)
+	hosts := map[string]int{}
+	for _, line := range strings.Split(string(master), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if ref, err := base.Parse(line); err == nil {
+			hosts[ref.Host]++
+		}
+	}
+	t.Logf("мастер на хосте %s; варианты указывают на: %v", base.Host, hosts)
+}
+
+// rawGet2 ходит по абсолютному URL без авторизации — подписанные ссылки
+// её не требуют (это и есть вывод пункта «г» фазы 0).
+func rawGet2(t *testing.T, u string) ([]byte, int, error) {
+	t.Helper()
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Get(u)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	return b, resp.StatusCode, err
+}
+
+func firstNonEmpty(ss ...string) string {
+	for _, s := range ss {
+		if s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func hostOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "(нет)"
+	}
+	return u.Host
 }
 
 func kindOf(v any) string {
