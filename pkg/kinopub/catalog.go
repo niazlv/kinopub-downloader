@@ -5,6 +5,7 @@ package kinopub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -170,6 +171,18 @@ var ErrStopWalk = fmt.Errorf("kinopub: stop walk")
 // страниц. Без этого сбой на стороне площадки превращается в вечный цикл.
 const maxWalkPages = 10_000
 
+// Темп обхода.
+//
+// Аккаунт у пользователя обычно один, и обход каталога без пауз — самый
+// быстрый способ получить ограничение на него: проверено на живом каталоге,
+// площадка ответила rate limited после ~11 тысяч тайтлов.
+const (
+	walkPause      = 300 * time.Millisecond
+	walkRetries    = 5
+	walkBackoffMin = 5 * time.Second
+	walkBackoffMax = 2 * time.Minute
+)
+
 // ChangedSince обходит каталог в порядке убывания времени изменения и
 // отдаёт всё, что менялось ПОСЛЕ since, останавливаясь на первом элементе
 // старше границы.
@@ -188,7 +201,7 @@ func (c *Client) ChangedSince(ctx context.Context, since time.Time, q ItemsQuery
 	q.Page = 1
 
 	for pages := 0; pages < maxWalkPages; pages++ {
-		page, err := c.Items(ctx, q)
+		page, err := c.itemsWithBackoff(ctx, q)
 		if err != nil {
 			return err
 		}
@@ -213,9 +226,41 @@ func (c *Client) ChangedSince(ctx context.Context, since time.Time, q ItemsQuery
 		}
 		q.Page = page.Pagination.Current + 1
 
-		if err := ctx.Err(); err != nil {
-			return err
+		// Пауза между страницами. Обход каталога — фоновая работа, и
+		// секунда разницы в его длительности не стоит риска для аккаунта.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(walkPause):
 		}
 	}
 	return fmt.Errorf("kinopub: walk exceeded %d pages", maxWalkPages)
+}
+
+// itemsWithBackoff повторяет запрос при ограничении темпа.
+//
+// Прерывать обход на rate limited нельзя: полный каталог это тысячи страниц,
+// и одна просьба притормозить не должна обнулять всю работу. Интервал растёт,
+// потому что площадка снимает ограничение не мгновенно.
+func (c *Client) itemsWithBackoff(ctx context.Context, q ItemsQuery) (ItemsPage, error) {
+	delay := walkBackoffMin
+	for attempt := 1; ; attempt++ {
+		page, err := c.Items(ctx, q)
+		if err == nil {
+			return page, nil
+		}
+		if !errors.Is(err, ErrRateLimited) || attempt > walkRetries {
+			return ItemsPage{}, err
+		}
+		c.logger.Debug("kinopub: площадка просит притормозить",
+			"page", q.Page, "attempt", attempt, "delay", delay.String())
+		select {
+		case <-ctx.Done():
+			return ItemsPage{}, ctx.Err()
+		case <-time.After(delay):
+		}
+		if delay < walkBackoffMax {
+			delay *= 2
+		}
+	}
 }
