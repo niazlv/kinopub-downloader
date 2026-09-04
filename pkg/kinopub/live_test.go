@@ -626,6 +626,178 @@ func labels(as []kinopub.AudioTrack, n int) []string {
 	return out
 }
 
+// TestLive_DiscoverHistoryShape — формы истории просмотров.
+// Нужны для ОДНОКРАТНОГО импорта при заведении пользователя: семья смотрит
+// через площадку годами, и обнулить это при переезде значит вернуть всех
+// в старое приложение в первый же вечер.
+func TestLive_DiscoverHistoryShape(t *testing.T) {
+	c := liveClient(t)
+	for _, path := range []string{"/history?perpage=3", "/watching/serials", "/watching/movies"} {
+		body, code, err := rawGet(t, c, path)
+		if err != nil || code != 200 {
+			t.Logf("%-26s код %d %v", path, code, err)
+			continue
+		}
+		var env map[string]any
+		if json.Unmarshal(body, &env) != nil {
+			continue
+		}
+		t.Logf("%-26s %d", path, code)
+		for _, k := range allKeys(env) {
+			arr, ok := env[k].([]any)
+			if !ok || len(arr) == 0 {
+				t.Logf("    %-12s %s", k, kindOf(env[k]))
+				continue
+			}
+			m, ok := arr[0].(map[string]any)
+			if !ok {
+				continue
+			}
+			t.Logf("    %s[%d] —", k, len(arr))
+			for _, f := range allKeys(m) {
+				t.Logf("        %-12s %s", f, kindOf(m[f]))
+			}
+		}
+	}
+}
+
+// TestLive_DiscoverWatchingPositions ищет ПОЗИЦИЮ просмотра по сериям.
+// Счётчики watched/total из /watching/serials говорят «сколько», но не
+// «докуда», а для «продолжить с места» нужно именно второе.
+func TestLive_DiscoverWatchingPositions(t *testing.T) {
+	c := liveClient(t)
+	body, code, err := rawGet(t, c, "/watching/serials")
+	if err != nil || code != 200 {
+		t.Fatalf("watching: код %d %v", code, err)
+	}
+	var wl struct {
+		Items []struct {
+			ID      int    `json:"id"`
+			Title   string `json:"title"`
+			Watched int    `json:"watched"`
+			Total   int    `json:"total"`
+		} `json:"items"`
+	}
+	if json.Unmarshal(body, &wl) != nil || len(wl.Items) == 0 {
+		t.Fatal("пустой список просматриваемого")
+	}
+	first := wl.Items[0]
+	t.Logf("сериал %d %q: просмотрено %d из %d", first.ID, first.Title, first.Watched, first.Total)
+
+	raw, _, err := rawGet(t, c, fmt.Sprintf("/items/%d", first.ID))
+	if err != nil {
+		t.Fatalf("item: %v", err)
+	}
+	var de struct {
+		Item struct {
+			Seasons []struct {
+				Number   int `json:"number"`
+				Episodes []struct {
+					Number   int            `json:"number"`
+					Duration int            `json:"duration"`
+					Watching map[string]any `json:"watching"`
+				} `json:"episodes"`
+			} `json:"seasons"`
+		} `json:"item"`
+	}
+	if json.Unmarshal(raw, &de) != nil || len(de.Item.Seasons) == 0 {
+		t.Fatal("нет сезонов")
+	}
+	var shown int
+	for _, s := range de.Item.Seasons {
+		for _, e := range s.Episodes {
+			if len(e.Watching) == 0 || shown >= 5 {
+				continue
+			}
+			keys := make([]string, 0, len(e.Watching))
+			for k, v := range e.Watching {
+				keys = append(keys, fmt.Sprintf("%s=%v(%s)", k, v, kindOf(v)))
+			}
+			sort.Strings(keys)
+			t.Logf("  s%02de%02d (%dс): watching{%s}", s.Number, e.Number, e.Duration,
+				strings.Join(keys, " "))
+			shown++
+		}
+	}
+	if shown == 0 {
+		t.Fatal("поле watching не найдено ни у одной серии")
+	}
+
+	// Повтор /history — прошлый раз отвалился по таймауту.
+	if hb, hc, err := rawGet(t, c, "/history?perpage=2"); err == nil && hc == 200 {
+		var env map[string]any
+		if json.Unmarshal(hb, &env) == nil {
+			if arr, ok := env["history"].([]any); ok && len(arr) > 0 {
+				if m, ok := arr[0].(map[string]any); ok {
+					t.Log("/history[0] —")
+					for _, k := range allKeys(m) {
+						t.Logf("    %-12s %s", k, kindOf(m[k]))
+					}
+				}
+			}
+		}
+	} else {
+		t.Logf("/history недоступен: код %d %v", hc, err)
+	}
+}
+
+// TestLive_WatchingSemantics проверяет ЕДИНСТВЕННОЕ место, где семантика
+// снята с наблюдения, а не подтверждена: единицы Watching.Time и значения
+// Watching.Status.
+//
+// Если площадка отдаёт время не в секундах, импорт истории молча поставит
+// всем неверные позиции — заметить это можно будет только по жалобам.
+// Поэтому здесь утверждение, а не лог.
+func TestLive_WatchingSemantics(t *testing.T) {
+	c := liveClient(t)
+	ctx := context.Background()
+
+	items, err := c.WatchingSerials(ctx)
+	if err != nil {
+		t.Fatalf("watching: %v", err)
+	}
+	if len(items) == 0 {
+		t.Skip("аккаунт ничего не смотрит — проверять нечего")
+	}
+
+	var checked int
+	for _, it := range items {
+		if checked >= 3 {
+			break
+		}
+		detail, err := c.Item(ctx, strconv.Itoa(it.ID))
+		if err != nil {
+			continue
+		}
+		for _, s := range detail.Seasons {
+			for _, v := range s.Episodes {
+				if !v.Watching.Started() || v.Duration <= 0 {
+					continue
+				}
+				checked++
+				// Позиция в СЕКУНДАХ обязана укладываться в длительность
+				// (с запасом на округление). Миллисекунды дали бы значение
+				// в тысячу раз больше и здесь бы вылезли.
+				if v.Watching.Time > v.Duration+60 {
+					t.Fatalf("позиция %d больше длительности %d — Time не в секундах",
+						v.Watching.Time, v.Duration)
+				}
+				if v.Watching.Status < -1 || v.Watching.Status > 1 {
+					t.Fatalf("неожиданный Status=%d, ожидались -1, 0 или 1", v.Watching.Status)
+				}
+				t.Logf("%q s%02de%02d: позиция %dс из %dс, статус %d",
+					it.Title, s.Number, v.Number, v.Watching.Time, v.Duration, v.Watching.Status)
+				if checked >= 3 {
+					break
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Skip("не нашлось начатых серий с известной длительностью")
+	}
+}
+
 func firstNonEmpty(ss ...string) string {
 	for _, s := range ss {
 		if s != "" {
