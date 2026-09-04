@@ -1,11 +1,19 @@
 // Copyright (C) 2026 niazlv <niazlv03@gmail.com>
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
-// Package httpx — utls.go provides an HTTP transport that uses uTLS to
-// impersonate a real browser's TLS fingerprint. This bypasses Cloudflare and
-// CDN fingerprint-based throttling/blocking that affects Go's default
-// crypto/tls implementation.
-package httpx
+// Package browserhttp предоставляет HTTP-транспорт, подделывающий TLS-отпечаток
+// Chrome через uTLS.
+//
+// Существует не ради маскировки как таковой: CDN и Cloudflare режут скорость
+// и блокируют по JA3/JA4-отпечатку, а стандартный crypto/tls в Go даёт
+// отпечаток, который под это попадает. Одиночный запрос обычным клиентом
+// обычно проходит — расхождение проявляется на длительной выкачке, поэтому
+// проверять транспорт единичной пробой бесполезно.
+//
+// Пакет публичный и не знает ничего о kino.pub: это общий транспорт, нужный
+// любому, кто тянет сегменты с CDN длительно. Поддерживает HTTP/1.1 и HTTP/2
+// по ALPN и умеет ходить через прокси.
+package browserhttp
 
 import (
 	"bufio"

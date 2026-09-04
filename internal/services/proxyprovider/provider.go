@@ -19,7 +19,7 @@ import (
 	"golang.org/x/net/proxy"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
-	"github.com/niazlv/kinopub-downloader/internal/lib/httpx"
+	"github.com/niazlv/kinopub-downloader/pkg/browserhttp"
 )
 
 // EnvLookupFunc abstracts os.Getenv for testability.
@@ -180,7 +180,7 @@ func (p *Provider) buildHTTPClient() *http.Client {
 		// Direct connection — use platform-aware dialer (fixes DNS on Android/Termux).
 		return &http.Client{
 			Transport: &http.Transport{
-				DialContext: httpx.NewDialer().DialContext,
+				DialContext: browserhttp.NewDialer().DialContext,
 			},
 			Timeout: 30 * time.Second,
 		}
@@ -201,7 +201,7 @@ func (p *Provider) buildHTTPProxyClient() *http.Client {
 
 	transport := &http.Transport{
 		Proxy:       proxyFunc,
-		DialContext: httpx.NewDialer().DialContext,
+		DialContext: browserhttp.NewDialer().DialContext,
 	}
 
 	return &http.Client{
@@ -242,7 +242,7 @@ func (p *Provider) buildSOCKS5Client() *http.Client {
 
 	// Reach the SOCKS5 server through the platform-aware dialer so the
 	// Android/Termux DNS workaround applies to the proxy connection too.
-	dialer, err := proxy.SOCKS5("tcp", addr, auth, httpx.NewDialer())
+	dialer, err := proxy.SOCKS5("tcp", addr, auth, browserhttp.NewDialer())
 	if err != nil {
 		// Fail closed: the user explicitly requested a SOCKS5 proxy, so a
 		// direct fallback would silently leak traffic (and the real IP) to the
@@ -258,7 +258,7 @@ func (p *Provider) buildSOCKS5Client() *http.Client {
 			}
 			if p.isExcluded(host, noProxyHosts) {
 				// Direct connection for excluded hosts (platform-aware, ctx-honoring).
-				return httpx.NewDialer().DialContext(ctx, network, address)
+				return browserhttp.NewDialer().DialContext(ctx, network, address)
 			}
 			// Honor cancellation/timeout by threading ctx when the SOCKS5 dialer
 			// supports it (x/net's dialer implements proxy.ContextDialer).

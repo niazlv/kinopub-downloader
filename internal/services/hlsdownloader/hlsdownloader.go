@@ -22,9 +22,9 @@ import (
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
 	"github.com/niazlv/kinopub-downloader/internal/lib/fsutil"
-	"github.com/niazlv/kinopub-downloader/internal/lib/httpx"
 	"github.com/niazlv/kinopub-downloader/internal/lib/ratelimit"
 	"github.com/niazlv/kinopub-downloader/internal/lib/webvtt"
+	"github.com/niazlv/kinopub-downloader/pkg/browserhttp"
 )
 
 const (
@@ -103,7 +103,7 @@ func New(client *http.Client, auth domain.RequestAuth, logger domain.Logger, opt
 	// Use browser-fingerprint client for CDN requests, routing through proxy if set.
 	// The regular Go HTTP client gets throttled by Cloudflare/CDN due to
 	// its distinctive TLS fingerprint.
-	d.client = httpx.NewBrowserClient(d.proxyURL)
+	d.client = browserhttp.NewBrowserClient(d.proxyURL)
 	return d
 }
 

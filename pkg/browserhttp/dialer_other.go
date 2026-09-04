@@ -1,9 +1,9 @@
 // Copyright (C) 2026 niazlv <niazlv03@gmail.com>
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR GPL-3.0-or-later
 
 //go:build !android
 
-package httpx
+package browserhttp
 
 import (
 	"net"
