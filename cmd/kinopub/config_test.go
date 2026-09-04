@@ -177,7 +177,7 @@ func TestBuildDependenciesSkipsNotifiersWhenOff(t *testing.T) {
 	cfg := domain.RunConfig{OutputPath: t.TempDir(), NoNotify: true}
 	kinopub.ApplyDefaults(&cfg)
 
-	deps, cleanup, err := buildDependencies(cfg)
+	deps, cleanup, err := buildDependencies(&cfg)
 	if err != nil {
 		t.Fatalf("buildDependencies: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestBuildDependenciesWiresNotifiersWhenOn(t *testing.T) {
 	cfg := domain.RunConfig{OutputPath: t.TempDir()}
 	kinopub.ApplyDefaults(&cfg)
 
-	deps, cleanup, err := buildDependencies(cfg)
+	deps, cleanup, err := buildDependencies(&cfg)
 	if err != nil {
 		t.Fatalf("buildDependencies: %v", err)
 	}

@@ -38,7 +38,12 @@ const (
 
 // RunConfig holds all configuration for a single download run.
 type RunConfig struct {
-	InputURL        string
+	InputURL string
+	// FromURL, when set, is a platform download-manifest URL. The platform has
+	// already resolved the source, so the run needs no site credentials: the
+	// manifest carries the master playlist and the track list, and every
+	// address goes through the platform's own gateway.
+	FromURL         string
 	OutputPath      string // "" → cwd (Req 11.1)
 	MaxConcurrency  int    // [1,16], default 2 (Req 4.1, 4.2)
 	ProxyURL        string // explicit proxy; "" → system/direct

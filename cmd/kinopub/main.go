@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/app/kinopub"
 	"github.com/niazlv/kinopub-downloader/internal/domain"
@@ -37,6 +38,7 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/services/hlsdownloader"
 	"github.com/niazlv/kinopub-downloader/internal/services/inputresolver"
 	"github.com/niazlv/kinopub-downloader/internal/services/kinopubapp"
+	"github.com/niazlv/kinopub-downloader/internal/services/manifestscraper"
 	"github.com/niazlv/kinopub-downloader/internal/services/mediaresolver"
 	"github.com/niazlv/kinopub-downloader/internal/services/outputlayout"
 	"github.com/niazlv/kinopub-downloader/internal/services/pagescraper"
@@ -148,6 +150,7 @@ func run() int {
 		notify      bool
 	)
 
+	var fromURL string
 	fs := flag.NewFlagSet("kinopub", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
@@ -175,6 +178,7 @@ func run() int {
 	fs.Var(&browserCk, "browser-cookies", "auto-load site cookies from a browser: safari, chrome, firefox, or auto (default auto when given without a value)")
 	fs.StringVar(&siteHost, "site", "", "site host to target, e.g. kino.watch (default: taken from the <url>, else "+domain.DefaultSiteHost+")")
 	fs.BoolVar(&keepDomains, "no-domain-rewrite", false, "keep URLs exactly as given: do not rewrite the site's former domains (e.g. kino.pub) to the current one ("+domain.DefaultSiteHost+")")
+	fs.StringVar(&fromURL, "from", "", "platform download-manifest URL (from the platform's share button): downloads without site credentials")
 	fs.StringVar(&feedFile, "feed-file", "", "read the RSS feed from a local file instead of fetching it over the network")
 	fs.StringVar(&ffmpegArgs, "ffmpeg-args", "", "extra ffmpeg arguments as a single string (advanced, e.g. \"-c:v libx265 -crf 28\")")
 	fs.Var(&ffmpegX, "x", "extra ffmpeg argument (repeatable, advanced, e.g. --x \"-c:v\" --x libx265)")
@@ -318,14 +322,31 @@ func run() int {
 	// Exactly one URL is required, unless a local --feed-file is supplied, in
 	// which case the URL is optional (used only to derive the series id).
 	args := posArgs
-	if feedFile == "" {
+	switch {
+	case fromURL != "":
+		// Манифест уже описывает, что качать: позиционный адрес при нём
+		// лишний, а принять оба значило бы молча предпочесть одно из них.
+		if len(args) > 0 {
+			errorf("--from and a positional URL are mutually exclusive")
+			fmt.Fprintln(os.Stderr)
+			fs.Usage()
+			return 1
+		}
+		if feedFile != "" {
+			errorf("--from cannot be combined with --feed-file")
+			fmt.Fprintln(os.Stderr)
+			fs.Usage()
+			return 1
+		}
+	case feedFile == "":
 		if len(args) != 1 {
 			errorf("%s", domain.ErrExactlyOneURL.Error())
 			fmt.Fprintln(os.Stderr)
 			fs.Usage()
 			return 1
 		}
-	} else if len(args) > 1 {
+	}
+	if feedFile != "" && len(args) > 1 {
 		errorf("at most one URL argument is allowed with --feed-file")
 		fmt.Fprintln(os.Stderr)
 		fs.Usage()
@@ -334,6 +355,12 @@ func run() int {
 	var inputURL string
 	if len(args) == 1 {
 		inputURL = args[0]
+	}
+
+	// Движок включает HLS-конвейер только при непустом InputURL. Сам адрес
+	// скрапер манифеста не использует — манифест уже получен и разобран.
+	if fromURL != "" {
+		inputURL = fromURL
 	}
 
 	// Auto-detect: if the positional argument is a path to an existing file
@@ -442,7 +469,11 @@ func run() int {
 	}
 
 	var resolvedCookie string
-	if !appMode {
+	// При --from учётные данные площадки не нужны вовсе: резолв сделала
+	// платформа, а её шлюз пускает по тикету в адресе. Лезть за сохранённой
+	// сессией здесь значило бы предупреждать «залогиньтесь» ровно там, где
+	// вход не требуется.
+	if !appMode && fromURL == "" {
 		var fatal bool
 		resolvedCookie, userAgent, fatal = resolveAuth(cookie, userAgent, browserCk, site, true)
 		if fatal {
@@ -471,6 +502,7 @@ func run() int {
 
 	cfg := domain.RunConfig{
 		InputURL:        inputURL,
+		FromURL:         fromURL,
 		Site:            site,
 		NoDomainRewrite: keepDomains,
 		OutputPath:      output,
@@ -551,7 +583,7 @@ func run() int {
 	}
 
 	// Wire up services.
-	deps, cleanup, err := buildDependencies(cfg)
+	deps, cleanup, err := buildDependencies(&cfg)
 	if err != nil {
 		errorf("%v", err)
 		return 1
@@ -626,7 +658,7 @@ func exitCodeFor(res domain.RunResult, ctxErr error, dryRun bool) int {
 
 // buildDependencies constructs all real service implementations and returns
 // the Dependencies struct, a cleanup function, and any error.
-func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), error) {
+func buildDependencies(cfg *domain.RunConfig) (kinopub.Dependencies, func(), error) {
 	var cleanups []func()
 	cleanup := func() {
 		for i := len(cleanups) - 1; i >= 0; i-- {
@@ -638,7 +670,7 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	coord := logx.NewCoordinator(os.Stderr)
 
 	// Build logger handlers.
-	handlers := buildLogHandlers(cfg, coord)
+	handlers := buildLogHandlers(*cfg, coord)
 
 	// Open log file if configured.
 	if cfg.LogFilePath != "" {
@@ -759,7 +791,24 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	//     app User-Agent were resolved into cfg by prepareAppSession.
 	//   - website: the HTML page scraper, available only when a cookie is
 	//     present (the player page is behind Cloudflare + auth).
+	//   - --from: a platform manifest. The platform already resolved the
+	//     source, so this path needs no site credentials at all.
 	switch {
+	case cfg.FromURL != "":
+		// Манифест забирается один раз: ссылка короткоживущая, и ходить по
+		// ней повторно незачем.
+		mctx, cancelManifest := context.WithTimeout(context.Background(), 30*time.Second)
+		m, err := manifestscraper.Fetch(mctx, httpClient, cfg.FromURL)
+		cancelManifest()
+		if err != nil {
+			return deps, cleanup, err
+		}
+		applyManifestSelection(cfg, m, logger)
+		deps.PageScraper = manifestscraper.New(m, logger)
+		deps.HLSDownloader = hlsdownloader.New(httpClient, auth, logger,
+			hlsdownloader.WithConcurrency(cfg.MaxConcurrency),
+			hlsdownloader.WithProxy(proxyProv.ProxyURL()),
+			hlsdownloader.WithRateLimit(cfg.RateLimit))
 	case cfg.AppMode:
 		apiCli := kpapi.New(proxyProv.HTTPClient(), cfg.APIBase, cfg.AppToken,
 			kpapi.WithUserAgent(cfg.UserAgent), kpapi.WithLogger(kplog.Adapt(logger)))
@@ -852,4 +901,59 @@ func makeRunFunc() downloader.RunFunc {
 		cmd.Stderr = io.Discard
 		return cmd.Run()
 	}
+}
+
+// applyManifestSelection переносит выбор, сделанный в интерфейсе платформы,
+// в настройки прогона — но только там, где человек не сказал иного флагом.
+// Явный флаг всегда сильнее: он набран сейчас, а манифест выписан раньше.
+//
+// Дорожки в манифесте отмечены идентификаторами, а отбор в утилите идёт по
+// подстроке имени или языка, поэтому идентификаторы переводятся в подписи.
+// Отсюда и ограничение: две дорожки с похожими подписями отбором не
+// различить — тогда останутся обе, что безопаснее, чем потерять нужную.
+func applyManifestSelection(cfg *domain.RunConfig, m *manifestscraper.Manifest, logger domain.Logger) {
+	log := logger.Component("manifest")
+
+	if cfg.Quality == "" && m.Select.MaxHeight > 0 {
+		cfg.Quality = domain.Quality(fmt.Sprintf("%dp", m.Select.MaxHeight))
+		log.Debug("quality taken from the manifest", domain.F("quality", string(cfg.Quality)))
+	}
+
+	if cfg.AudioPref.IsAll() {
+		if pats := patternsFor(m.Audios, m.Select.Audios); len(pats) > 0 {
+			cfg.AudioPref = domain.AudioPreference{Include: pats}
+			log.Debug("audio selection taken from the manifest", domain.F("tracks", len(pats)))
+		}
+	}
+	if cfg.SubsPref.IsAll() {
+		if pats := patternsFor(m.Subtitles, m.Select.Subtitles); len(pats) > 0 {
+			cfg.SubsPref = domain.SubtitlePreference{Include: pats}
+			log.Debug("subtitle selection taken from the manifest", domain.F("tracks", len(pats)))
+		}
+	}
+}
+
+// patternsFor переводит выбранные идентификаторы в подписи для отбора.
+// Пустой список идентификаторов означает «всё» — тогда сужать нечего.
+func patternsFor(tracks []manifestscraper.Track, ids []string) []string {
+	if len(ids) == 0 || len(ids) == len(tracks) {
+		return nil
+	}
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	var out []string
+	for _, t := range tracks {
+		if !want[t.ID] {
+			continue
+		}
+		switch {
+		case t.Title != "":
+			out = append(out, t.Title)
+		case t.Language != "":
+			out = append(out, t.Language)
+		}
+	}
+	return out
 }

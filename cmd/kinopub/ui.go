@@ -508,7 +508,7 @@ var mainFlagGroups = []flagGroup{
 	}},
 	{title: "Site, network and authentication:", names: []string{
 		"site", "no-domain-rewrite", "proxy", "cookie", "user-agent", "header",
-		"browser-cookies", "feed-file",
+		"browser-cookies", "feed-file", "from",
 	}},
 	{title: "kino.pub app session (--app):", names: []string{
 		"app", "app-token", "app-base", "app-codec",
