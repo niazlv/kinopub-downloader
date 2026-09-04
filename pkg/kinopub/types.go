@@ -133,6 +133,71 @@ type Video struct {
 	Title    string `json:"title"`
 	Duration int    `json:"duration"` // seconds
 	Files    []File `json:"files"`
+
+	// Audios — дорожки озвучки. Для русского контента их бывает десяток,
+	// и переключение между ними — базовая функция, а не украшение.
+	Audios []AudioTrack `json:"audios"`
+	// Subtitles — субтитры; часть вшита в контейнер (Embed), часть лежит
+	// отдельным файлом по URL.
+	Subtitles []Subtitle `json:"subtitles"`
+}
+
+// NamedRef — вложенный справочный объект вида {id, title, short_title}.
+//
+// Поле id намеренно не моделируется: его тип не проверен, а платформе он
+// не нужен — нужна подпись дорожки. Неизвестные поля encoding/json
+// игнорирует, так что и рисковать незачем.
+type NamedRef struct {
+	Title      string `json:"title"`
+	ShortTitle string `json:"short_title"`
+}
+
+// Name возвращает короткое имя, а при его отсутствии — полное.
+func (n NamedRef) Name() string {
+	if n.ShortTitle != "" {
+		return n.ShortTitle
+	}
+	return n.Title
+}
+
+// AudioTrack — одна дорожка озвучки.
+type AudioTrack struct {
+	ID       int    `json:"id"`
+	Index    int    `json:"index"`
+	Lang     string `json:"lang"`
+	Codec    string `json:"codec"`
+	Channels int    `json:"channels"`
+
+	// Author — студия озвучки. ОБЪЕКТ, а не строка, и у части дорожек
+	// равен null (проверено: 18 из 53 у выборки популярных фильмов).
+	// Отсюда указатель: «оригинальная дорожка без студии» — законный случай.
+	Author *NamedRef `json:"author"`
+	// Type — вид дорожки (дубляж, многоголосый, оригинал). Тоже объект.
+	Type NamedRef `json:"type"`
+}
+
+// Label — человекочитаемая подпись дорожки для меню выбора.
+func (a AudioTrack) Label() string {
+	switch {
+	case a.Author != nil && a.Author.Name() != "":
+		return a.Author.Name()
+	case a.Type.Name() != "":
+		return a.Type.Name()
+	default:
+		return a.Lang
+	}
+}
+
+// Subtitle — дорожка субтитров.
+type Subtitle struct {
+	Lang   string `json:"lang"`
+	Embed  bool   `json:"embed"`
+	Forced bool   `json:"forced"`
+	URL    string `json:"url"`
+	File   string `json:"file"`
+	// Shift — сдвиг тайминга. float64 по тому же уроку, что и duration:
+	// целое в выборке не доказывает, что дробного не бывает.
+	Shift float64 `json:"shift"`
 }
 
 // File is one encoded rendition of a video. The signed URLs are ready to
@@ -145,6 +210,19 @@ type File struct {
 	Quality   string `json:"quality"`    // "1080p", "2160p", …
 	QualityID int    `json:"quality_id"` // 1..4, higher is better
 	URL       URLSet `json:"url"`
+
+	// ExpiresAt — unix-секунды, когда подписанные ссылки перестанут
+	// работать. Приходит полем API, поэтому срок известен точно и его
+	// не надо выковыривать из подписи в query.
+	ExpiresAt int64 `json:"expires_at"`
+}
+
+// Expires — срок жизни ссылок файла. Нулевое время, если API его не дал.
+func (f File) Expires() time.Time {
+	if f.ExpiresAt == 0 {
+		return time.Time{}
+	}
+	return time.Unix(f.ExpiresAt, 0)
 }
 
 // URLSet holds the signed delivery URLs for a File.

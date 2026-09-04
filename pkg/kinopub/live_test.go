@@ -505,6 +505,127 @@ func rawGet2(t *testing.T, u string) ([]byte, int, error) {
 	return b, resp.StatusCode, err
 }
 
+// TestLive_DiscoverTrackFieldTypes — типы полей дорожек и субтитров.
+// Проверяются по НЕСКОЛЬКИМ элементам: одиночная проба уже дважды соврала
+// (duration.average, imdb), потому что null и целое встречаются рядом
+// с дробным и строкой.
+func TestLive_DiscoverTrackFieldTypes(t *testing.T) {
+	c := liveClient(t)
+	ctx := context.Background()
+	page, err := c.Items(ctx, kinopub.ItemsQuery{Type: "movie", PerPage: 5, Sort: kinopub.SortViewsDesc})
+	if err != nil {
+		t.Fatalf("листинг: %v", err)
+	}
+
+	audio := map[string]map[string]int{}
+	subs := map[string]map[string]int{}
+	files := map[string]map[string]int{}
+	note := func(acc map[string]map[string]int, m map[string]any) {
+		for k, v := range m {
+			if acc[k] == nil {
+				acc[k] = map[string]int{}
+			}
+			acc[k][kindOf(v)]++
+		}
+	}
+
+	for _, it := range page.Items {
+		raw, _, err := rawGet(t, c, fmt.Sprintf("/items/%d", it.ID))
+		if err != nil {
+			continue
+		}
+		var de struct {
+			Item struct {
+				Videos []struct {
+					Audios    []map[string]any `json:"audios"`
+					Subtitles []map[string]any `json:"subtitles"`
+					Files     []map[string]any `json:"files"`
+				} `json:"videos"`
+			} `json:"item"`
+		}
+		if json.Unmarshal(raw, &de) != nil || len(de.Item.Videos) == 0 {
+			continue
+		}
+		v := de.Item.Videos[0]
+		for _, a := range v.Audios {
+			note(audio, a)
+		}
+		for _, x := range v.Subtitles {
+			note(subs, x)
+		}
+		for _, f := range v.Files {
+			note(files, f)
+		}
+	}
+	report := func(name string, acc map[string]map[string]int) {
+		t.Logf("%s —", name)
+		keys := make([]string, 0, len(acc))
+		for k := range acc {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			t.Logf("    %-12s %v", k, acc[k])
+		}
+	}
+	report("audios", audio)
+	report("subtitles", subs)
+	report("files", files)
+}
+
+// TestLive_TracksDecode утверждает, что дорожки и субтитры разбираются
+// типизированно, а подписи дорожек пригодны для меню выбора.
+func TestLive_TracksDecode(t *testing.T) {
+	c := liveClient(t)
+	ctx := context.Background()
+	page, err := c.Items(ctx, kinopub.ItemsQuery{Type: "movie", PerPage: 3, Sort: kinopub.SortViewsDesc})
+	if err != nil {
+		t.Fatalf("листинг: %v", err)
+	}
+	var checked int
+	for _, it := range page.Items {
+		item, err := c.Item(ctx, strconv.Itoa(it.ID))
+		if err != nil || len(item.Videos) == 0 {
+			continue
+		}
+		v := item.Videos[0]
+		if len(v.Audios) == 0 {
+			continue
+		}
+		checked++
+		var withoutAuthor int
+		for _, a := range v.Audios {
+			if a.Label() == "" {
+				t.Fatalf("дорожка без подписи: lang=%q codec=%q", a.Lang, a.Codec)
+			}
+			if a.Author == nil {
+				withoutAuthor++
+			}
+		}
+		if len(v.Files) > 0 && v.Files[0].Expires().IsZero() {
+			t.Fatal("у файла нет срока жизни — тикет не сможет его выставить")
+		}
+		t.Logf("%q: дорожек %d (без студии %d), субтитров %d, срок ссылок %s",
+			item.Title, len(v.Audios), withoutAuthor, len(v.Subtitles),
+			time.Until(v.Files[0].Expires()).Round(time.Hour))
+		t.Logf("    примеры подписей: %s", strings.Join(labels(v.Audios, 4), " | "))
+	}
+	if checked == 0 {
+		t.Fatal("ни одного фильма с дорожками — разбор сломан")
+	}
+}
+
+func labels(as []kinopub.AudioTrack, n int) []string {
+	out := make([]string, 0, n)
+	for _, a := range as {
+		if len(out) == n {
+			break
+		}
+		out = append(out, a.Label())
+	}
+	return out
+}
+
 func firstNonEmpty(ss ...string) string {
 	for _, s := range ss {
 		if s != "" {
