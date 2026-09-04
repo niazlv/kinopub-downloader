@@ -84,6 +84,15 @@ func (e *engine) run(ctx context.Context, cfg domain.RunConfig) (domain.RunResul
 func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunResult, error) {
 	log := e.deps.Logger.Component("engine")
 
+	// The quality picker lists the renditions an HLS manifest advertises; this
+	// path has no manifest, only the single file the feed points at. -q still
+	// works (it picks between feed entries), so warn about the menu alone
+	// rather than leaving it silently ignored.
+	if cfg.VideoMenu {
+		log.Warn("the interactive quality menu applies to page-link (HLS) downloads only; " +
+			"this run uses the feed's own quality (-q still applies)")
+	}
+
 	// Audio-track selection is implemented only for the HLS pipeline, which
 	// downloads each rendition separately. This path muxes whatever the source
 	// file already contains, so say so rather than silently keeping every track.
