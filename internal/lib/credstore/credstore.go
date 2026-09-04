@@ -141,6 +141,20 @@ func credDir() (string, error) {
 	return filepath.Join(home, ".config", "kinopub"), nil
 }
 
+// ConfigDir returns the per-user directory kinopub keeps its files in
+// (~/.config/kinopub). It is exported so anything else stored per user — the
+// plaintext preferences file, say — lands beside the credentials instead of
+// deriving its own idea of the user's home, which under `sudo` or Termux's `su`
+// is not $HOME. See storeHome for why.
+func ConfigDir() (string, error) { return credDir() }
+
+// ChownToStoreOwner hands a file written by root to the user the config
+// directory belongs to, so a later unprivileged run can still read and rewrite
+// it. Best-effort: a failure leaves the file owned by root, which surfaces as an
+// ordinary permission error if it ever matters. A no-op off Linux and when not
+// running as root.
+func ChownToStoreOwner(path string) { chownToStoreOwner(path) }
+
 // credPath returns the full path to the encrypted credential file.
 func credPath() (string, error) {
 	dir, err := credDir()

@@ -29,6 +29,7 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/lib/ratelimit"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termuxapi"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termx"
+	"github.com/niazlv/kinopub-downloader/internal/lib/usercfg"
 	"github.com/niazlv/kinopub-downloader/internal/services/apiclient"
 	"github.com/niazlv/kinopub-downloader/internal/services/apiscraper"
 	"github.com/niazlv/kinopub-downloader/internal/services/downloader"
@@ -97,6 +98,8 @@ func run() int {
 			return runDoctor(os.Args[2:])
 		case "completion":
 			return runCompletion(os.Args[2:])
+		case "config":
+			return runConfig(os.Args[2:])
 		case "update":
 			return runUpdate(os.Args[2:])
 		}
@@ -140,6 +143,8 @@ func run() int {
 		appToken    string
 		appBase     string
 		appCodec    string
+		noNotify    bool
+		notify      bool
 	)
 
 	fs := flag.NewFlagSet("kinopub", flag.ContinueOnError)
@@ -186,6 +191,8 @@ func run() int {
 	fs.StringVar(&appToken, "app-token", "", "app access token for --app (default: the token saved by `login --app`, else read from the installed app when run as root)")
 	fs.StringVar(&appBase, "app-base", "", "override the kino.pub JSON API base URL for --app (default: "+kinopubapp.DefaultAPIBase+")")
 	fs.StringVar(&appCodec, "app-codec", "", "preferred codec family for --app downloads: h264 (default) or h265")
+	fs.BoolVar(&noNotify, "no-notify", false, "do not post system notifications about progress for this run (to turn them off for good: kinopub config set notifications off)")
+	fs.BoolVar(&notify, "notify", false, "post system notifications even when they are turned off in the settings")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 	registerColorFlags(fs)
 
@@ -201,6 +208,7 @@ func run() int {
 			command{name: "kinopub sessions [--check]", desc: "show stored login sessions"},
 			command{name: "kinopub doctor [flags]", desc: "verify files and repair state"},
 			command{name: "kinopub update [flags]", desc: "install the latest release"},
+			command{name: "kinopub config [get|set|unset] …", desc: "show or change the saved settings"},
 			command{name: "kinopub completion <shell>", desc: "generate a shell completion script (bash, fish)"},
 		)
 
@@ -387,6 +395,20 @@ func run() int {
 		return 1
 	}
 
+	// System notifications: the saved preference decides every run that names
+	// neither flag, so "I never want them" is expressed once rather than typed
+	// on every command. A settings file that cannot be read is a warning, not a
+	// reason to refuse a download — the built-in defaults still apply.
+	if notify && noNotify {
+		errorf("--notify and --no-notify contradict each other; pass one of them.")
+		return 1
+	}
+	settings, err := usercfg.Load()
+	if err != nil {
+		warnf("using the built-in defaults: %v", err)
+	}
+	noNotifyResolved := resolveNoNotify(settings, notify, noNotify)
+
 	// The site is whatever host the URL names, so mirrors and renamed domains
 	// need no code change; --site names it when there is no URL to derive it
 	// from (e.g. --feed-file) or to override it.
@@ -468,6 +490,7 @@ func run() int {
 		BrowserCookies:  browserCk.value,
 		FeedFile:        feedFile,
 		FFmpegExtraArgs: extraFFmpegArgs,
+		NoNotify:        noNotifyResolved,
 		NoChunked:       noChunked,
 		AudioPref:       audioPref,
 		AudioMenu:       audioMenu,
@@ -705,11 +728,15 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	} else {
 		progReporter = progress.NewLog(logger)
 	}
-	// Wrap with Termux notifications if termux-notification is available.
-	progReporter = termuxapi.Wrap(progReporter, termuxapi.WithLogger(logger))
-	// And with native desktop notifications on macOS/Linux (no-op elsewhere,
-	// and on Termux, which the richer Termux notifier above already covers).
-	progReporter = desktopnotify.Wrap(progReporter)
+	// System notifications, unless the user turned them off for this run
+	// (--no-notify) or for good (`kinopub config set notifications off`).
+	if !cfg.NoNotify {
+		// Wrap with Termux notifications if termux-notification is available.
+		progReporter = termuxapi.Wrap(progReporter, termuxapi.WithLogger(logger))
+		// And with native desktop notifications on macOS/Linux (no-op elsewhere,
+		// and on Termux, which the richer Termux notifier above already covers).
+		progReporter = desktopnotify.Wrap(progReporter)
+	}
 
 	deps := kinopub.Dependencies{
 		Logger:           logger,

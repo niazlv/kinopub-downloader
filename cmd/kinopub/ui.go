@@ -517,6 +517,6 @@ var mainFlagGroups = []flagGroup{
 		"c", "concurrency", "limit-rate", "no-chunked", "ffmpeg", "ffmpeg-args", "x",
 	}},
 	{title: "Output and diagnostics:", names: []string{
-		"v", "verbosity", "log-file", "color", "no-color", "version",
+		"v", "verbosity", "log-file", "no-notify", "notify", "color", "no-color", "version",
 	}},
 }

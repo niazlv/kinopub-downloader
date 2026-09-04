@@ -84,6 +84,13 @@ type RunConfig struct {
 	// transcode on the fly) or add filters.
 	FFmpegExtraArgs []string
 
+	// NoNotify suppresses the system notifications a run otherwise posts —
+	// Termux notifications on Android, osascript/notify-send banners on the
+	// desktop. The terminal progress display is unaffected. It carries the
+	// saved `notifications` preference, which --no-notify and --notify override
+	// for a single run.
+	NoNotify bool
+
 	// NoChunked disables the chunked HTTP download mode. When false (default),
 	// progressive MP4 sources are downloaded via HTTP Range requests with
 	// resume capability. When true, all downloads go through ffmpeg directly.

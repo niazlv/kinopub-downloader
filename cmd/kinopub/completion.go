@@ -43,13 +43,14 @@ func runCompletion(args []string) int {
 const fishCompletion = `# kinopub fish shell completion
 # Install: kinopub completion fish > ~/.config/fish/completions/kinopub.fish
 
-set -l subcommands login logout sessions doctor completion update
+set -l subcommands login logout sessions doctor config completion update
 
 # Subcommands
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a login      -d "Save authentication credentials"
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a logout     -d "Remove stored credentials"
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a sessions   -d "Show stored login sessions"
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a doctor     -d "Verify files and repair state"
+complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a config     -d "Show or change the saved settings"
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a completion -d "Generate shell completion script"
 complete -c kinopub -f -n "not __fish_seen_subcommand_from $subcommands" -a update     -d "Install the latest release"
 
@@ -92,12 +93,14 @@ complete -c kinopub -n "__fish_seen_subcommand_from update" -l check   -d "Only 
 complete -c kinopub -n "__fish_seen_subcommand_from update" -l proxy   -d "Proxy URL" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l color          -d "When to color output" -r -a "auto\t'A terminal only (default)' always\t'Even when piped' never\t'Never'"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l no-color       -d "Never color output"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l no-notify      -d "No system notifications for this run"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l notify         -d "System notifications even if turned off in the settings"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s i -l interactive    -d "Pick quality, audio and subtitles interactively"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l version        -d "Print version and exit"
 
 # Color flags are accepted by every subcommand
-complete -c kinopub -n "__fish_seen_subcommand_from login doctor update" -l color    -d "When to color output" -r -a "auto always never"
-complete -c kinopub -n "__fish_seen_subcommand_from login doctor update" -l no-color -d "Never color output"
+complete -c kinopub -n "__fish_seen_subcommand_from login doctor config update" -l color    -d "When to color output" -r -a "auto always never"
+complete -c kinopub -n "__fish_seen_subcommand_from login doctor config update" -l no-color -d "Never color output"
 
 # login flags
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l cookie          -d "Cookie header to store" -r
@@ -124,6 +127,11 @@ complete -c kinopub -n "__fish_seen_subcommand_from doctor"      -l user-agent  
 complete -c kinopub -n "__fish_seen_subcommand_from doctor"      -l browser-cookies -d "Auto-load cookies from browser" -r -a "safari chrome firefox auto"
 complete -c kinopub -n "__fish_seen_subcommand_from doctor"      -l proxy           -d "Proxy URL" -r
 
+# config: the verb, then the key, then its values
+complete -c kinopub -f -n "__fish_seen_subcommand_from config; and not __fish_seen_subcommand_from show get set unset path" -a "show\t'Show every setting' get\t'Print one value' set\t'Save a setting' unset\t'Back to the default' path\t'Path of the settings file'"
+complete -c kinopub -f -n "__fish_seen_subcommand_from config; and __fish_seen_subcommand_from get set unset; and not __fish_seen_subcommand_from notifications" -a "notifications\t'System notifications about progress'"
+complete -c kinopub -f -n "__fish_seen_subcommand_from config; and __fish_seen_subcommand_from set; and __fish_seen_subcommand_from notifications" -a "on\t'Post notifications (default)' off\t'Never post notifications'"
+
 # completion flags
 complete -c kinopub -f -n "__fish_seen_subcommand_from completion" -a "bash fish"
 `
@@ -136,20 +144,21 @@ _kinopub_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local subcommands="login logout doctor completion update"
+    local subcommands="login logout sessions doctor config completion update"
     local main_flags="-o --output -c --concurrency --limit-rate --proxy -q --quality
         --verbosity -v --ffmpeg --log-file --container --force --seasons --episodes
         --dry-run --cookie --user-agent --header --browser-cookies
         --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu \
         --subs --subs-menu --subs-external --subs-only \\
         --video-menu --no-domain-rewrite -i --interactive \
+        --no-notify --notify \
         --app --app-token --app-base --app-codec --color --no-color --version"
 
     # Detect which subcommand is active
     local subcmd=""
     for w in "${words[@]:1}"; do
         case "$w" in
-            login|logout|sessions|doctor|completion|update)
+            login|logout|sessions|doctor|config|completion|update)
                 subcmd="$w"
                 break
                 ;;
@@ -185,6 +194,15 @@ _kinopub_completion() {
             COMPREPLY=($(compgen -W "-o --output --fix --clean-tmp -v --skip-probe
                 --ffprobe --cookie --user-agent --browser-cookies --proxy
                 --color --no-color" -- "$cur"))
+            ;;
+        config)
+            # config <verb> <key> <value>: offer whichever part comes next.
+            case "$prev" in
+                get|set|unset) COMPREPLY=($(compgen -W "notifications" -- "$cur")); return ;;
+                notifications) COMPREPLY=($(compgen -W "on off" -- "$cur")); return ;;
+                --color) COMPREPLY=($(compgen -W "auto always never" -- "$cur")); return ;;
+            esac
+            COMPREPLY=($(compgen -W "show get set unset path --color --no-color" -- "$cur"))
             ;;
         completion)
             COMPREPLY=($(compgen -W "bash fish" -- "$cur"))
