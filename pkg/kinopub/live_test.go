@@ -798,6 +798,109 @@ func TestLive_WatchingSemantics(t *testing.T) {
 	}
 }
 
+// TestLive_DiscoverWatchingPagination выясняет, отдаёт ли «я смотрю» весь
+// список или только первую страницу. У аккаунта их под две тысячи, а первый
+// ответ вернул ровно 50 — слишком круглое число, чтобы быть совпадением.
+func TestLive_DiscoverWatchingPagination(t *testing.T) {
+	c := liveClient(t)
+	for _, q := range []string{"", "?page=2", "?perpage=100", "?page=2&perpage=100"} {
+		body, code, err := rawGet(t, c, "/watching/serials"+q)
+		if err != nil || code != 200 {
+			t.Logf("%-24s код %d %v", q, code, err)
+			continue
+		}
+		var env map[string]any
+		if json.Unmarshal(body, &env) != nil {
+			continue
+		}
+		n := 0
+		if arr, ok := env["items"].([]any); ok {
+			n = len(arr)
+		}
+		var first string
+		if arr, ok := env["items"].([]any); ok && n > 0 {
+			if m, ok := arr[0].(map[string]any); ok {
+				first = fmt.Sprintf("%v", m["title"])
+			}
+		}
+		label := q
+		if label == "" {
+			label = "(без параметров)"
+		}
+		t.Logf("%-24s items=%-4d ключи=%v первый=%.30s", label, n, sortedKeys(env), first)
+	}
+}
+
+// TestLive_DiscoverFullWatchlist ищет эндпоинт с ПОЛНЫМ списком
+// отслеживаемого: /watching/serials жёстко отдаёт 50, а в интерфейсе
+// площадки счётчик заметно больше.
+func TestLive_DiscoverFullWatchlist(t *testing.T) {
+	c := liveClient(t)
+	probes := []string{
+		"/watching/serials?subscribed=1",
+		"/watching/toggle-watchlist",
+		"/items?subscribed=1&perpage=100",
+		"/items/subscribed?perpage=100",
+		"/bookmarks?perpage=100",
+		"/watching?perpage=100",
+		"/watching/serials/all",
+	}
+	for _, p := range probes {
+		body, code, err := rawGet(t, c, p)
+		if err != nil {
+			t.Logf("%-38s ОШИБКА %v", p, err)
+			continue
+		}
+		var env map[string]any
+		if json.Unmarshal(body, &env) != nil {
+			t.Logf("%-38s %d (не JSON)", p, code)
+			continue
+		}
+		n := -1
+		for _, k := range []string{"items", "history", "bookmarks"} {
+			if arr, ok := env[k].([]any); ok {
+				n = len(arr)
+				break
+			}
+		}
+		t.Logf("%-38s %d  элементов=%d  ключи=%v", p, code, n, sortedKeys(env))
+	}
+}
+
+// TestLive_SubscribedPagination: сколько тайтлов на самом деле в подписке.
+func TestLive_SubscribedPagination(t *testing.T) {
+	c := liveClient(t)
+	body, _, err := rawGet(t, c, "/items?subscribed=1&perpage=50")
+	if err != nil {
+		t.Fatalf("items: %v", err)
+	}
+	var env struct {
+		Items      []map[string]any `json:"items"`
+		Pagination struct {
+			Current, PerPage, Total, TotalItems int
+		} `json:"pagination"`
+	}
+	if json.Unmarshal(body, &env) != nil {
+		t.Fatal("разбор")
+	}
+	p := env.Pagination
+	t.Logf("подписка: всего %d тайтлов, страниц %d по %d (сейчас страница %d, элементов %d)",
+		p.TotalItems, p.Total, p.PerPage, p.Current, len(env.Items))
+
+	// Вторая страница обязана отличаться, иначе пагинация декоративная.
+	b2, _, err := rawGet(t, c, "/items?subscribed=1&perpage=50&page=2")
+	if err == nil {
+		var e2 struct {
+			Items []map[string]any `json:"items"`
+		}
+		if json.Unmarshal(b2, &e2) == nil && len(e2.Items) > 0 && len(env.Items) > 0 {
+			same := fmt.Sprintf("%v", e2.Items[0]["id"]) == fmt.Sprintf("%v", env.Items[0]["id"])
+			t.Logf("страница 2: элементов %d, первый совпадает с первой страницей: %v",
+				len(e2.Items), same)
+		}
+	}
+}
+
 func firstNonEmpty(ss ...string) string {
 	for _, s := range ss {
 		if s != "" {

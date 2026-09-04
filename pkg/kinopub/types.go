@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -207,8 +208,45 @@ func (a AudioTrack) Label() string {
 		return a.Author.Name()
 	case a.Type.Name() != "":
 		return a.Type.Name()
-	default:
+	}
+	// Ни студии, ни вида. Возвращать здесь Lang нельзя: у части релизов он
+	// равен "unk", и тогда все дорожки подписаны одинаково — выбрать между
+	// ними невозможно ни в CLI, ни в интерфейсе. Различаем форматом, а в
+	// последнюю очередь — номером: подпись обязана быть различающей.
+	if f := a.format(); f != "" {
+		return f
+	}
+	if a.Lang != "" && a.Lang != "unk" {
 		return a.Lang
+	}
+	return fmt.Sprintf("#%d", a.Index+1)
+}
+
+// format описывает дорожку технически: "AC3 5.1", "AAC 2.0".
+func (a AudioTrack) format() string {
+	codec := strings.ToUpper(strings.TrimSpace(a.Codec))
+	var ch string
+	switch a.Channels {
+	case 0:
+		ch = ""
+	case 1:
+		ch = "mono"
+	case 2:
+		ch = "2.0"
+	case 6:
+		ch = "5.1"
+	case 8:
+		ch = "7.1"
+	default:
+		ch = fmt.Sprintf("%d ch", a.Channels)
+	}
+	switch {
+	case codec != "" && ch != "":
+		return codec + " " + ch
+	case codec != "":
+		return codec
+	default:
+		return ch
 	}
 }
 
