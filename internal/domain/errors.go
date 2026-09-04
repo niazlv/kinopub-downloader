@@ -3,7 +3,11 @@
 
 package domain
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/niazlv/kinopub-downloader/pkg/kinopub"
+)
 
 // Sentinel errors for the kinopub downloader.
 // Each maps to a specific requirement for traceability.
@@ -34,7 +38,11 @@ var (
 	// token (HTTP 401). In apitoken mode this means the token read from the
 	// mobile app has expired: the user must open the app (or run the su refresh
 	// helper) so it mints a fresh one, then re-run.
-	ErrAPIUnauthorized = errors.New("kino.pub API rejected the access token")
+	// Значение заимствовано у публичной библиотеки, а не заведено своё:
+	// errors.Is должен срабатывать на ошибке, пришедшей из pkg/kinopub.
+	// Отдельный сентинел с тем же смыслом означал бы, что часть проверок
+	// молча перестаёт ловить нужный случай.
+	ErrAPIUnauthorized = kinopub.ErrUnauthorized
 
 	// ErrAppTokenUnavailable reports that no access token could be obtained for
 	// apitoken mode — neither supplied explicitly nor readable from the

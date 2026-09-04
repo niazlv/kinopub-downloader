@@ -20,12 +20,12 @@ import (
 	"strings"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
-	"github.com/niazlv/kinopub-downloader/internal/services/apiclient"
+	"github.com/niazlv/kinopub-downloader/pkg/kinopub"
 )
 
-// ItemFetcher is the API surface the scraper needs; satisfied by *apiclient.Client.
+// ItemFetcher is the API surface the scraper needs; satisfied by *kinopub.Client.
 type ItemFetcher interface {
-	Item(ctx context.Context, id string) (apiclient.Item, error)
+	Item(ctx context.Context, id string) (kinopub.Item, error)
 }
 
 // Scraper turns kino.pub item links into playlists via the JSON API.
@@ -155,7 +155,7 @@ func (s *Scraper) ExtractAllSeasons(ctx context.Context, baseURL string) (*domai
 
 // episode maps one API video to a PageEpisode, choosing the manifest URL. It
 // returns ok=false (and logs) when the video carries no usable manifest.
-func (s *Scraper) episode(v apiclient.Video, seasonHint int, itemTitle string) (domain.PageEpisode, bool) {
+func (s *Scraper) episode(v kinopub.Video, seasonHint int, itemTitle string) (domain.PageEpisode, bool) {
 	manifest, ok := pickManifest(v.Files, s.preferredCodec)
 	if !ok {
 		s.debug("skipping video with no hls manifest",
@@ -189,7 +189,7 @@ func (s *Scraper) episode(v apiclient.Video, seasonHint int, itemTitle string) (
 // pickManifest selects the hls4 master to download, preferring the requested
 // codec and the highest quality within it. It falls back across codecs and,
 // only if no hls4 is present, to the CDN hls master.
-func pickManifest(files []apiclient.File, preferredCodec string) (string, bool) {
+func pickManifest(files []kinopub.File, preferredCodec string) (string, bool) {
 	best := -1
 	bestURL := ""
 	bestPreferred := false

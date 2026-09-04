@@ -1,7 +1,7 @@
 // Copyright (C) 2026 niazlv <niazlv03@gmail.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package apiclient
+package kinopub
 
 // The JSON API wraps every payload in an envelope with a numeric "status" that
 // mirrors the HTTP status. Only the fields the downloader needs are modeled;

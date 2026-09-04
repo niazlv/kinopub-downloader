@@ -9,16 +9,16 @@ import (
 	"testing"
 
 	"github.com/niazlv/kinopub-downloader/internal/domain"
-	"github.com/niazlv/kinopub-downloader/internal/services/apiclient"
+	"github.com/niazlv/kinopub-downloader/pkg/kinopub"
 )
 
 type fakeFetcher struct {
-	item  apiclient.Item
+	item  kinopub.Item
 	err   error
 	gotID string
 }
 
-func (f *fakeFetcher) Item(_ context.Context, id string) (apiclient.Item, error) {
+func (f *fakeFetcher) Item(_ context.Context, id string) (kinopub.Item, error) {
 	f.gotID = id
 	return f.item, f.err
 }
@@ -49,10 +49,10 @@ func TestParseItemID(t *testing.T) {
 }
 
 func TestPickManifestPrefersCodecThenQuality(t *testing.T) {
-	files := []apiclient.File{
-		{Codec: "h265", QualityID: 4, URL: apiclient.URLSet{HLS4: "h265-2160"}},
-		{Codec: "h264", QualityID: 2, URL: apiclient.URLSet{HLS4: "h264-720"}},
-		{Codec: "h264", QualityID: 3, URL: apiclient.URLSet{HLS4: "h264-1080"}},
+	files := []kinopub.File{
+		{Codec: "h265", QualityID: 4, URL: kinopub.URLSet{HLS4: "h265-2160"}},
+		{Codec: "h264", QualityID: 2, URL: kinopub.URLSet{HLS4: "h264-720"}},
+		{Codec: "h264", QualityID: 3, URL: kinopub.URLSet{HLS4: "h264-1080"}},
 	}
 	// Prefer h264 even though h265 has a higher quality_id; within h264 pick the
 	// highest quality.
@@ -65,26 +65,26 @@ func TestPickManifestPrefersCodecThenQuality(t *testing.T) {
 }
 
 func TestPickManifestFallsBackToHLSWhenNoHLS4(t *testing.T) {
-	files := []apiclient.File{{Codec: "h264", QualityID: 3, URL: apiclient.URLSet{HLS: "cdn-master"}}}
+	files := []kinopub.File{{Codec: "h264", QualityID: 3, URL: kinopub.URLSet{HLS: "cdn-master"}}}
 	if got, ok := pickManifest(files, "h264"); !ok || got != "cdn-master" {
 		t.Errorf("fallback = %q,%v", got, ok)
 	}
 }
 
 func TestPickManifestNoneWhenNoURLs(t *testing.T) {
-	files := []apiclient.File{{Codec: "h264", QualityID: 3}}
+	files := []kinopub.File{{Codec: "h264", QualityID: 3}}
 	if _, ok := pickManifest(files, "h264"); ok {
 		t.Error("expected no manifest when files carry no URLs")
 	}
 }
 
 func TestExtractMovie(t *testing.T) {
-	ff := &fakeFetcher{item: apiclient.Item{
+	ff := &fakeFetcher{item: kinopub.Item{
 		ID: 126715, Title: "Brink", Type: "movie",
-		Posters: apiclient.Posters{Big: "big.jpg"},
-		Videos: []apiclient.Video{{
+		Posters: kinopub.Posters{Big: "big.jpg"},
+		Videos: []kinopub.Video{{
 			ID: 1, Number: 1, SNumber: 0, Duration: 7146,
-			Files: []apiclient.File{{Codec: "h264", QualityID: 3, URL: apiclient.URLSet{HLS4: "m.m3u8"}}},
+			Files: []kinopub.File{{Codec: "h264", QualityID: 3, URL: kinopub.URLSet{HLS4: "m.m3u8"}}},
 		}},
 	}}
 	pl, err := New(ff, nil).ExtractAllSeasons(context.Background(), "https://kino.pub/item/view/126715")
@@ -110,18 +110,18 @@ func TestExtractMovie(t *testing.T) {
 }
 
 func TestExtractSerial(t *testing.T) {
-	ff := &fakeFetcher{item: apiclient.Item{
+	ff := &fakeFetcher{item: kinopub.Item{
 		ID: 66136, Title: "Show", Type: "serial",
-		Seasons: []apiclient.Season{{
-			Number: 1, Episodes: []apiclient.Video{
+		Seasons: []kinopub.Season{{
+			Number: 1, Episodes: []kinopub.Video{
 				{ID: 5, Number: 1, SNumber: 1, Title: "Pilot", Duration: 2600,
-					Files: []apiclient.File{{Codec: "h264", QualityID: 3, URL: apiclient.URLSet{HLS4: "e1"}}}},
+					Files: []kinopub.File{{Codec: "h264", QualityID: 3, URL: kinopub.URLSet{HLS4: "e1"}}}},
 				{ID: 6, Number: 2, SNumber: 1, Title: "Ep2", Duration: 2700,
-					Files: []apiclient.File{{Codec: "h264", QualityID: 3, URL: apiclient.URLSet{HLS4: "e2"}}}},
+					Files: []kinopub.File{{Codec: "h264", QualityID: 3, URL: kinopub.URLSet{HLS4: "e2"}}}},
 			}}, {
-			Number: 2, Episodes: []apiclient.Video{
+			Number: 2, Episodes: []kinopub.Video{
 				{ID: 7, Number: 1, SNumber: 2, Title: "S2E1", Duration: 2800,
-					Files: []apiclient.File{{Codec: "h264", QualityID: 3, URL: apiclient.URLSet{HLS4: "s2e1"}}}},
+					Files: []kinopub.File{{Codec: "h264", QualityID: 3, URL: kinopub.URLSet{HLS4: "s2e1"}}}},
 			}},
 		},
 	}}
@@ -138,11 +138,11 @@ func TestExtractSerial(t *testing.T) {
 }
 
 func TestExtractSkipsEpisodesWithoutManifest(t *testing.T) {
-	ff := &fakeFetcher{item: apiclient.Item{
+	ff := &fakeFetcher{item: kinopub.Item{
 		ID: 1, Title: "X", Type: "serial",
-		Seasons: []apiclient.Season{{Number: 1, Episodes: []apiclient.Video{
+		Seasons: []kinopub.Season{{Number: 1, Episodes: []kinopub.Video{
 			{ID: 1, Number: 1, SNumber: 1, Files: nil}, // no files → skipped
-			{ID: 2, Number: 2, SNumber: 1, Files: []apiclient.File{{Codec: "h264", QualityID: 3, URL: apiclient.URLSet{HLS4: "ok"}}}},
+			{ID: 2, Number: 2, SNumber: 1, Files: []kinopub.File{{Codec: "h264", QualityID: 3, URL: kinopub.URLSet{HLS4: "ok"}}}},
 		}}},
 	}}
 	pl, err := New(ff, nil).ExtractAllSeasons(context.Background(), "1")
@@ -155,7 +155,7 @@ func TestExtractSkipsEpisodesWithoutManifest(t *testing.T) {
 }
 
 func TestExtractNoPlayableIsError(t *testing.T) {
-	ff := &fakeFetcher{item: apiclient.Item{ID: 1, Type: "movie", Videos: []apiclient.Video{{ID: 1}}}}
+	ff := &fakeFetcher{item: kinopub.Item{ID: 1, Type: "movie", Videos: []kinopub.Video{{ID: 1}}}}
 	_, err := New(ff, nil).ExtractAllSeasons(context.Background(), "1")
 	if !errors.Is(err, domain.ErrNoVideoTrack) {
 		t.Fatalf("err = %v, want ErrNoVideoTrack", err)

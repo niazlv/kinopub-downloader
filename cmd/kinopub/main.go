@@ -25,12 +25,12 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/lib/credstore"
 	"github.com/niazlv/kinopub-downloader/internal/lib/desktopnotify"
 	"github.com/niazlv/kinopub-downloader/internal/lib/httpx"
+	"github.com/niazlv/kinopub-downloader/internal/lib/kplog"
 	"github.com/niazlv/kinopub-downloader/internal/lib/logx"
 	"github.com/niazlv/kinopub-downloader/internal/lib/ratelimit"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termuxapi"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termx"
 	"github.com/niazlv/kinopub-downloader/internal/lib/usercfg"
-	"github.com/niazlv/kinopub-downloader/internal/services/apiclient"
 	"github.com/niazlv/kinopub-downloader/internal/services/apiscraper"
 	"github.com/niazlv/kinopub-downloader/internal/services/downloader"
 	"github.com/niazlv/kinopub-downloader/internal/services/feedparser"
@@ -43,6 +43,7 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/services/progress"
 	"github.com/niazlv/kinopub-downloader/internal/services/proxyprovider"
 	"github.com/niazlv/kinopub-downloader/internal/services/statestore"
+	kpapi "github.com/niazlv/kinopub-downloader/pkg/kinopub"
 )
 
 // Build provenance, stamped by the release workflow through -ldflags. An
@@ -760,8 +761,8 @@ func buildDependencies(cfg domain.RunConfig) (kinopub.Dependencies, func(), erro
 	//     present (the player page is behind Cloudflare + auth).
 	switch {
 	case cfg.AppMode:
-		apiCli := apiclient.New(proxyProv.HTTPClient(), cfg.APIBase, cfg.AppToken,
-			apiclient.WithUserAgent(cfg.UserAgent), apiclient.WithLogger(logger))
+		apiCli := kpapi.New(proxyProv.HTTPClient(), cfg.APIBase, cfg.AppToken,
+			kpapi.WithUserAgent(cfg.UserAgent), kpapi.WithLogger(kplog.Adapt(logger)))
 		deps.PageScraper = apiscraper.New(apiCli, logger,
 			apiscraper.WithPreferredCodec(cfg.AppCodec))
 		deps.HLSDownloader = hlsdownloader.New(httpClient, auth, logger,

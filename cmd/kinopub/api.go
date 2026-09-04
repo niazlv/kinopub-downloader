@@ -16,10 +16,10 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/lib/androidroot"
 	"github.com/niazlv/kinopub-downloader/internal/lib/credstore"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termx"
-	"github.com/niazlv/kinopub-downloader/internal/services/apiclient"
 	"github.com/niazlv/kinopub-downloader/internal/services/apiscraper"
 	"github.com/niazlv/kinopub-downloader/internal/services/kinopubapp"
 	"github.com/niazlv/kinopub-downloader/internal/services/proxyprovider"
+	"github.com/niazlv/kinopub-downloader/pkg/kinopub"
 )
 
 // newAppIntrospector builds the reader for the installed kino.pub app. The
@@ -204,15 +204,15 @@ func appUserAgent(fp kinopubapp.Fingerprint) string {
 // validateAppToken confirms the token is accepted, mapping an expired token to
 // a refresh instruction. It returns the authenticated user and an exit code
 // (0 on success).
-func validateAppToken(ctx context.Context, proxyURL, apiBase, token, ua string) (apiclient.User, int) {
+func validateAppToken(ctx context.Context, proxyURL, apiBase, token, ua string) (kinopub.User, int) {
 	user, err := checkAppToken(ctx, proxyURL, apiBase, token, ua)
 	switch {
 	case errors.Is(err, domain.ErrAPIUnauthorized):
 		reportTokenExpiredFor(storedTokenSource())
-		return apiclient.User{}, 1
+		return kinopub.User{}, 1
 	case err != nil:
 		errorf("could not validate the kino.pub app token: %v", err)
-		return apiclient.User{}, 1
+		return kinopub.User{}, 1
 	}
 	if user.Subscription.Active {
 		notef("kino.pub app session: authorized as %q (subscription active, %.0f days left)",
@@ -341,17 +341,17 @@ func recordAuthMethodUsed(method string) {
 // It exists so a caller can react to a rejection — by renewing the session and
 // trying again — before any message is printed. validateAppToken is the
 // reporting wrapper around it.
-func checkAppToken(ctx context.Context, proxyURL, apiBase, token, ua string) (apiclient.User, error) {
+func checkAppToken(ctx context.Context, proxyURL, apiBase, token, ua string) (kinopub.User, error) {
 	pp, err := proxyprovider.New(proxyURL)
 	if err != nil {
-		return apiclient.User{}, err
+		return kinopub.User{}, err
 	}
-	client := apiclient.New(pp.HTTPClient(), apiBase, token, apiclient.WithUserAgent(ua))
+	client := kinopub.New(pp.HTTPClient(), apiBase, token, kinopub.WithUserAgent(ua))
 	return client.User(ctx)
 }
 
 // announceSession prints who the run is authorized as.
-func announceSession(user apiclient.User) {
+func announceSession(user kinopub.User) {
 	if user.Subscription.Active {
 		notef("kino.pub app session: authorized as %q (subscription active, %.0f days left)",
 			user.Username, user.Subscription.Days)

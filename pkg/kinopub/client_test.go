@@ -1,7 +1,7 @@
 // Copyright (C) 2026 niazlv <niazlv03@gmail.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package apiclient
+package kinopub
 
 import (
 	"context"
@@ -10,8 +10,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 func TestUserSendsBearerAndUserAgent(t *testing.T) {
@@ -111,7 +109,7 @@ func TestUnauthorizedMapsToSentinel(t *testing.T) {
 
 	c := New(srv.Client(), srv.URL+"/v1", "expired")
 	_, err := c.User(context.Background())
-	if !errors.Is(err, domain.ErrAPIUnauthorized) {
+	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("err = %v, want ErrAPIUnauthorized", err)
 	}
 }
