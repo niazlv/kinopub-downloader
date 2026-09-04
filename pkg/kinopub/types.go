@@ -3,6 +3,13 @@
 
 package kinopub
 
+import (
+	"fmt"
+	"math"
+	"strconv"
+	"time"
+)
+
 // The JSON API wraps every payload in an envelope with a numeric "status" that
 // mirrors the HTTP status. Only the fields the downloader needs are modeled;
 // unknown fields are ignored by encoding/json.
@@ -27,10 +34,79 @@ type Item struct {
 	ID      int      `json:"id"`
 	Title   string   `json:"title"`
 	Type    string   `json:"type"` // "movie", "serial", "tvshow", …
+	Subtype string   `json:"subtype"`
 	Year    int      `json:"year"`
 	Posters Posters  `json:"posters"`
 	Videos  []Video  `json:"videos"`
 	Seasons []Season `json:"seasons"`
+
+	Plot      string `json:"plot"`
+	Genres    []Ref  `json:"genres"`
+	Countries []Ref  `json:"countries"`
+	// Finished — сериал завершён. Для инкрементального обхода это подсказка,
+	// что новых серий ждать не стоит.
+	Finished bool `json:"finished"`
+
+	// IMDB и Kinopoisk — ЧИСЛА или null (проверено живьём, не строки).
+	// Указатели, потому что ноль и «неизвестно» здесь разные вещи.
+	IMDB      *int `json:"imdb"`
+	Kinopoisk *int `json:"kinopoisk"`
+
+	// Duration — объект И в листинге, и в детали (проверено обоими
+	// эндпоинтами). Не путать с Video.Duration, которое просто секунды.
+	Duration Duration `json:"duration"`
+
+	// UpdatedAt и CreatedAt — unix-секунды. UpdatedAt вместе с сортировкой
+	// "-updated" даёт инкрементальный обход.
+	UpdatedAt int64 `json:"updated_at"`
+	CreatedAt int64 `json:"created_at"`
+}
+
+// Duration — суммарная и средняя длительность по элементу, в секундах.
+//
+// Оба поля float64, хотя выглядят целыми на большинстве элементов: average
+// бывает дробным (1224.642857142857 у сериала с 14 сериями), и жёсткий int
+// роняет разбор ВСЕГО элемента на таком. Одна проба показала бы целое —
+// поэтому тип выбран по наблюдённому отказу, а не по одному образцу.
+// Вызывающему, которому нужны целые секунды, служат аксессоры.
+type Duration struct {
+	Average float64 `json:"average"`
+	Total   float64 `json:"total"`
+}
+
+// TotalSeconds — суммарная длительность целыми секундами.
+func (d Duration) TotalSeconds() int { return int(d.Total) }
+
+// AverageSeconds — средняя длительность, округлённая до секунды.
+func (d Duration) AverageSeconds() int { return int(math.Round(d.Average)) }
+
+// UpdatedTime — время последнего изменения. Нулевое, когда API его не дал.
+func (i Item) UpdatedTime() time.Time {
+	if i.UpdatedAt == 0 {
+		return time.Time{}
+	}
+	return time.Unix(i.UpdatedAt, 0)
+}
+
+// IMDBID возвращает идентификатор в КАНОНИЧЕСКОЙ форме — "tt0898266".
+//
+// API отдаёт голое число (898266). Отдать его как есть значило бы, что
+// склейка с любым другим источником молча не сработает: там идентификатор
+// с префиксом и ведущими нулями.
+func (i Item) IMDBID() string {
+	if i.IMDB == nil || *i.IMDB <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("tt%07d", *i.IMDB)
+}
+
+// KinopoiskID возвращает идентификатор Кинопоиска строкой, пустую при его
+// отсутствии.
+func (i Item) KinopoiskID() string {
+	if i.Kinopoisk == nil || *i.Kinopoisk <= 0 {
+		return ""
+	}
+	return strconv.Itoa(*i.Kinopoisk)
 }
 
 // Posters holds the poster URLs at the sizes the API offers.
