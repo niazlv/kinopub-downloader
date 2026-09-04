@@ -108,12 +108,20 @@ complete -c kinopub -n "__fish_seen_subcommand_from login" -l user-agent      -d
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l browser-cookies -d "Auto-load cookies from browser" -r -a "safari chrome firefox auto"
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l app             -d "Save the installed kino.pub app's session (its API token)"
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l app-token       -d "App access token to save for --app" -r
+complete -c kinopub -n "__fish_seen_subcommand_from login" -l qr              -d "Authorize this tool by QR/device code (own, self-renewing session)"
+complete -c kinopub -n "__fish_seen_subcommand_from login" -l client-secret   -d "OAuth client secret for --qr" -r
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l app-base        -d "Override the kino.pub JSON API base URL" -r
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l proxy           -d "Proxy URL to validate the --app token" -r
 complete -c kinopub -n "__fish_seen_subcommand_from logout" -l app    -d "Remove only the app session" 
 complete -c kinopub -n "__fish_seen_subcommand_from logout" -l cookie -d "Remove only the website login" 
 complete -c kinopub -n "__fish_seen_subcommand_from sessions" -l check -d "Verify the app token online" 
 complete -c kinopub -n "__fish_seen_subcommand_from sessions" -l proxy -d "Proxy URL for --check" -r
+complete -c kinopub -f -n "__fish_seen_subcommand_from sessions; and not __fish_seen_subcommand_from export import" -a export -d "Export the session to a portable file"
+complete -c kinopub -f -n "__fish_seen_subcommand_from sessions; and not __fish_seen_subcommand_from export import" -a import -d "Import a session from a portable file"
+complete -c kinopub -n "__fish_seen_subcommand_from export" -l out            -d "File to write (- for stdout)" -r
+complete -c kinopub -n "__fish_seen_subcommand_from export" -l force          -d "Overwrite the destination"
+complete -c kinopub -n "__fish_seen_subcommand_from export" -l include-cookie -d "Also export the website cookie session"
+complete -c kinopub -n "__fish_seen_subcommand_from import" -l replace        -d "Discard any existing session instead of merging"
 
 # doctor flags
 complete -c kinopub -n "__fish_seen_subcommand_from doctor" -s o -l output         -d "Output directory to check" -r -F
@@ -168,11 +176,11 @@ _kinopub_completion() {
     case "$subcmd" in
         login)
             case "$prev" in
-                --cookie|--user-agent|--app-token|--app-base|--proxy) return ;;
+                --cookie|--user-agent|--app-token|--app-base|--client-secret|--proxy) return ;;
                 --color) COMPREPLY=($(compgen -W "auto always never" -- "$cur")); return ;;
                 --browser-cookies) COMPREPLY=($(compgen -W "safari chrome firefox auto" -- "$cur")); return ;;
             esac
-            COMPREPLY=($(compgen -W "--cookie --user-agent --browser-cookies --app --app-token --app-base --proxy --color --no-color" -- "$cur"))
+            COMPREPLY=($(compgen -W "--cookie --user-agent --browser-cookies --app --app-token --app-base --qr --client-secret --proxy --color --no-color" -- "$cur"))
             ;;
         logout)
             COMPREPLY=($(compgen -W "--app --cookie --color --no-color" -- "$cur"))
@@ -182,7 +190,27 @@ _kinopub_completion() {
                 --proxy) return ;;
                 --color) COMPREPLY=($(compgen -W "auto always never" -- "$cur")); return ;;
             esac
-            COMPREPLY=($(compgen -W "--check --proxy --color --no-color" -- "$cur"))
+            # Sub-subcommands of sessions, and their own flags.
+            local sessions_sub=""
+            for w in "${words[@]:1}"; do
+                case "$w" in
+                    export|import) sessions_sub="$w"; break ;;
+                esac
+            done
+            case "$sessions_sub" in
+                export)
+                    case "$prev" in
+                        --out) COMPREPLY=($(compgen -f -- "$cur")); return ;;
+                    esac
+                    COMPREPLY=($(compgen -W "--out --force --include-cookie --color --no-color" -- "$cur"))
+                    return
+                    ;;
+                import)
+                    COMPREPLY=($(compgen -f -W "--replace --color --no-color" -- "$cur"))
+                    return
+                    ;;
+            esac
+            COMPREPLY=($(compgen -W "export import --check --proxy --color --no-color" -- "$cur"))
             ;;
         doctor)
             case "$prev" in

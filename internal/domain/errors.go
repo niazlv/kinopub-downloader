@@ -44,4 +44,29 @@ var (
 	// ErrItemIDUnrecognized reports that a URL is not a kino.pub item link the
 	// API backend can turn into an item id.
 	ErrItemIDUnrecognized = errors.New("URL is not a recognizable kino.pub item link")
+
+	// ErrDeviceAuthPending reports that the user has not yet approved the device
+	// authorization. It is the normal answer while polling, not a failure.
+	ErrDeviceAuthPending = errors.New("device authorization is still pending")
+
+	// ErrDeviceAuthExpired reports that the user code was not approved before it
+	// expired; a new code must be requested.
+	ErrDeviceAuthExpired = errors.New("device authorization code expired")
+
+	// ErrDeviceAuthDenied reports that the user rejected the authorization.
+	ErrDeviceAuthDenied = errors.New("device authorization was denied")
+
+	// ErrTokenRefreshRejected reports that the refresh token was not accepted,
+	// so the session must be established again from scratch.
+	ErrTokenRefreshRejected = errors.New("kino.pub rejected the refresh token")
+
+	// ErrTokenNotRefreshable reports that a session may not be refreshed by this
+	// tool. A session imported from the installed mobile app is exactly that
+	// case: refreshing rotates the token and would sign the phone app out, so
+	// only sessions this tool obtained itself are ever refreshed.
+	ErrTokenNotRefreshable = errors.New("this session is not refreshable by kinopub")
+
+	// ErrClientSecretUnavailable reports that the OAuth client secret needed to
+	// talk to the authorization endpoint could not be obtained.
+	ErrClientSecretUnavailable = errors.New("kino.pub OAuth client secret is unavailable")
 )

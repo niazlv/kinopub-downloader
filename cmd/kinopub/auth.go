@@ -163,8 +163,10 @@ func runLogin(args []string) int {
 		browserCk browserCookiesFlag
 		siteHost  string
 		appMode   bool
+		qrMode    bool
 		appToken  string
 		appBase   string
+		clientSec string
 		proxyURL  string
 	)
 
@@ -174,7 +176,9 @@ func runLogin(args []string) int {
 	fs.StringVar(&siteHost, "site", "", "site host to read cookies for, e.g. kino.watch (default: "+strings.Join(domain.KnownSiteHosts, ", then ")+")")
 	fs.BoolVar(&appMode, "app", false, "save the installed kino.pub app's session (its API token) instead of a website cookie — reuses the app's device slot")
 	fs.StringVar(&appToken, "app-token", "", "app access token to save for --app (default: read from the installed app when run as root)")
+	fs.BoolVar(&qrMode, "qr", false, "authorize this tool with kino.pub by QR/device code — its own session, works without root or Android, and renews itself")
 	fs.StringVar(&appBase, "app-base", "", "override the kino.pub JSON API base URL for --app (default: "+kinopubapp.DefaultAPIBase+")")
+	fs.StringVar(&clientSec, "client-secret", "", "OAuth client secret for --qr (default: from a stored session, or the installed app)")
 	fs.StringVar(&proxyURL, "proxy", "", "proxy URL used to validate the --app token (http, https, socks5)")
 	registerColorFlags(fs)
 
@@ -202,6 +206,20 @@ func runLogin(args []string) int {
 		h.blank()
 		h.text("Then download without root or flags:  %s", errStyle.Cyan("kinopub --app https://kino.pub/item/view/126715"))
 
+		h.section("kino.pub session of its own, by QR / device code:")
+		h.commands(
+			command{name: "kinopub login --qr", desc: "scan a QR (or type a code) to authorize this tool"},
+		)
+		h.blank()
+		h.text("--qr asks kino.pub to authorize kinopub itself, so it needs no root, no Android " +
+			"and no installed app: it is the way to use the API mode on a desktop. The session " +
+			"belongs to this tool, which is also why it is the only one refreshed automatically " +
+			"— an --app session is the phone's, and rotating its token would sign the app out.")
+		h.blank()
+		h.text("It does need the app's OAuth client secret once (kino.pub publishes no public "+
+			"client). `login --app` on a rooted phone stores it; move it across with %s.",
+			errStyle.Cyan("sessions export/import"))
+
 		h.blank()
 		h.text("Credentials are stored encrypted at ~/.config/kinopub/credentials.enc " +
 			"and can only be decrypted on this machine.")
@@ -217,11 +235,19 @@ func runLogin(args []string) int {
 		return 1
 	}
 
-	// The app-session method is a separate flow: resolve, validate and save the
-	// installed app's token, then stop. It shares no state with the cookie path.
-	if appMode {
+	if appMode && qrMode {
+		errorf("--app and --qr are different ways to obtain a session; pick one.")
+		return 1
+	}
+
+	// The API-session methods are separate flows: resolve, validate and save a
+	// token, then stop. They share no state with the cookie path.
+	if appMode || qrMode {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
+		if qrMode {
+			return loginQR(ctx, appBase, proxyURL, clientSec, userAgent)
+		}
 		return loginApp(ctx, appToken, userAgent, appBase, proxyURL)
 	}
 
@@ -382,6 +408,17 @@ func runLogout(args []string) int {
 // runSessions prints what is stored and which method a bare run would use. With
 // --check it also validates the app token against the API, showing the account.
 func runSessions(args []string) int {
+	// Moving a session between machines is a separate job from inspecting one,
+	// so it gets its own subcommand with its own flags.
+	if len(args) > 0 {
+		switch args[0] {
+		case "export":
+			return runSessionsExport(args[1:])
+		case "import":
+			return runSessionsImport(args[1:])
+		}
+	}
+
 	fs := flag.NewFlagSet("kinopub sessions", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var check bool
@@ -396,6 +433,8 @@ func runSessions(args []string) int {
 		h.commands(
 			command{name: "kinopub sessions"},
 			command{name: "kinopub sessions --check", desc: "also verify the app token online"},
+			command{name: "kinopub sessions export --out FILE", desc: "write a portable copy"},
+			command{name: "kinopub sessions import FILE", desc: "load one written elsewhere"},
 		)
 		h.section("Flags:")
 		h.flags(fs)
@@ -444,7 +483,17 @@ func runSessions(args []string) int {
 		if base == "" {
 			base = "(default)"
 		}
-		fmt.Fprintf(os.Stderr, "%sapp      · API %s%s\n", mark, errStyle.Cyan(base), savedSuffix(creds.AppSavedAt))
+		fmt.Fprintf(os.Stderr, "%s%-8s · API %s%s\n",
+			mark, sessionKindLabel(creds), errStyle.Cyan(base), savedSuffix(creds.AppSavedAt))
+
+		// Whether the session renews itself is the practically important fact
+		// about it, so it is stated rather than left to be inferred.
+		if creds.CanRefresh() {
+			fmt.Fprintf(os.Stderr, "           renews itself automatically%s\n", expirySuffix(creds.AppTokenExpiresAt))
+		} else {
+			fmt.Fprintf(os.Stderr, "           not renewable here — re-run `%s login --app` (or `login --qr`) when it expires\n",
+				os.Args[0])
+		}
 
 		if check {
 			ctx := context.Background()
@@ -477,4 +526,21 @@ func savedSuffix(t time.Time) string {
 		return ""
 	}
 	return " · saved " + t.Local().Format("2006-01-02 15:04")
+}
+
+// sessionKindLabel names an app-mode session by where it came from, since that
+// determines whether it renews itself.
+func sessionKindLabel(c credstore.Credentials) string {
+	if c.TokenSource() == credstore.SourceDevice {
+		return "qr"
+	}
+	return "app"
+}
+
+// expirySuffix renders " · expires <date>" when the expiry is known.
+func expirySuffix(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return " · expires " + t.Local().Format("2006-01-02 15:04")
 }

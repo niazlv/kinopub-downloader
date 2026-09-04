@@ -206,6 +206,7 @@ func run() int {
 			command{name: "kinopub login [flags]", desc: "save authentication credentials"},
 			command{name: "kinopub logout [flags]", desc: "remove stored credentials"},
 			command{name: "kinopub sessions [--check]", desc: "show stored login sessions"},
+			command{name: "kinopub sessions export|import", desc: "move a session between machines"},
 			command{name: "kinopub doctor [flags]", desc: "verify files and repair state"},
 			command{name: "kinopub update [flags]", desc: "install the latest release"},
 			command{name: "kinopub config [get|set|unset] …", desc: "show or change the saved settings"},
@@ -569,7 +570,7 @@ func run() int {
 		// translate it to the same actionable guidance the up-front check gives,
 		// rather than the raw "API rejected the access token".
 		if errors.Is(runErr, domain.ErrAPIUnauthorized) {
-			reportTokenExpired()
+			reportTokenExpiredFor(storedTokenSource())
 			return 1
 		}
 		errorf("%v", runErr)

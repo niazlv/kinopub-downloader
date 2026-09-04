@@ -66,6 +66,44 @@ type Credentials struct {
 	// reuses the same one without re-specifying it. Empty means the default.
 	APIBase string `json:"api_base,omitempty"`
 
+	// AppTokenSource records where AppToken came from, and with it whether this
+	// tool may refresh the session. It is the safety switch behind the whole
+	// refresh mechanism:
+	//
+	//   SourceApp    — imported from the installed mobile app. Refreshing would
+	//                  rotate the token and sign the phone app out, so it is
+	//                  never refreshed here; an expired one is re-imported.
+	//   SourceDevice — obtained by this tool's own device/QR authorization. The
+	//                  slot belongs to us, so refreshing is safe and automatic.
+	//
+	// Empty means a store written before this was recorded. Those could only
+	// have come from an app import, so they are treated as SourceApp — the
+	// conservative reading, since guessing "device" would risk rotating a token
+	// the phone still depends on.
+	AppTokenSource string `json:"app_token_source,omitempty"`
+
+	// AppRefreshToken renews the session without another authorization. It is
+	// only ever set for SourceDevice: an app import deliberately does not carry
+	// the phone's refresh token, so there is nothing here to misuse.
+	AppRefreshToken string `json:"app_refresh_token,omitempty"`
+
+	// AppTokenExpiresAt is when the access token stops being valid, as stated
+	// by the authorization server. Zero means unknown, in which case validity
+	// is discovered from the API's answer rather than assumed.
+	AppTokenExpiresAt time.Time `json:"app_token_expires_at,omitempty"`
+
+	// AppClientID and AppClientSecret are the OAuth client credentials the
+	// authorization endpoint requires, for both the device flow and refreshing.
+	//
+	// They are stored because they cannot always be re-derived where they are
+	// needed: they come out of the installed Android APK, which a desktop has
+	// no copy of. Keeping them lets `login --qr` and automatic refresh work on
+	// a machine that has never seen the app — which is the point of the device
+	// flow. The secret is kino.pub's, never this project's, so it is only ever
+	// held here and in memory, and is redacted everywhere it could be printed.
+	AppClientID     string `json:"app_client_id,omitempty"`
+	AppClientSecret string `json:"app_client_secret,omitempty"`
+
 	// CookieSavedAt and AppSavedAt record when each half was last stored, and
 	// LastUsed/LastUsedAt which one last authorized a run. Together they let a
 	// run with no explicit flag pick the credentials the user actually works
@@ -83,6 +121,53 @@ const (
 	MethodCookie = "cookie"
 	MethodApp    = "app"
 )
+
+// Where an app-mode token came from. See Credentials.AppTokenSource.
+const (
+	// SourceApp: imported from the installed mobile app. Never refreshed here.
+	SourceApp = "app"
+	// SourceDevice: obtained by this tool's own device/QR authorization.
+	SourceDevice = "device"
+)
+
+// TokenSource reports where the stored app token came from, normalising the
+// pre-provenance case. A store written before the field existed can only hold
+// an imported token, so it reads as SourceApp — never as something refreshable.
+func (c Credentials) TokenSource() string {
+	if c.AppTokenSource == SourceDevice {
+		return SourceDevice
+	}
+	return SourceApp
+}
+
+// CanRefresh reports whether this tool may renew the session on its own.
+//
+// Only a session this tool authorized itself qualifies. Refreshing an imported
+// app session would rotate the token and sign the phone out, so that case is
+// excluded here rather than at each call site.
+// It answers whether the session is *of a refreshable kind*; performing the
+// refresh additionally needs OAuth client credentials, which may come from the
+// store (HasClientCredentials) or from a flag. The two are kept apart so a
+// caller can supply the secret at runtime without the store having one.
+func (c Credentials) CanRefresh() bool {
+	return c.HasAppToken() && c.TokenSource() == SourceDevice && c.AppRefreshToken != ""
+}
+
+// HasClientCredentials reports whether the stored OAuth client credentials are
+// complete enough to call the authorization endpoint.
+func (c Credentials) HasClientCredentials() bool {
+	return c.AppClientID != "" && c.AppClientSecret != ""
+}
+
+// AppTokenExpiringWithin reports whether the access token is known to expire
+// within d. It is false when the expiry is unknown, so an absent value never
+// triggers a needless refresh — staleness is then discovered from the API.
+func (c Credentials) AppTokenExpiringWithin(d time.Duration) bool {
+	if c.AppTokenExpiresAt.IsZero() {
+		return false
+	}
+	return time.Now().Add(d).After(c.AppTokenExpiresAt)
+}
 
 // PreferredMethod reports which stored credentials a run should reach for when
 // the user named none: whichever was most recently saved or last worked. It

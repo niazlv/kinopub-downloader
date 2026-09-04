@@ -74,9 +74,27 @@ func prepareAppSession(ctx context.Context, cfg *domain.RunConfig) int {
 		cfg.APIBase = kinopubapp.DefaultAPIBase
 	}
 
-	if _, code := validateAppToken(ctx, cfg.ProxyURL, cfg.APIBase, cfg.AppToken, cfg.UserAgent); code != 0 {
-		return code
+	// Renew a session of our own before it lapses, so a long run does not lose
+	// its token partway through. An imported app session is left untouched.
+	ensureFreshAppToken(ctx, cfg)
+
+	user, err := checkAppToken(ctx, cfg.ProxyURL, cfg.APIBase, cfg.AppToken, cfg.UserAgent)
+	if errors.Is(err, domain.ErrAPIUnauthorized) {
+		// Rejected: if this session is ours, renewing it is likely to fix
+		// exactly this, so try once before telling the user anything.
+		if refreshAfterRejection(ctx, cfg) {
+			user, err = checkAppToken(ctx, cfg.ProxyURL, cfg.APIBase, cfg.AppToken, cfg.UserAgent)
+		}
 	}
+	switch {
+	case errors.Is(err, domain.ErrAPIUnauthorized):
+		reportTokenExpiredFor(storedTokenSource())
+		return 1
+	case err != nil:
+		errorf("could not validate the kino.pub app token: %v", err)
+		return 1
+	}
+	announceSession(user)
 	return 0
 }
 
@@ -87,9 +105,10 @@ func prepareAppSession(ctx context.Context, cfg *domain.RunConfig) int {
 func loginApp(ctx context.Context, explicitToken, explicitUA, apiBase, proxyURL string) int {
 	app := newAppIntrospector()
 
+	fp := app.Fingerprint(ctx)
 	ua := explicitUA
 	if ua == "" {
-		ua = appUserAgent(app.Fingerprint(ctx))
+		ua = appUserAgent(fp)
 	}
 
 	token := explicitToken
@@ -121,6 +140,23 @@ func loginApp(ctx context.Context, explicitToken, explicitUA, apiBase, proxyURL 
 	creds.AppUserAgent = ua
 	creds.APIBase = apiBase
 	creds.AppSavedAt = time.Now()
+	// This session belongs to the phone app, not to us: mark it so nothing ever
+	// refreshes it, since rotating the token would sign the app out. The app's
+	// own refresh token is deliberately not stored — there is nothing here to
+	// misuse later.
+	creds.AppTokenSource = credstore.SourceApp
+	creds.AppRefreshToken = ""
+	creds.AppTokenExpiresAt = time.Time{}
+	// Keep the OAuth client credentials if the APK yielded them. They are not
+	// used for this session, but they are what lets `login --qr` and automatic
+	// refresh work later — including on a desktop that exports this store and
+	// has no APK of its own to read.
+	if fp.ClientID != "" {
+		creds.AppClientID = fp.ClientID
+	}
+	if fp.HasClientSecret() {
+		creds.AppClientSecret = fp.ClientSecret
+	}
 	if err := credstore.Save(creds); err != nil {
 		errorf("%v", err)
 		return 1
@@ -129,7 +165,10 @@ func loginApp(ctx context.Context, explicitToken, explicitUA, apiBase, proxyURL 
 	fmt.Fprintf(os.Stderr, "%s kino.pub app session for %s saved (encrypted, machine-bound) to ~/.config/kinopub/credentials.enc\n",
 		errStyle.Green("✓"), errStyle.Cyan(user.Username))
 	fmt.Fprintf(os.Stderr, "  Now run without root or flags, e.g.:\n    %s --app https://kino.pub/item/view/126715\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "  The token is not refreshed automatically; if it expires, open the app and run %s login --app again.\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  This is the phone app's own session, so it is never refreshed here — that\n"+
+		"  would sign the app out. When it expires, open the app and run `%s login --app` again,\n"+
+		"  or switch to `%s login --qr` for a session this tool owns and renews by itself.\n",
+		os.Args[0], os.Args[0])
 	return 0
 }
 
@@ -166,16 +205,10 @@ func appUserAgent(fp kinopubapp.Fingerprint) string {
 // a refresh instruction. It returns the authenticated user and an exit code
 // (0 on success).
 func validateAppToken(ctx context.Context, proxyURL, apiBase, token, ua string) (apiclient.User, int) {
-	pp, err := proxyprovider.New(proxyURL)
-	if err != nil {
-		errorf("%v", err)
-		return apiclient.User{}, 1
-	}
-	client := apiclient.New(pp.HTTPClient(), apiBase, token, apiclient.WithUserAgent(ua))
-	user, err := client.User(ctx)
+	user, err := checkAppToken(ctx, proxyURL, apiBase, token, ua)
 	switch {
 	case errors.Is(err, domain.ErrAPIUnauthorized):
-		reportTokenExpired()
+		reportTokenExpiredFor(storedTokenSource())
 		return apiclient.User{}, 1
 	case err != nil:
 		errorf("could not validate the kino.pub app token: %v", err)
@@ -302,15 +335,27 @@ func recordAuthMethodUsed(method string) {
 	_ = credstore.Save(stored)
 }
 
-// reportTokenExpired prints the guidance for a rejected app token. The tool
-// never refreshes the token itself — that is the phone app's job, and rotating
-// it here would invalidate the app's own session — so the fix is always to open
-// the app (which refreshes on its own) and re-save.
-func reportTokenExpired() {
-	errorf("the kino.pub app token has expired — the API rejected it (HTTP 401).\n"+
-		"  Open the kino.pub app on your phone once (it refreshes its own session),\n"+
-		"  then save the new token:  %s login --app\n"+
-		"  (or pass a fresh token directly with --app-token).\n"+
-		"  The token is deliberately never refreshed here, so the app's own login stays valid.",
-		os.Args[0])
+// checkAppToken asks the API who the token belongs to, returning the raw error
+// rather than reporting it.
+//
+// It exists so a caller can react to a rejection — by renewing the session and
+// trying again — before any message is printed. validateAppToken is the
+// reporting wrapper around it.
+func checkAppToken(ctx context.Context, proxyURL, apiBase, token, ua string) (apiclient.User, error) {
+	pp, err := proxyprovider.New(proxyURL)
+	if err != nil {
+		return apiclient.User{}, err
+	}
+	client := apiclient.New(pp.HTTPClient(), apiBase, token, apiclient.WithUserAgent(ua))
+	return client.User(ctx)
+}
+
+// announceSession prints who the run is authorized as.
+func announceSession(user apiclient.User) {
+	if user.Subscription.Active {
+		notef("kino.pub app session: authorized as %q (subscription active, %.0f days left)",
+			user.Username, user.Subscription.Days)
+	} else {
+		notef("kino.pub app session: authorized as %q (no active subscription)", user.Username)
+	}
 }

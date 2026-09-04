@@ -299,3 +299,110 @@ func TestBothMethodsCoexistThroughSerialization(t *testing.T) {
 		t.Error("browser and app User-Agents must stay distinct")
 	}
 }
+
+// The refresh safety switch. Refreshing a session imported from the phone app
+// would rotate the token and sign the app out, so only a session this tool
+// authorized itself may ever be refreshed.
+func TestCanRefreshOnlyForOwnDeviceSession(t *testing.T) {
+	tests := []struct {
+		name  string
+		creds Credentials
+		want  bool
+	}{
+		{
+			name:  "device session with a refresh token",
+			creds: Credentials{AppToken: "AT", AppTokenSource: SourceDevice, AppRefreshToken: "RT"},
+			want:  true,
+		},
+		{
+			name:  "imported app session is never refreshable",
+			creds: Credentials{AppToken: "AT", AppTokenSource: SourceApp, AppRefreshToken: "RT"},
+			want:  false,
+		},
+		{
+			// Written before provenance existed: could only be an import, so it
+			// must not be treated as refreshable.
+			name:  "legacy store without a recorded source",
+			creds: Credentials{AppToken: "AT", AppRefreshToken: "RT"},
+			want:  false,
+		},
+		{
+			name:  "device session without a refresh token",
+			creds: Credentials{AppToken: "AT", AppTokenSource: SourceDevice},
+			want:  false,
+		},
+		{
+			name:  "no app token at all",
+			creds: Credentials{AppTokenSource: SourceDevice, AppRefreshToken: "RT"},
+			want:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.creds.CanRefresh(); got != tt.want {
+				t.Errorf("CanRefresh() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTokenSourceNormalizesLegacy(t *testing.T) {
+	if got := (Credentials{AppToken: "AT"}).TokenSource(); got != SourceApp {
+		t.Errorf("legacy TokenSource() = %q, want %q", got, SourceApp)
+	}
+	if got := (Credentials{AppToken: "AT", AppTokenSource: SourceDevice}).TokenSource(); got != SourceDevice {
+		t.Errorf("TokenSource() = %q, want %q", got, SourceDevice)
+	}
+	// An unrecognised value must not be mistaken for a refreshable session.
+	if got := (Credentials{AppToken: "AT", AppTokenSource: "something-else"}).TokenSource(); got != SourceApp {
+		t.Errorf("unknown source read as %q, want %q", got, SourceApp)
+	}
+}
+
+func TestAppTokenExpiringWithin(t *testing.T) {
+	soon := Credentials{AppTokenExpiresAt: time.Now().Add(30 * time.Second)}
+	if !soon.AppTokenExpiringWithin(time.Minute) {
+		t.Error("a token expiring in 30s should count as expiring within a minute")
+	}
+	if soon.AppTokenExpiringWithin(time.Second) {
+		t.Error("a token expiring in 30s should not count as expiring within a second")
+	}
+	// Unknown expiry must never trigger a refresh on its own.
+	if (Credentials{}).AppTokenExpiringWithin(time.Hour) {
+		t.Error("an unknown expiry must not report as expiring")
+	}
+}
+
+// Provenance and refresh fields must survive a round trip, and an older payload
+// must still decode with them absent.
+func TestDeviceSessionFieldsRoundTrip(t *testing.T) {
+	want := Credentials{
+		AppToken:          "AT",
+		AppRefreshToken:   "RT",
+		AppTokenSource:    SourceDevice,
+		AppTokenExpiresAt: time.Unix(1800000000, 0).UTC(),
+	}
+	blob, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got Credentials
+	if err := json.Unmarshal(blob, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.CanRefresh() {
+		t.Errorf("round trip lost refreshability: %+v", got)
+	}
+	if !got.AppTokenExpiresAt.Equal(want.AppTokenExpiresAt) {
+		t.Errorf("expiry = %v, want %v", got.AppTokenExpiresAt, want.AppTokenExpiresAt)
+	}
+
+	legacy := []byte(`{"cookie":"c","app_token":"AT"}`)
+	var old Credentials
+	if err := json.Unmarshal(legacy, &old); err != nil {
+		t.Fatalf("unmarshal legacy: %v", err)
+	}
+	if old.CanRefresh() {
+		t.Error("a legacy store must not be considered refreshable")
+	}
+}

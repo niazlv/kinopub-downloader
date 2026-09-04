@@ -10,6 +10,7 @@ require (
 	golang.org/x/sys v0.45.0
 	golang.org/x/term v0.43.0
 	pgregory.net/rapid v1.3.0
+	rsc.io/qr v0.2.0
 )
 
 require (
