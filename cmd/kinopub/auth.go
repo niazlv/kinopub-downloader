@@ -135,8 +135,9 @@ func reportPlatformSessionRequired(site domain.Site, cause error) {
 	// broken across two lines is not one the user can copy.
 	errorf("%v.\n"+
 		"  %s is a platform page: it takes your session there, not a kino.pub one.\n"+
-		"  From your browser, per run:  kinopub --browser-cookies <url>\n"+
-		"  Or once:  kinopub login --browser-cookies --site %s",
+		"  Once, by QR — a session of this tool's own that renews itself:\n"+
+		"    kinopub login --qr --site %s\n"+
+		"  Or from your browser, per run:  kinopub --browser-cookies <url>",
 		cause, host, host)
 }
 
@@ -199,7 +200,7 @@ func runLogin(args []string) int {
 	fs.StringVar(&cookie, "cookie", "", "raw Cookie header value to store")
 	fs.StringVar(&userAgent, "user-agent", "", "User-Agent to store (browser UA for cookies; the app's UA for --app)")
 	fs.Var(&browserCk, "browser-cookies", "auto-load cookies from a browser: safari, chrome, firefox, or auto")
-	fs.StringVar(&siteHost, "site", "", "site host to read cookies for, e.g. kino.watch (default: "+strings.Join(domain.KnownSiteHosts, ", then ")+")")
+	fs.StringVar(&siteHost, "site", "", "site host: whose cookies to read, or with --qr the platform to authorize this tool on (default: "+strings.Join(domain.KnownSiteHosts, ", then ")+")")
 	fs.BoolVar(&appMode, "app", false, "save the installed kino.pub app's session (its API token) instead of a website cookie — reuses the app's device slot")
 	fs.StringVar(&appToken, "app-token", "", "app access token to save for --app (default: read from the installed app when run as root)")
 	fs.BoolVar(&qrMode, "qr", false, "authorize this tool with kino.pub by QR/device code — its own session, works without root or Android, and renews itself")
@@ -221,6 +222,14 @@ func runLogin(args []string) int {
 		h.blank()
 		h.text("Website logins are held per site: saving one never replaces another. " +
 			"A run sends the login of the site its URL names, and nothing else.")
+
+		h.section("Platform session of its own, by QR / code:")
+		h.commands(
+			command{name: "kinopub login --qr --site kino.example", desc: "approve this tool on the platform's site; renews itself"},
+		)
+		h.blank()
+		h.text("A platform built on this tool issues the tool a session of its own: no browser " +
+			"cookies to expire, and it renews itself for as long as it is used.")
 
 		h.section("kino.pub mobile app session (reuses the app's device slot):")
 		h.commands(
@@ -276,6 +285,11 @@ func runLogin(args []string) int {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 		if qrMode {
+			// With a site named, the code is the platform's, not kino.pub's:
+			// its own session for this tool, renewed by itself.
+			if siteHost != "" {
+				return loginPlatformQR(ctx, siteHost, proxyURL, userAgent)
+			}
 			return loginQR(ctx, appBase, proxyURL, clientSec, userAgent)
 		}
 		return loginApp(ctx, appToken, userAgent, appBase, proxyURL)
@@ -525,7 +539,16 @@ func runSessions(args []string) int {
 		if preferred == credstore.MethodCookie && s.Site == preferredSite {
 			mark = errStyle.Green("→ ")
 		}
-		fmt.Fprintf(os.Stderr, "%swebsite  · site %s%s\n", mark, errStyle.Cyan(s.Site), savedSuffix(s.SavedAt))
+		kind := "website  · site " + errStyle.Cyan(s.Site)
+		if s.Renewable() {
+			// A device session is the platform's own, and the practically
+			// important fact about it is that it renews itself.
+			kind = "device   · site " + errStyle.Cyan(s.Site) + " · renews itself"
+			if !s.ExpiresAt.IsZero() {
+				kind += " · token until " + s.ExpiresAt.Local().Format("2006-01-02")
+			}
+		}
+		fmt.Fprintf(os.Stderr, "%s%s%s\n", mark, kind, savedSuffix(s.SavedAt))
 	}
 
 	// App session.

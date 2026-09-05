@@ -54,11 +54,13 @@ func loginQR(ctx context.Context, apiBase, proxyURL, explicitSecret, explicitUA 
 		return 1
 	}
 
-	presentDeviceCode(dc)
+	presentDeviceCode(devicePrompt{
+		scanURI: dc.ScanURI(), link: dc.VerificationURI, code: dc.UserCode, expiresAt: dc.ExpiresAt,
+	})
 
 	tok, err := auth.PollDevice(ctx, dc)
 	if err != nil {
-		reportDeviceAuthFailure(err)
+		reportDeviceAuthFailure(err, os.Args[0]+" login --qr")
 		return 1
 	}
 
@@ -97,26 +99,31 @@ func loginQR(ctx context.Context, apiBase, proxyURL, explicitSecret, explicitUA 
 	return 0
 }
 
+// devicePrompt is what a device-authorization flow asks the user to do,
+// whichever service it is with: scan or open a link, and type a code.
+type devicePrompt struct {
+	scanURI, link, code string
+	expiresAt           time.Time
+}
+
 // presentDeviceCode shows the user everything needed to approve the request:
 // a scannable QR code, the link behind it, and the short code to type.
-func presentDeviceCode(dc kinopubauth.DeviceCode) {
-	scanURI := dc.ScanURI()
-
+func presentDeviceCode(p devicePrompt) {
 	fmt.Fprintf(os.Stderr, "\nOpen this page and enter the code to authorize kinopub:\n\n")
-	if scanURI != "" {
-		if err := qrterm.Render(os.Stderr, scanURI, errStyle.Enabled()); err != nil {
+	if p.scanURI != "" {
+		if err := qrterm.Render(os.Stderr, p.scanURI, errStyle.Enabled()); err != nil {
 			// A QR is a convenience; the link and code below are the real
 			// instructions, so a rendering failure must not stop the flow.
 			warnf("could not render the QR code: %v", err)
 		}
 		fmt.Fprintln(os.Stderr)
 	}
-	if dc.VerificationURI != "" {
-		fmt.Fprintf(os.Stderr, "  Link: %s\n", errStyle.Cyan(dc.VerificationURI))
+	if p.link != "" {
+		fmt.Fprintf(os.Stderr, "  Link: %s\n", errStyle.Cyan(p.link))
 	}
-	fmt.Fprintf(os.Stderr, "  Code: %s\n", errStyle.Green(dc.UserCode))
-	if !dc.ExpiresAt.IsZero() {
-		fmt.Fprintf(os.Stderr, "  Valid for %s.\n", time.Until(dc.ExpiresAt).Round(time.Second))
+	fmt.Fprintf(os.Stderr, "  Code: %s\n", errStyle.Green(p.code))
+	if !p.expiresAt.IsZero() {
+		fmt.Fprintf(os.Stderr, "  Valid for %s.\n", time.Until(p.expiresAt).Round(time.Second))
 	}
 	fmt.Fprintf(os.Stderr, "\nWaiting for approval… (Ctrl+C to cancel)\n")
 }
@@ -163,11 +170,12 @@ func reportClientSecretUnavailable() {
 	fmt.Fprintf(os.Stderr, "    • or pass it directly:  %s login --qr --client-secret <SECRET>\n", os.Args[0])
 }
 
-// reportDeviceAuthFailure turns the flow's outcomes into advice.
-func reportDeviceAuthFailure(err error) {
+// reportDeviceAuthFailure turns the flow's outcomes into advice. relogin is
+// the command that starts the flow over.
+func reportDeviceAuthFailure(err error, relogin string) {
 	switch {
 	case errors.Is(err, domain.ErrDeviceAuthExpired):
-		errorf("the authorization code expired before it was approved. Run `%s login --qr` again.", os.Args[0])
+		errorf("the authorization code expired before it was approved. Run `%s` again.", relogin)
 	case errors.Is(err, domain.ErrDeviceAuthDenied):
 		errorf("the authorization request was denied.")
 	case errors.Is(err, context.Canceled):

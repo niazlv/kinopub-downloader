@@ -68,10 +68,15 @@ type sessionPayload struct {
 	AppClientSecret string `json:"app_client_secret,omitempty"`
 }
 
-// sitePayload is one website login in the envelope.
+// sitePayload is one website login in the envelope. The refresh fields make
+// a device session travel whole: without them it would arrive as a plain
+// cookie that stops working when the token expires.
 type sitePayload struct {
-	Cookie    string `json:"cookie"`
-	UserAgent string `json:"user_agent,omitempty"`
+	Cookie           string    `json:"cookie"`
+	UserAgent        string    `json:"user_agent,omitempty"`
+	RefreshToken     string    `json:"refresh_token,omitempty"`
+	ExpiresAt        time.Time `json:"expires_at,omitempty"`
+	RefreshExpiresAt time.Time `json:"refresh_expires_at,omitempty"`
 }
 
 // payloadFrom picks what travels. The app session always does; website logins
@@ -95,7 +100,10 @@ func payloadFrom(creds credstore.Credentials, includeCookie bool) sessionPayload
 		if payload.Sites == nil {
 			payload.Sites = make(map[string]sitePayload)
 		}
-		payload.Sites[s.Site] = sitePayload{Cookie: s.Cookie, UserAgent: s.UserAgent}
+		payload.Sites[s.Site] = sitePayload{
+			Cookie: s.Cookie, UserAgent: s.UserAgent,
+			RefreshToken: s.RefreshToken, ExpiresAt: s.ExpiresAt, RefreshExpiresAt: s.RefreshExpiresAt,
+		}
 	}
 	if s, site, ok := creds.SessionFor(domain.Site{}); ok {
 		payload.Site, payload.Cookie, payload.UserAgent = site, s.Cookie, s.UserAgent
@@ -130,7 +138,10 @@ func applyPayload(creds *credstore.Credentials, s sessionPayload, now time.Time)
 	}
 	for site, sp := range s.Sites {
 		if sp.Cookie != "" {
-			creds.SetSession(site, credstore.SiteSession{Cookie: sp.Cookie, UserAgent: sp.UserAgent, SavedAt: now})
+			creds.SetSession(site, credstore.SiteSession{
+				Cookie: sp.Cookie, UserAgent: sp.UserAgent, SavedAt: now,
+				RefreshToken: sp.RefreshToken, ExpiresAt: sp.ExpiresAt, RefreshExpiresAt: sp.RefreshExpiresAt,
+			})
 		}
 	}
 }

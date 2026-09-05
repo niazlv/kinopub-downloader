@@ -493,6 +493,13 @@ func run() int {
 	// session: kino.pub credentials are no use there, and a browser cookie
 	// lookup must not wander off to kino.pub hosts either.
 	_, platformLink := domain.ParsePlatformLink(inputURL)
+	// A stored device session is renewed before it can be refused: the
+	// platform said when the token expires, so there is no need to find out
+	// the hard way. Explicit credentials on the command line are the user's
+	// own and are left alone.
+	if platformLink && cookie == "" && !browserCk.set && fromURL == "" {
+		ensureFreshPlatformSession(context.Background(), site, proxyURL)
+	}
 
 	var resolvedCookie string
 	// При --from учётные данные площадки не нужны вовсе: резолв сделала
@@ -638,6 +645,14 @@ func run() int {
 		// and where to get it, instead of the generic "authentication
 		// required" that would send the user to kino.pub.
 		if errors.Is(runErr, domain.ErrPlatformSessionRequired) {
+			// A device session the platform refused may still be renewable —
+			// it was revoked, or the token expired while the clock was off.
+			// The run's clients were built with the old token, so renewing
+			// serves the next run, and the user is told to start it.
+			if refreshPlatformAfterRejection(ctx, site, cfg.ProxyURL) {
+				errorf("the %s session was renewed; run the command again.", site)
+				return 1
+			}
 			reportPlatformSessionRequired(site, runErr)
 			return 1
 		}

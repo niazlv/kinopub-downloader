@@ -35,6 +35,11 @@ var (
 	// path, and it does not accept a kino.pub session — only its own cookie.
 	ErrPlatformSessionRequired = errors.New("platform page needs that site's session")
 
+	// ErrPlatformRefreshRejected reports that the platform refused to renew a
+	// device session: the refresh token was spent, revoked or expired, and
+	// only a new `login --qr --site` will do.
+	ErrPlatformRefreshRejected = errors.New("the platform rejected the refresh token")
+
 	// ErrNoSubtitlesMatched reports that an episode carries none of the
 	// subtitles --subs-only asked for. Only strict (subtitles-only) runs raise
 	// it: elsewhere subtitles are optional and a missing track falls back.

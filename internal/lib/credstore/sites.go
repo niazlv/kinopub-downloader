@@ -17,6 +17,26 @@ type SiteSession struct {
 	Cookie    string    `json:"cookie"`
 	UserAgent string    `json:"user_agent,omitempty"`
 	SavedAt   time.Time `json:"saved_at,omitempty"`
+
+	// The rest describe a device session: the platform's own session for
+	// this tool, obtained by `login --qr --site` (see platformauth). Cookie
+	// then carries the session token the way the platform's cookie would,
+	// RefreshToken renews it before ExpiresAt, and RefreshExpiresAt is when
+	// renewal itself stops being possible. All empty for a browser cookie.
+	RefreshToken     string    `json:"refresh_token,omitempty"`
+	ExpiresAt        time.Time `json:"expires_at,omitempty"`
+	RefreshExpiresAt time.Time `json:"refresh_expires_at,omitempty"`
+}
+
+// Renewable reports whether this is a device session, i.e. one this tool
+// can renew by itself.
+func (s SiteSession) Renewable() bool { return s.RefreshToken != "" }
+
+// ExpiringWithin reports whether the session token is known to expire within
+// d of now. False when the expiry is unknown: an absent value must never
+// trigger a needless renewal.
+func (s SiteSession) ExpiringWithin(now time.Time, d time.Duration) bool {
+	return !s.ExpiresAt.IsZero() && now.Add(d).After(s.ExpiresAt)
 }
 
 // NamedSession is a SiteSession with the site it belongs to, for listing.
