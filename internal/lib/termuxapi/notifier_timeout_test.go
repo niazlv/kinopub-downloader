@@ -27,6 +27,15 @@ func fakeHelpers(t *testing.T, body string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// wedgedTimeout is what the tests give a helper that never returns: short, so
+// the suite stays fast, but long enough for the stub to have started.
+const wedgedTimeout = 200 * time.Millisecond
+
+// healthyTimeout is what the tests give a helper that exits on its own. It is
+// deliberately far above the production default so a loaded machine that is
+// slow to exec the shell stub cannot make a success look like a hang.
+const healthyTimeout = time.Minute
+
 // A helper that never returns must not stall the run: the Termux:API app may be
 // absent while its CLI scripts are installed, which used to leave a finished
 // download hanging with no output.
@@ -36,14 +45,14 @@ func TestRunHelperTimesOutAndDisables(t *testing.T) {
 	}
 	fakeHelpers(t, "sleep 60")
 
-	n := &Notifier{inner: &recordingReporter{}}
+	n := &Notifier{inner: &recordingReporter{}, timeout: wedgedTimeout}
 
 	start := time.Now()
 	n.runHelper("termux-notification", "--id", notificationID)
 	elapsed := time.Since(start)
 
-	if elapsed > helperTimeout+2*time.Second {
-		t.Errorf("runHelper blocked for %v, want it bounded by %v", elapsed, helperTimeout)
+	if elapsed > wedgedTimeout+2*time.Second {
+		t.Errorf("runHelper blocked for %v, want it bounded by %v", elapsed, wedgedTimeout)
 	}
 	if !n.disabled.Load() {
 		t.Error("notifications were not disabled after a helper timed out")
@@ -66,7 +75,7 @@ func TestStopDoesNotBlockOnWedgedHelper(t *testing.T) {
 	}
 	fakeHelpers(t, "sleep 60")
 
-	n := &Notifier{inner: &recordingReporter{}}
+	n := &Notifier{inner: &recordingReporter{}, timeout: wedgedTimeout}
 	n.total, n.completed, n.seriesTitle = 1, 1, "S"
 
 	done := make(chan struct{})
@@ -77,7 +86,7 @@ func TestStopDoesNotBlockOnWedgedHelper(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(3 * helperTimeout):
+	case <-time.After(wedgedTimeout + 2*time.Second):
 		t.Fatal("Stop() blocked on a wedged termux helper")
 	}
 }
@@ -89,7 +98,7 @@ func TestRunHelperSuccessKeepsEnabled(t *testing.T) {
 	}
 	fakeHelpers(t, "exit 0")
 
-	n := &Notifier{inner: &recordingReporter{}}
+	n := &Notifier{inner: &recordingReporter{}, timeout: healthyTimeout}
 	n.runHelper("termux-notification")
 	if n.disabled.Load() {
 		t.Error("a successful helper must not disable notifications")

@@ -66,6 +66,10 @@ type Notifier struct {
 	disabled atomic.Bool
 	logger   domain.Logger
 
+	// timeout overrides helperTimeout when non-zero. Tests set it so a wedged
+	// stub fails fast and a healthy one is not misread as wedged under load.
+	timeout time.Duration
+
 	// throttle: skip notification if previous goroutine is still running
 	notifying atomic.Bool
 	// wg tracks in-flight refresh goroutines so Stop() can wait for them before
@@ -265,7 +269,8 @@ func (n *Notifier) notify(title, content string, pct int) {
 	)
 }
 
-// runHelper invokes a termux-* helper, bounded by helperTimeout.
+// runHelper invokes a termux-* helper, bounded by helperTimeout (or n.timeout
+// when set).
 //
 // A helper that does not return in time means the Termux:API app is absent or
 // wedged; notifications are then switched off for the rest of the run so a
@@ -286,6 +291,11 @@ func (n *Notifier) runHelper(name string, args ...string) {
 		return
 	}
 
+	timeout := n.timeout
+	if timeout <= 0 {
+		timeout = helperTimeout
+	}
+
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()
 
@@ -298,7 +308,7 @@ func (n *Notifier) runHelper(name string, args ...string) {
 			// second Ctrl+C.
 			n.disable(name, "interrupted")
 		}
-	case <-time.After(helperTimeout):
+	case <-time.After(timeout):
 		// Signal the group and return without waiting for it: reaping is left
 		// to the goroutine above, so a decoration can never hold up a finished
 		// download.
