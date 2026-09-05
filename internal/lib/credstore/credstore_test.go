@@ -8,7 +8,9 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/json"
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -35,7 +37,7 @@ func TestCredentialsRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(blob, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round trip = %+v, want %+v", got, want)
 	}
 	if !strings.Contains(string(blob), `"site":"kino.watch"`) {
@@ -122,7 +124,7 @@ func TestCredentialsAppFieldsRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(blob, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round trip = %+v, want %+v", got, want)
 	}
 	if !strings.Contains(string(blob), `"app_token":"acc456"`) {
@@ -195,7 +197,10 @@ func TestDecryptWithRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decryptWith: %v", err)
 	}
-	if got != want {
+	// decryptWith hands back the normalized form: the login filed under its
+	// site, and the legacy slot mirroring it.
+	want.normalize()
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round trip = %+v, want %+v", got, want)
 	}
 }
@@ -404,5 +409,155 @@ func TestDeviceSessionFieldsRoundTrip(t *testing.T) {
 	}
 	if old.CanRefresh() {
 		t.Error("a legacy store must not be considered refreshable")
+	}
+}
+
+func TestSessionForPicksTheLoginOfTheTargetSite(t *testing.T) {
+	c := Credentials{Sites: map[string]SiteSession{
+		"kino.watch":     {Cookie: "kp=1"},
+		"kino.sorewa.ru": {Cookie: "pf=1"},
+	}}
+	tests := []struct {
+		name, target, wantCookie, wantSite string
+		ok                                 bool
+	}{
+		{"exact", "kino.watch", "kp=1", "kino.watch", true},
+		{"another site entirely", "kino.sorewa.ru", "pf=1", "kino.sorewa.ru", true},
+		{"case and port", "KINO.watch:8443", "kp=1", "kino.watch", true},
+		{"subdomain belongs to the site", "www.kino.watch", "kp=1", "kino.watch", true},
+		{"the parent does not", "sorewa.ru", "", "", false},
+		{"lookalike", "evilkino.watch", "", "", false},
+		{"site as a suffix of the target", "kino.watch.evil.example", "", "", false},
+		{"unknown host", "evil.example", "", "", false},
+		{"known host without a login", "kino.pub", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, site, ok := c.SessionFor(domain.Site{Host: tt.target})
+			if ok != tt.ok || s.Cookie != tt.wantCookie || site != tt.wantSite {
+				t.Fatalf("SessionFor(%q) = %q, %q, %v; want %q, %q, %v",
+					tt.target, s.Cookie, site, ok, tt.wantCookie, tt.wantSite, tt.ok)
+			}
+		})
+	}
+}
+
+// A login written before the site was recorded serves the hosts the service is
+// known by, and nothing else — the leniency older files were created under.
+func TestLegacyLoginServesKnownHostsOnly(t *testing.T) {
+	c := Credentials{Cookie: "cf=1", UserAgent: "UA"}
+	for _, host := range []string{"kino.watch", "kino.pub", "www.kino.pub"} {
+		if s, _, ok := c.SessionFor(domain.Site{Host: host}); !ok || s.Cookie != "cf=1" {
+			t.Errorf("legacy login withheld from %s", host)
+		}
+	}
+	if _, _, ok := c.SessionFor(domain.Site{}); !ok {
+		t.Error("legacy login withheld from the default site")
+	}
+	if _, _, ok := c.SessionFor(domain.Site{Host: "evil.example"}); ok {
+		t.Error("legacy login sent to an unknown host")
+	}
+}
+
+// Logins are per site: saving one leaves the others — and the app session —
+// exactly as they were.
+func TestSetSessionKeepsOtherSites(t *testing.T) {
+	c := Credentials{Cookie: "kp=1", UserAgent: "UA", Site: "kino.watch", AppToken: "tok"}
+	c.SetSession("kino.sorewa.ru", SiteSession{Cookie: "pf=1"})
+
+	if s, _, ok := c.SessionFor(domain.Site{Host: "kino.watch"}); !ok || s.Cookie != "kp=1" {
+		t.Fatalf("the kino.watch login was disturbed: %+v", c.Sites)
+	}
+	if s, _, ok := c.SessionFor(domain.Site{Host: "kino.sorewa.ru"}); !ok || s.Cookie != "pf=1" {
+		t.Fatalf("the platform login was not stored: %+v", c.Sites)
+	}
+	if !c.HasAppToken() {
+		t.Error("the app session was lost")
+	}
+	if c.Cookie != "kp=1" || c.Site != "kino.watch" {
+		t.Errorf("legacy slot should mirror the kino.pub login, got %q for %q", c.Cookie, c.Site)
+	}
+
+	c.SetSession("kino.watch", SiteSession{Cookie: "kp=2"})
+	if s, _, _ := c.SessionFor(domain.Site{Host: "kino.watch"}); s.Cookie != "kp=2" || c.Cookie != "kp=2" {
+		t.Errorf("re-login should replace that site's login and its mirror, got %q / %q", s.Cookie, c.Cookie)
+	}
+	if s, _, _ := c.SessionFor(domain.Site{Host: "kino.sorewa.ru"}); s.Cookie != "pf=1" {
+		t.Error("re-login on one site touched another")
+	}
+}
+
+func TestRemoveSessionDropsOneSite(t *testing.T) {
+	c := Credentials{}
+	c.SetSession("kino.watch", SiteSession{Cookie: "kp=1"})
+	c.SetSession("kino.sorewa.ru", SiteSession{Cookie: "pf=1"})
+
+	if !c.RemoveSession("kino.watch") {
+		t.Fatal("RemoveSession reported nothing to remove")
+	}
+	if c.HasCookieFor(domain.Site{Host: "kino.watch"}) || c.Cookie != "" {
+		t.Errorf("kino.watch login (or its mirror) survived: %+v / %q", c.Sites, c.Cookie)
+	}
+	if !c.HasCookieFor(domain.Site{Host: "kino.sorewa.ru"}) {
+		t.Error("the other site's login went with it")
+	}
+	if c.RemoveSession("nothing.example") {
+		t.Error("RemoveSession reported a removal for a site without a login")
+	}
+}
+
+func TestNormalizeFilesLegacyLoginUnderTheCurrentDomain(t *testing.T) {
+	c := Credentials{Cookie: "cf=1", UserAgent: "UA"}
+	c.normalize()
+	if s, ok := c.Sites[domain.DefaultSiteHost]; !ok || s.Cookie != "cf=1" || s.UserAgent != "UA" {
+		t.Fatalf("legacy login not filed under %s: %+v", domain.DefaultSiteHost, c.Sites)
+	}
+	if c.Site != domain.DefaultSiteHost || c.Cookie != "cf=1" {
+		t.Errorf("mirror = %q for %q", c.Cookie, c.Site)
+	}
+}
+
+// The on-disk shape keeps the kino.pub login in the legacy slot: an older build
+// reads only that slot and must still find its cookie there.
+func TestSerializedFormKeepsTheLegacySlotForOlderBuilds(t *testing.T) {
+	c := Credentials{}
+	c.SetSession("kino.sorewa.ru", SiteSession{Cookie: "pf=1"})
+	c.SetSession("kino.watch", SiteSession{Cookie: "kp=1", UserAgent: "UA"})
+
+	blob, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var older struct {
+		Cookie string `json:"cookie"`
+		Site   string `json:"site"`
+	}
+	if err := json.Unmarshal(blob, &older); err != nil {
+		t.Fatal(err)
+	}
+	if older.Cookie != "kp=1" || older.Site != "kino.watch" {
+		t.Errorf("an older build would read %q for %q, want the kino.watch login", older.Cookie, older.Site)
+	}
+
+	var back Credentials
+	if err := json.Unmarshal(blob, &back); err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Sessions()) != 2 {
+		t.Errorf("sessions after a round trip: %+v", back.Sessions())
+	}
+}
+
+func TestPreferredMethodForIsPerSite(t *testing.T) {
+	early := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	late := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	c := Credentials{AppToken: "tok", AppSavedAt: early}
+	c.SetSession("kino.sorewa.ru", SiteSession{Cookie: "pf=1", SavedAt: late})
+
+	if got := c.PreferredMethodFor(domain.Site{Host: "kino.watch"}); got != MethodApp {
+		t.Errorf("kino.watch has no login of its own, want the app session, got %q", got)
+	}
+	if got := c.PreferredMethodFor(domain.Site{Host: "kino.sorewa.ru"}); got != MethodCookie {
+		t.Errorf("the platform has a fresher login, got %q", got)
 	}
 }

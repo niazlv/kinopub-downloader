@@ -185,3 +185,49 @@ func TestResolve_Invalid_ReturnsErrInvalidInputURL(t *testing.T) {
 		})
 	}
 }
+
+func TestClassify_PlatformTitle(t *testing.T) {
+	r := New(stubLogger{})
+
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{"title page", "https://kino.example/#/title/201"},
+		{"episode page by id", "https://kino.example/#/title/201/1234"},
+		{"episode page by season and number", "https://kino.example/#/title/201/s1e3"},
+		{"episode page, upper case and padded", "https://kino.example/#/title/201/S01E03"},
+		{"season page", "https://kino.example/#/title/201/s2"},
+		{"path routing", "https://kino.example/title/201"},
+		{"platform under a path", "https://host.example/kino/#/title/7"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			class, err := r.Classify(tt.url)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if class != domain.ClassPlatformTitle {
+				t.Fatalf("expected ClassPlatformTitle, got %d", class)
+			}
+		})
+	}
+}
+
+func TestClassify_PlatformPagesThatAreNotTitlesStayUnclassified(t *testing.T) {
+	r := New(stubLogger{})
+	for _, u := range []string{"https://kino.example/#/", "https://kino.example/#/search/x", "https://kino.example/#/history"} {
+		if _, err := r.Classify(u); !errors.Is(err, domain.ErrInvalidInputURL) {
+			t.Errorf("Classify(%q) = %v, want ErrInvalidInputURL", u, err)
+		}
+	}
+}
+
+func TestResolve_PlatformTitleNeedsThePlatformSession(t *testing.T) {
+	r := New(stubLogger{})
+	_, err := r.Resolve(context.Background(), "https://kino.example/#/title/201")
+	if !errors.Is(err, domain.ErrPlatformSessionRequired) {
+		t.Fatalf("want ErrPlatformSessionRequired, got %v", err)
+	}
+}

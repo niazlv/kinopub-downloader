@@ -91,6 +91,10 @@ const (
 	ClassUnclassified InputClass = iota
 	ClassPodcastFeed
 	ClassPageLink
+	// ClassPlatformTitle is a title page of a platform built on the download-
+	// manifest contract — "…/#/title/201", see ParsePlatformLink. It is served
+	// by the HLS pipeline only: the platform publishes no feed to fall back to.
+	ClassPlatformTitle
 )
 
 // InputResolver classifies and resolves user-supplied URLs into feed sources

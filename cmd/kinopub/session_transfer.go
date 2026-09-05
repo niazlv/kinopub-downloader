@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 	"github.com/niazlv/kinopub-downloader/internal/lib/credstore"
 )
 
@@ -44,9 +46,16 @@ type sessionExport struct {
 // may grow machine-local fields that must not travel, and an explicit list
 // makes each addition a deliberate decision.
 type sessionPayload struct {
+	// Site, Cookie and UserAgent carry the kino.pub website login, as the
+	// only one the format had before Sites. They are still written so an
+	// older build imports that login; a newer one reads Sites first.
 	Site      string `json:"site,omitempty"`
 	Cookie    string `json:"cookie,omitempty"`
 	UserAgent string `json:"user_agent,omitempty"`
+
+	// Sites carries every website login, keyed by site host. Optional, so the
+	// schema stays the same: a build that does not know the field ignores it.
+	Sites map[string]sitePayload `json:"sites,omitempty"`
 
 	AppToken          string    `json:"app_token,omitempty"`
 	AppRefreshToken   string    `json:"app_refresh_token,omitempty"`
@@ -59,6 +68,73 @@ type sessionPayload struct {
 	AppClientSecret string `json:"app_client_secret,omitempty"`
 }
 
+// sitePayload is one website login in the envelope.
+type sitePayload struct {
+	Cookie    string `json:"cookie"`
+	UserAgent string `json:"user_agent,omitempty"`
+}
+
+// payloadFrom picks what travels. The app session always does; website logins
+// only when asked for — they are tied to the browser that solved the
+// Cloudflare challenge and to one site, so they are rarely useful elsewhere.
+func payloadFrom(creds credstore.Credentials, includeCookie bool) sessionPayload {
+	payload := sessionPayload{
+		AppToken:          creds.AppToken,
+		AppRefreshToken:   creds.AppRefreshToken,
+		AppTokenSource:    creds.TokenSource(),
+		AppTokenExpiresAt: creds.AppTokenExpiresAt,
+		AppUserAgent:      creds.AppUserAgent,
+		APIBase:           creds.APIBase,
+		AppClientID:       creds.AppClientID,
+		AppClientSecret:   creds.AppClientSecret,
+	}
+	if !includeCookie {
+		return payload
+	}
+	for _, s := range creds.Sessions() {
+		if payload.Sites == nil {
+			payload.Sites = make(map[string]sitePayload)
+		}
+		payload.Sites[s.Site] = sitePayload{Cookie: s.Cookie, UserAgent: s.UserAgent}
+	}
+	if s, site, ok := creds.SessionFor(domain.Site{}); ok {
+		payload.Site, payload.Cookie, payload.UserAgent = site, s.Cookie, s.UserAgent
+	}
+	return payload
+}
+
+// applyPayload merges an envelope into the credentials, as import does.
+func applyPayload(creds *credstore.Credentials, s sessionPayload, now time.Time) {
+	if s.AppToken != "" {
+		creds.AppToken = s.AppToken
+		creds.AppRefreshToken = s.AppRefreshToken
+		creds.AppUserAgent = s.AppUserAgent
+		creds.APIBase = s.APIBase
+		creds.AppTokenExpiresAt = s.AppTokenExpiresAt
+		// Provenance travels with the session: an imported phone session stays
+		// non-refreshable on the new machine too, or renewing it there would
+		// sign the phone out just the same.
+		creds.AppTokenSource = s.AppTokenSource
+		creds.AppSavedAt = now
+	}
+	if s.AppClientID != "" {
+		creds.AppClientID = s.AppClientID
+	}
+	if s.AppClientSecret != "" {
+		creds.AppClientSecret = s.AppClientSecret
+	}
+	// The legacy slot first, then Sites over it: a file from a newer build
+	// carries the same login in both, and Sites is the authoritative copy.
+	if s.Cookie != "" {
+		creds.SetSession(s.Site, credstore.SiteSession{Cookie: s.Cookie, UserAgent: s.UserAgent, SavedAt: now})
+	}
+	for site, sp := range s.Sites {
+		if sp.Cookie != "" {
+			creds.SetSession(site, credstore.SiteSession{Cookie: sp.Cookie, UserAgent: sp.UserAgent, SavedAt: now})
+		}
+	}
+}
+
 // runSessionsExport writes the stored session to a portable file.
 func runSessionsExport(args []string) int {
 	fs := flag.NewFlagSet("kinopub sessions export", flag.ContinueOnError)
@@ -67,7 +143,7 @@ func runSessionsExport(args []string) int {
 	var force, includeCookie bool
 	fs.StringVar(&out, "out", "", "file to write (use - for stdout); required")
 	fs.BoolVar(&force, "force", false, "overwrite the destination if it exists")
-	fs.BoolVar(&includeCookie, "include-cookie", false, "also export the website cookie session (off by default: it is bound to one browser/site)")
+	fs.BoolVar(&includeCookie, "include-cookie", false, "also export the website logins, every site's (off by default: they are bound to one browser)")
 	registerColorFlags(fs)
 	fs.Usage = func() {
 		h := newHelpPrinter(os.Stderr, errStyle)
@@ -111,24 +187,7 @@ func runSessionsExport(args []string) int {
 		return 1
 	}
 
-	payload := sessionPayload{
-		AppToken:          creds.AppToken,
-		AppRefreshToken:   creds.AppRefreshToken,
-		AppTokenSource:    creds.TokenSource(),
-		AppTokenExpiresAt: creds.AppTokenExpiresAt,
-		AppUserAgent:      creds.AppUserAgent,
-		APIBase:           creds.APIBase,
-		AppClientID:       creds.AppClientID,
-		AppClientSecret:   creds.AppClientSecret,
-	}
-	// The website session is tied to the browser that solved the Cloudflare
-	// challenge and to one site, so it is rarely useful elsewhere and is only
-	// included when asked for.
-	if includeCookie {
-		payload.Site = creds.Site
-		payload.Cookie = creds.Cookie
-		payload.UserAgent = creds.UserAgent
-	}
+	payload := payloadFrom(creds, includeCookie)
 
 	blob, err := json.MarshalIndent(sessionExport{
 		Schema:      sessionExportSchema,
@@ -169,7 +228,8 @@ func runSessionsExport(args []string) int {
 	warnf("the file is NOT encrypted and grants full account access: move it over a trusted " +
 		"channel and delete it afterwards.")
 	if !includeCookie && creds.HasCookie() {
-		notef("the website cookie session was not included; pass --include-cookie if you need it.")
+		notef("the website logins (%s) were not included; pass --include-cookie if you need them.",
+			strings.Join(creds.SiteHosts(), ", "))
 	}
 	return 0
 }
@@ -236,7 +296,7 @@ func runSessionsImport(args []string) int {
 	}
 
 	s := env.Session
-	if s.AppToken == "" && s.Cookie == "" {
+	if s.AppToken == "" && s.Cookie == "" && len(s.Sites) == 0 {
 		errorf("the file contains no session to import.")
 		return 1
 	}
@@ -247,32 +307,7 @@ func runSessionsImport(args []string) int {
 			creds = existing
 		}
 	}
-
-	now := time.Now()
-	if s.AppToken != "" {
-		creds.AppToken = s.AppToken
-		creds.AppRefreshToken = s.AppRefreshToken
-		creds.AppUserAgent = s.AppUserAgent
-		creds.APIBase = s.APIBase
-		creds.AppTokenExpiresAt = s.AppTokenExpiresAt
-		// Provenance travels with the session: an imported phone session stays
-		// non-refreshable on the new machine too, or renewing it there would
-		// sign the phone out just the same.
-		creds.AppTokenSource = s.AppTokenSource
-		creds.AppSavedAt = now
-	}
-	if s.AppClientID != "" {
-		creds.AppClientID = s.AppClientID
-	}
-	if s.AppClientSecret != "" {
-		creds.AppClientSecret = s.AppClientSecret
-	}
-	if s.Cookie != "" {
-		creds.Cookie = s.Cookie
-		creds.UserAgent = s.UserAgent
-		creds.Site = s.Site
-		creds.CookieSavedAt = now
-	}
+	applyPayload(&creds, s, time.Now())
 
 	if err := credstore.Save(creds); err != nil {
 		errorf("%v", err)

@@ -29,6 +29,12 @@ var (
 	ErrMissingDependency      = errors.New("required component dependency not provided")    // Req 16.5
 	ErrAuthRequired           = errors.New("content appears to require authentication")     // Req 17.3, 17.4
 
+	// ErrPlatformSessionRequired reports a platform page link (…/#/title/…)
+	// given without a session for that platform. Neither pipeline nor
+	// credential swap can cure it: the platform publishes no feed for the RSS
+	// path, and it does not accept a kino.pub session — only its own cookie.
+	ErrPlatformSessionRequired = errors.New("platform page needs that site's session")
+
 	// ErrNoSubtitlesMatched reports that an episode carries none of the
 	// subtitles --subs-only asked for. Only strict (subtitles-only) runs raise
 	// it: elsewhere subtitles are optional and a missing track falls back.

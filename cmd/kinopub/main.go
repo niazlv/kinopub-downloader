@@ -42,6 +42,7 @@ import (
 	"github.com/niazlv/kinopub-downloader/internal/services/mediaresolver"
 	"github.com/niazlv/kinopub-downloader/internal/services/outputlayout"
 	"github.com/niazlv/kinopub-downloader/internal/services/pagescraper"
+	"github.com/niazlv/kinopub-downloader/internal/services/platformscraper"
 	"github.com/niazlv/kinopub-downloader/internal/services/progress"
 	"github.com/niazlv/kinopub-downloader/internal/services/proxyprovider"
 	"github.com/niazlv/kinopub-downloader/internal/services/statestore"
@@ -488,6 +489,11 @@ func run() int {
 		}
 	}
 
+	// A platform page (…/#/title/…) is entered with that platform's own
+	// session: kino.pub credentials are no use there, and a browser cookie
+	// lookup must not wander off to kino.pub hosts either.
+	_, platformLink := domain.ParsePlatformLink(inputURL)
+
 	var resolvedCookie string
 	// При --from учётные данные площадки не нужны вовсе: резолв сделала
 	// платформа, а её шлюз пускает по тикету в адресе. Лезть за сохранённой
@@ -495,7 +501,7 @@ func run() int {
 	// вход не требуется.
 	if !appMode && fromURL == "" {
 		var fatal bool
-		resolvedCookie, userAgent, fatal = resolveAuth(cookie, userAgent, browserCk, site, true)
+		resolvedCookie, userAgent, fatal = resolveAuth(cookie, userAgent, browserCk, site, platformLink, true)
 		if fatal {
 			return 1
 		}
@@ -626,6 +632,13 @@ func run() int {
 		// rather than the raw "API rejected the access token".
 		if errors.Is(runErr, domain.ErrAPIUnauthorized) {
 			reportTokenExpiredFor(storedTokenSource())
+			return 1
+		}
+		// A platform page without its session: say what session it takes
+		// and where to get it, instead of the generic "authentication
+		// required" that would send the user to kino.pub.
+		if errors.Is(runErr, domain.ErrPlatformSessionRequired) {
+			reportPlatformSessionRequired(site, runErr)
 			return 1
 		}
 		errorf("%v", runErr)
@@ -845,7 +858,17 @@ func buildDependencies(cfg *domain.RunConfig) (kinopub.Dependencies, func(), err
 			hlsdownloader.WithProxy(proxyProv.ProxyURL()),
 			hlsdownloader.WithRateLimit(cfg.RateLimit))
 	case auth.HasCredentials():
-		scraper := pagescraper.New(httpClient, logger)
+		// A platform page is read through the platform's API, not its HTML:
+		// the page is an app shell with nothing in it, and the platform hands
+		// a logged-in user the episode list and a manifest per episode.
+		var scraper domain.PageScraper = pagescraper.New(httpClient, logger)
+		if _, ok := domain.ParsePlatformLink(cfg.InputURL); ok {
+			// The selection already carries the link's own season/episode
+			// suffix (ApplyURLEpisodeRef), so the scraper asks the platform
+			// for exactly the episodes the run will download.
+			scraper = platformscraper.New(httpClient, logger,
+				platformscraper.WithSelection(cfg.SeasonSel, cfg.EpisodeSel))
+		}
 		hlsDl := hlsdownloader.New(httpClient, auth, logger,
 			hlsdownloader.WithConcurrency(cfg.MaxConcurrency),
 			hlsdownloader.WithProxy(proxyProv.ProxyURL()),

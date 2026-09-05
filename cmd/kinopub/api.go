@@ -289,10 +289,11 @@ func chooseSavedAppSession(inputURL string, explicitCookie bool) (use bool, reas
 	if err != nil || !stored.HasAppToken() {
 		return false, ""
 	}
+	site := domain.SiteFromURL(inputURL)
 	switch {
-	case !stored.HasCookie():
-		return true, "no website cookies stored"
-	case stored.PreferredMethod() == credstore.MethodApp:
+	case !stored.HasCookieFor(site):
+		return true, "no website cookies stored for " + site.String()
+	case stored.PreferredMethodFor(site) == credstore.MethodApp:
 		return true, "the more recent login"
 	default:
 		return false, ""

@@ -26,12 +26,14 @@ import (
 // download path cannot proceed without the requested cookies); otherwise it
 // degrades to a warning (doctor can still run read-only checks). The returned
 // fatal flag tells the caller to abort.
-func resolveAuth(cookie, userAgent string, browserCk browserCookiesFlag, site domain.Site, browserLoadFatal bool) (resolvedCookie, resolvedUA string, fatal bool) {
+// platform marks a platform page rather than kino.pub or a mirror of it; it
+// keeps a browser cookie lookup to that site alone (see browserCookieDomains).
+func resolveAuth(cookie, userAgent string, browserCk browserCookiesFlag, site domain.Site, platform, browserLoadFatal bool) (resolvedCookie, resolvedUA string, fatal bool) {
 	resolvedCookie = cookie
 	resolvedUA = userAgent
 
 	if resolvedCookie == "" && browserCk.set {
-		ck, ckDomain, err := browsercookies.Load(browserCk.value, cookieDomains(site)...)
+		ck, ckDomain, err := browsercookies.Load(browserCk.value, browserCookieDomains(site, platform)...)
 		if err != nil {
 			if browserLoadFatal {
 				errorf("could not load cookies from browser %q: %v", browserCk.value, err)
@@ -54,15 +56,22 @@ func resolveAuth(cookie, userAgent string, browserCk browserCookiesFlag, site do
 		case err != nil:
 			warnf("could not load stored credentials: %v", err)
 		case !stored.HasCookie():
-			// No website session saved; run anonymously. An app-token-only
+			// No website login saved; run anonymously. An app-token-only
 			// login lands here: its User-Agent belongs to the Android client
 			// and must not be attached to website requests.
-		case !storedCredentialsAllowed(stored.Site, site):
-			warnStoredCredentialsWithheld(stored.Site, site)
 		default:
-			resolvedCookie = stored.Cookie
-			if resolvedUA == "" && stored.UserAgent != "" {
-				resolvedUA = stored.UserAgent
+			// Logins are held per site, and only the one saved for the site
+			// this run targets may travel: the target host is whatever the
+			// user-supplied URL names, so a link naming an unrelated host — a
+			// "mirror", say — must never receive another site's session.
+			s, _, ok := stored.SessionFor(site)
+			if !ok {
+				warnStoredCredentialsWithheld(stored.SiteHosts(), site)
+				break
+			}
+			resolvedCookie = s.Cookie
+			if resolvedUA == "" && s.UserAgent != "" {
+				resolvedUA = s.UserAgent
 			}
 		}
 	}
@@ -105,6 +114,32 @@ func cookieDomains(site domain.Site) []string {
 	return domains
 }
 
+// browserCookieDomains is cookieDomains for a run, narrowed to the site itself
+// when that site is a platform: a kino.pub session found under a former domain
+// is no use there and would only produce a misleading "loaded cookies for
+// kino.watch" warning ahead of the real error.
+func browserCookieDomains(site domain.Site, platform bool) []string {
+	if platform {
+		return []string{site.String()}
+	}
+	return cookieDomains(site)
+}
+
+// reportPlatformSessionRequired explains what a platform page takes. The
+// stored kino.pub session was rightly withheld from it, and the fix is not a
+// kino.pub login but the platform's own cookie — from the browser the user is
+// logged in with, once or per run.
+func reportPlatformSessionRequired(site domain.Site, cause error) {
+	host := site.String()
+	// Lines are kept short: errorf wraps to the terminal, and a command
+	// broken across two lines is not one the user can copy.
+	errorf("%v.\n"+
+		"  %s is a platform page: it takes your session there, not a kino.pub one.\n"+
+		"  From your browser, per run:  kinopub --browser-cookies <url>\n"+
+		"  Or once:  kinopub login --browser-cookies --site %s",
+		cause, host, host)
+}
+
 // warnCookieDomainMismatch tells the user when the cookies we found belong to a
 // different domain than the one being downloaded from. They are still used —
 // mirrors often share a session — but a 403 later is then explained.
@@ -117,36 +152,27 @@ func warnCookieDomainMismatch(cookieDomain string, site domain.Site) {
 		cookieDomain, site, site)
 }
 
-// storedCredentialsAllowed reports whether the session saved by `kinopub login`
-// may be sent to the site this run targets. A stored session belongs to exactly
-// one site, so it travels to that host and its subdomains only — the target
-// host is whatever the user-supplied URL names, and an unrelated one is by
-// definition not the site the user logged in to.
-//
-// storedSite is empty for credentials written before the site was recorded.
-// Rather than forcing a re-login, those are treated the way the tool treated
-// them when it wrote them: as belonging to one of the hosts the service is
-// known by. They are still withheld from any host outside that set.
-func storedCredentialsAllowed(storedSite string, target domain.Site) bool {
-	if strings.TrimSpace(storedSite) == "" {
-		return domain.AnyKnownSiteOwns(target.String())
-	}
-	return domain.SiteFromHost(storedSite).Owns(target.String())
+// warnStoredCredentialsWithheld explains why no saved login is being sent.
+// Unlike a browser-cookie domain mismatch, which is only advisory, this one
+// withholds the cookie — so say so, and say how to get one that fits. The run
+// continues anonymously, which is enough for public pages.
+func warnStoredCredentialsWithheld(storedSites []string, site domain.Site) {
+	warnf("saved logins are for %s; none for %s — a stored session is only "+
+		"used on the site it was created for. Continuing without them. "+
+		"To use credentials here, run `kinopub login --browser-cookies --site %s` "+
+		"(it is kept beside the others), or pass --cookie explicitly.",
+		strings.Join(storedSites, ", "), site, site)
 }
 
-// warnStoredCredentialsWithheld explains why the saved session is not being
-// sent. Unlike a browser-cookie domain mismatch, which is only advisory, this
-// one withholds the cookie — so say so, and say how to get one that fits. The
-// run continues anonymously, which is enough for public pages.
-func warnStoredCredentialsWithheld(storedSite string, site domain.Site) {
-	origin := strings.TrimSpace(storedSite)
-	if origin == "" {
-		origin = strings.Join(domain.KnownSiteHosts, " or ") + " (site not recorded at login)"
+// otherSites lists the sites with a login other than the one just saved.
+func otherSites(creds credstore.Credentials, saved string) []string {
+	var out []string
+	for _, s := range creds.Sessions() {
+		if s.Site != credstore.SiteKey(saved) {
+			out = append(out, s.Site)
+		}
 	}
-	warnf("saved credentials for %s are not sent to %s — a stored session "+
-		"is only used on the site it was created for. Continuing without them. "+
-		"To use credentials here, run `kinopub login --site %s`, or pass --cookie explicitly.",
-		origin, site, site)
+	return out
 }
 
 // runLogin saves authentication credentials encrypted to disk.
@@ -190,7 +216,11 @@ func runLogin(args []string) int {
 		h.commands(
 			command{name: "kinopub login --cookie \"cf_clearance=...; _identity=...\" --user-agent \"Mozilla/5.0 ...\""},
 			command{name: "kinopub login --browser-cookies safari"},
+			command{name: "kinopub login --browser-cookies --site kino.example", desc: "another site's login, kept beside the kino.pub one"},
 		)
+		h.blank()
+		h.text("Website logins are held per site: saving one never replaces another. " +
+			"A run sends the login of the site its URL names, and nothing else.")
 
 		h.section("kino.pub mobile app session (reuses the app's device slot):")
 		h.commands(
@@ -261,10 +291,17 @@ func runLogin(args []string) int {
 
 	// Resolve cookie. With no --site, every domain the service is known by is
 	// searched, so the user does not have to know which one they are logged in to.
+	// An explicit --site is searched alone: it names a different site — a
+	// platform, a mirror — and a kino.pub cookie found in its stead would be
+	// saved under the wrong name and sent to the wrong host.
 	site := domain.SiteFromHost(siteHost)
 	resolvedCookie := cookie
 	if resolvedCookie == "" && browserCk.set {
-		ck, ckDomain, err := browsercookies.Load(browserCk.value, cookieDomains(site)...)
+		domains := cookieDomains(site)
+		if siteHost != "" {
+			domains = []string{site.String()}
+		}
+		ck, ckDomain, err := browsercookies.Load(browserCk.value, domains...)
 		if err != nil {
 			errorf("could not load cookies from browser %q: %v", browserCk.value, err)
 			return 1
@@ -290,20 +327,20 @@ func runLogin(args []string) int {
 		userAgent = defaultUserAgent
 	}
 
-	// Bind the credentials to the site they were obtained for: later runs send
-	// them to that site only, never to some other host a URL happens to name.
+	// Bind the login to the site it was obtained for: later runs send it to
+	// that site only, never to some other host a URL happens to name.
 	//
-	// Only the website half is replaced. The two methods are independent, so
-	// saving cookies must not throw away an app session stored earlier (and
-	// vice versa) — a user may hold both and switch between them.
+	// Only this site's login is replaced. Logins are held per site, and the
+	// app session is independent of all of them, so saving one must not throw
+	// away another stored earlier — a user holds several and switches between
+	// them.
 	creds, err := credstore.Load()
 	if err != nil {
 		creds = credstore.Credentials{}
 	}
-	creds.Cookie = resolvedCookie
-	creds.UserAgent = userAgent
-	creds.Site = site.String()
-	creds.CookieSavedAt = time.Now()
+	creds.SetSession(site.String(), credstore.SiteSession{
+		Cookie: resolvedCookie, UserAgent: userAgent, SavedAt: time.Now(),
+	})
 
 	if err := credstore.Save(creds); err != nil {
 		errorf("%v", err)
@@ -311,7 +348,10 @@ func runLogin(args []string) int {
 	}
 
 	fmt.Fprintf(os.Stderr, "%s Credentials for %s saved (encrypted, machine-bound) to ~/.config/kinopub/credentials.enc\n",
-		errStyle.Green("✓"), errStyle.Cyan(creds.Site))
+		errStyle.Green("✓"), errStyle.Cyan(site.String()))
+	if others := otherSites(creds, site.String()); len(others) > 0 {
+		notef("logins for %s are kept: website logins are held per site.", strings.Join(others, ", "))
+	}
 	return 0
 }
 
@@ -323,8 +363,10 @@ func runLogout(args []string) int {
 	fs := flag.NewFlagSet("kinopub logout", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var appOnly, cookieOnly bool
-	fs.BoolVar(&appOnly, "app", false, "remove only the kino.pub app session, keep the website login")
-	fs.BoolVar(&cookieOnly, "cookie", false, "remove only the website login, keep the app session")
+	var siteHost string
+	fs.BoolVar(&appOnly, "app", false, "remove only the kino.pub app session, keep the website logins")
+	fs.BoolVar(&cookieOnly, "cookie", false, "remove only a website login, keep the app session")
+	fs.StringVar(&siteHost, "site", "", "with --cookie: the site whose login to remove (required when several are stored)")
 	registerColorFlags(fs)
 	fs.Usage = func() {
 		h := newHelpPrinter(os.Stderr, errStyle)
@@ -333,7 +375,8 @@ func runLogout(args []string) int {
 		h.commands(
 			command{name: "kinopub logout", desc: "remove everything"},
 			command{name: "kinopub logout --app", desc: "remove only the app session"},
-			command{name: "kinopub logout --cookie", desc: "remove only the website login"},
+			command{name: "kinopub logout --cookie", desc: "remove the only website login"},
+			command{name: "kinopub logout --cookie --site kino.example", desc: "remove one site's login, keep the rest"},
 		)
 		h.section("Flags:")
 		h.flags(fs)
@@ -377,16 +420,30 @@ func runLogout(args []string) int {
 		creds.AppSavedAt = time.Time{}
 		removed = "kino.pub app session"
 	case cookieOnly:
-		if !creds.HasCookie() {
+		sites := creds.SiteHosts()
+		if len(sites) == 0 {
 			fmt.Fprintf(os.Stderr, "No website login was stored.\n")
 			return 0
 		}
-		creds.Cookie, creds.UserAgent, creds.Site = "", "", ""
-		creds.CookieSavedAt = time.Time{}
-		removed = "website login"
+		// Logins are held per site: with several stored, "the website login"
+		// names nothing in particular, so the site has to be said.
+		target := siteHost
+		if target == "" && len(sites) == 1 {
+			target = sites[0]
+		}
+		if target == "" {
+			errorf("several website logins are stored (%s); pass --site to say which one to remove.",
+				strings.Join(sites, ", "))
+			return 1
+		}
+		if !creds.RemoveSession(target) {
+			errorf("no website login is stored for %s (stored: %s).", target, strings.Join(sites, ", "))
+			return 1
+		}
+		removed = "website login for " + credstore.SiteKey(target)
 	}
 	if creds.LastUsed == credstore.MethodApp && appOnly ||
-		creds.LastUsed == credstore.MethodCookie && cookieOnly {
+		creds.LastUsed == credstore.MethodCookie && cookieOnly && !creds.HasCookie() {
 		creds.LastUsed, creds.LastUsedAt = "", time.Time{}
 	}
 
@@ -460,17 +517,15 @@ func runSessions(args []string) int {
 	preferred := creds.PreferredMethod()
 	fmt.Fprintf(os.Stderr, "Stored sessions (a bare `%s <url>` uses the %s):\n\n", os.Args[0], sessionLabel(preferred))
 
-	// Website (cookie) session.
-	if creds.HasCookie() {
+	// Website logins, one per site. The arrow marks what a bare kino.pub run
+	// would use; a link to another site always uses that site's own login.
+	_, preferredSite, _ := creds.SessionFor(domain.Site{})
+	for _, s := range creds.Sessions() {
 		mark := "  "
-		if preferred == credstore.MethodCookie {
+		if preferred == credstore.MethodCookie && s.Site == preferredSite {
 			mark = errStyle.Green("→ ")
 		}
-		site := creds.Site
-		if site == "" {
-			site = "(site not recorded)"
-		}
-		fmt.Fprintf(os.Stderr, "%swebsite  · site %s%s\n", mark, errStyle.Cyan(site), savedSuffix(creds.CookieSavedAt))
+		fmt.Fprintf(os.Stderr, "%swebsite  · site %s%s\n", mark, errStyle.Cyan(s.Site), savedSuffix(s.SavedAt))
 	}
 
 	// App session.

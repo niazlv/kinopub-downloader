@@ -3,7 +3,7 @@
 
 // Package credstore provides encrypted storage for authentication credentials.
 //
-// Credentials (Cookie header, User-Agent, and the site they belong to) are
+// Credentials (website logins per site, plus the kino.pub app session) are
 // encrypted with AES-256-GCM using
 // a key derived from a machine-specific secret. The encrypted file is stored at
 // ~/.config/kinopub/credentials.enc
@@ -34,20 +34,28 @@ import (
 	"time"
 
 	"golang.org/x/crypto/pbkdf2"
+
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 )
 
 // Credentials holds the authentication data persisted between runs.
 //
-// Site records the host the session belongs to (e.g. "kino.watch"). A session
-// is only ever replayed against the site it was created for — the target host
-// of a run comes from the URL the user passes, so without this binding a link
-// naming an unrelated host would be enough to have the saved session sent
-// there. Site is empty for files written before it was recorded; callers treat
-// that as "unknown" rather than as an error, so an existing login keeps working.
+// Website logins live in Sites, one per site: kino.pub is one site, a platform
+// built on this tool is another with a login of its own, and a run sends only
+// the login of the site its URL names — see SessionFor. Cookie, UserAgent and
+// Site are the slot that held the single login before Sites existed. They
+// still decode from older files and are kept as a mirror of the kino.pub login
+// when writing, so an older build finds its cookie where it expects it; read
+// them through the methods, never directly. Site is empty in files written
+// before it was recorded; such a login is treated as belonging to the hosts
+// the service is known by rather than refused.
 type Credentials struct {
 	Cookie    string `json:"cookie"`
 	UserAgent string `json:"user_agent"`
 	Site      string `json:"site,omitempty"`
+
+	// Sites holds the website logins keyed by site host — see SiteKey.
+	Sites map[string]SiteSession `json:"sites,omitempty"`
 
 	// AppToken is the access token taken from the installed kino.pub mobile
 	// app, used by --app runs. It is stored alongside the cookie rather than
@@ -169,50 +177,54 @@ func (c Credentials) AppTokenExpiringWithin(d time.Duration) bool {
 	return time.Now().Add(d).After(c.AppTokenExpiresAt)
 }
 
-// PreferredMethod reports which stored credentials a run should reach for when
-// the user named none: whichever was most recently saved or last worked. It
-// returns "" when nothing is stored.
+// PreferredMethod reports which stored credentials a bare kino.pub run should
+// reach for — see PreferredMethodFor, evaluated for the default site.
+func (c Credentials) PreferredMethod() string { return c.PreferredMethodFor(domain.Site{}) }
+
+// PreferredMethodFor reports which stored credentials a run against the target
+// site should reach for when the user named none: whichever was most recently
+// saved or last worked. The website half is that site's own login — a platform
+// login says nothing about how to reach kino.pub. It returns "" when nothing
+// applies.
 //
 // With both stored and no timestamps at all — a store written before they were
 // recorded — it answers MethodCookie, matching the behaviour those stores were
 // created under.
-func (c Credentials) PreferredMethod() string {
+func (c Credentials) PreferredMethodFor(target domain.Site) string {
+	s, _, hasCookie := c.SessionFor(target)
 	switch {
-	case !c.HasCookie() && !c.HasAppToken():
+	case !hasCookie && !c.HasAppToken():
 		return ""
 	case !c.HasAppToken():
 		return MethodCookie
-	case !c.HasCookie():
+	case !hasCookie:
 		return MethodApp
 	}
-	if c.freshness(MethodApp).After(c.freshness(MethodCookie)) {
+	if c.freshness(MethodApp, c.AppSavedAt).After(c.freshness(MethodCookie, s.SavedAt)) {
 		return MethodApp
 	}
 	return MethodCookie
 }
 
 // freshness is the most recent moment a method was saved or successfully used.
-func (c Credentials) freshness(method string) time.Time {
-	at := c.CookieSavedAt
-	if method == MethodApp {
-		at = c.AppSavedAt
-	}
-	if c.LastUsed == method && c.LastUsedAt.After(at) {
+func (c Credentials) freshness(method string, savedAt time.Time) time.Time {
+	if c.LastUsed == method && c.LastUsedAt.After(savedAt) {
 		return c.LastUsedAt
 	}
-	return at
+	return savedAt
 }
 
 // IsEmpty reports whether the credentials carry no useful data.
 func (c Credentials) IsEmpty() bool {
-	return c.Cookie == "" && c.UserAgent == "" && c.AppToken == ""
+	return len(c.sessions()) == 0 && c.UserAgent == "" && c.AppToken == ""
 }
 
-// HasCookie reports whether a website session is stored. It is distinct from
-// IsEmpty because an `login --app` saves a token and the app's User-Agent but
-// no cookie: a website run must treat that as "nothing saved" rather than adopt
-// an Android User-Agent that matches no browser session.
-func (c Credentials) HasCookie() bool { return c.Cookie != "" }
+// HasCookie reports whether a website login is stored for any site. It is
+// distinct from IsEmpty because an `login --app` saves a token and the app's
+// User-Agent but no cookie: a website run must treat that as "nothing saved"
+// rather than adopt an Android User-Agent that matches no browser session.
+// Whether one is stored for a particular site is HasCookieFor.
+func (c Credentials) HasCookie() bool { return len(c.sessions()) > 0 }
 
 // HasAppToken reports whether an app session is stored.
 func (c Credentials) HasAppToken() bool { return c.AppToken != "" }
@@ -266,6 +278,9 @@ func Save(creds Credentials) error {
 		return fmt.Errorf("machine seed: %w", err)
 	}
 
+	// One shape on disk: logins in Sites, the kino.pub one mirrored into the
+	// legacy slot for older builds.
+	creds.normalize()
 	plaintext, err := json.Marshal(creds)
 	if err != nil {
 		return fmt.Errorf("marshal credentials: %w", err)
@@ -388,6 +403,7 @@ func decryptWith(seed, blob []byte) (Credentials, error) {
 	if err := json.Unmarshal(plaintext, &creds); err != nil {
 		return Credentials{}, fmt.Errorf("parse credentials: %w", err)
 	}
+	creds.normalize()
 	return creds, nil
 }
 

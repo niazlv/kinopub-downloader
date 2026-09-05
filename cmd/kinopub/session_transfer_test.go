@@ -5,10 +5,12 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/niazlv/kinopub-downloader/internal/domain"
 	"github.com/niazlv/kinopub-downloader/internal/lib/credstore"
 )
 
@@ -63,7 +65,7 @@ func TestSessionExportRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(blob, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got.Session != want.Session {
+	if !reflect.DeepEqual(got.Session, want.Session) {
 		t.Errorf("payload round trip lost data:\n got %+v\nwant %+v", got.Session, want.Session)
 	}
 	if got.Schema != sessionExportSchema {
@@ -107,5 +109,37 @@ func TestPayloadOmitsCookieByDefault(t *testing.T) {
 	}
 	if strings.Contains(string(blob), "cookie") {
 		t.Errorf("empty cookie fields should be omitted, got %s", blob)
+	}
+}
+
+// Every site's login travels when cookies are asked for, and the kino.pub one
+// is also written to the legacy slot so an older build imports it.
+func TestPayloadCarriesEveryWebsiteLogin(t *testing.T) {
+	creds := credstore.Credentials{AppToken: "AT"}
+	creds.SetSession("kino.watch", credstore.SiteSession{Cookie: "kp=1", UserAgent: "UA"})
+	creds.SetSession("kino.sorewa.ru", credstore.SiteSession{Cookie: "pf=1"})
+
+	p := payloadFrom(creds, true)
+	if p.Cookie != "kp=1" || p.Site != "kino.watch" {
+		t.Errorf("legacy slot = %q for %q, want the kino.watch login", p.Cookie, p.Site)
+	}
+	if len(p.Sites) != 2 || p.Sites["kino.sorewa.ru"].Cookie != "pf=1" || p.Sites["kino.watch"].UserAgent != "UA" {
+		t.Errorf("sites = %+v", p.Sites)
+	}
+
+	var back credstore.Credentials
+	applyPayload(&back, p, time.Unix(1800000000, 0))
+	if !back.HasCookieFor(domain.Site{Host: "kino.watch"}) || !back.HasCookieFor(domain.Site{Host: "kino.sorewa.ru"}) {
+		t.Errorf("import lost a login: %+v", back.Sessions())
+	}
+	if back.AppToken != "AT" {
+		t.Error("import lost the app session")
+	}
+
+	// An envelope from an older build has only the legacy slot.
+	var older credstore.Credentials
+	applyPayload(&older, sessionPayload{Site: "kino.watch", Cookie: "kp=1"}, time.Unix(1800000000, 0))
+	if s, _, ok := older.SessionFor(domain.Site{Host: "kino.watch"}); !ok || s.Cookie != "kp=1" {
+		t.Errorf("legacy envelope not imported: %+v", older.Sessions())
 	}
 }

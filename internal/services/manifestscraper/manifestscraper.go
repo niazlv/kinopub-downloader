@@ -117,24 +117,36 @@ func Fetch(ctx context.Context, client *http.Client, rawURL string) (*Manifest, 
 		return nil, fmt.Errorf("--from: %w", err)
 	}
 
+	m, err := Parse(body)
+	if err != nil {
+		return nil, fmt.Errorf("--from: %w", err)
+	}
+	return m, nil
+}
+
+// Parse разбирает и проверяет тело манифеста. Вынесено отдельно от Fetch,
+// потому что манифест приходит не только по ссылке-разрешению: платформа
+// отдаёт его и по сессии, на каждую серию (см. platformscraper), а проверки
+// у обоих путей одни.
+func Parse(body []byte) (*Manifest, error) {
 	var m Manifest
 	if err := json.Unmarshal(body, &m); err != nil {
-		return nil, fmt.Errorf("--from: response is not a manifest: %w", err)
+		return nil, fmt.Errorf("response is not a manifest: %w", err)
 	}
 	if m.V > SupportedVersion {
 		return nil, fmt.Errorf("%w: manifest v%d, supported v%d — update kinopub",
 			ErrUnsupportedVersion, m.V, SupportedVersion)
 	}
 	if m.URL == "" {
-		return nil, errors.New("--from: manifest has no media URL")
+		return nil, errors.New("manifest has no media URL")
 	}
 	if p := strings.ToUpper(m.Protocol); p != "" && p != "HLS" {
 		// Конвейер здесь один — HLS. Промолчать и запустить его на чём-то
 		// другом значило бы упасть позже и невнятнее.
-		return nil, fmt.Errorf("--from: unsupported protocol %q (only HLS)", m.Protocol)
+		return nil, fmt.Errorf("unsupported protocol %q (only HLS)", m.Protocol)
 	}
 	if !m.ExpiresAt.IsZero() && time.Now().After(m.ExpiresAt) {
-		return nil, errors.New("--from: link has expired — create a new one")
+		return nil, errors.New("link has expired — create a new one")
 	}
 	return &m, nil
 }

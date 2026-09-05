@@ -232,54 +232,6 @@ func TestIsKnownBrowser(t *testing.T) {
 	}
 }
 
-// --- storedCredentialsAllowed ---
-
-func TestStoredCredentialsAllowed(t *testing.T) {
-	tests := []struct {
-		name       string
-		storedSite string
-		target     domain.Site
-		want       bool
-	}{
-		// The site the credentials were saved for is the site they are sent to.
-		{"exact_host", "kino.watch", domain.Site{Host: "kino.watch"}, true},
-		{"exact_host_other_known", "kino.pub", domain.Site{Host: "kino.pub"}, true},
-		{"case_insensitive", "KINO.watch", domain.Site{Host: "kino.WATCH"}, true},
-		{"target_carries_port", "kino.watch", domain.Site{Host: "kino.watch:8443"}, true},
-		{"stored_as_url", "https://kino.watch/", domain.Site{Host: "kino.watch"}, true},
-		// A subdomain belongs to the stored site.
-		{"subdomain", "kino.watch", domain.Site{Host: "www.kino.watch"}, true},
-		{"deep_subdomain", "kino.watch", domain.Site{Host: "a.b.kino.watch"}, true},
-		// A parent domain does not: cookies for a subdomain are not the parent's.
-		{"parent_of_stored", "www.kino.watch", domain.Site{Host: "kino.watch"}, false},
-		// Zero target resolves to the default site.
-		{"zero_target_default_site", domain.DefaultSiteHost, domain.Site{}, true},
-		{"zero_target_other_site", "kino.pub", domain.Site{}, false},
-		// Legacy file: no site recorded, so any host the service is known by is
-		// allowed and everything else is not.
-		{"legacy_known_target", "", domain.Site{Host: "kino.watch"}, true},
-		{"legacy_other_known_target", "", domain.Site{Host: "kino.pub"}, true},
-		{"legacy_known_subdomain", "", domain.Site{Host: "www.kino.pub"}, true},
-		{"legacy_zero_target", "", domain.Site{}, true},
-		{"legacy_blank_stored", "   ", domain.Site{Host: "kino.watch"}, true},
-		{"legacy_unknown_target", "", domain.Site{Host: "evil.example"}, false},
-		// The defect this guards: a "mirror" link must not receive the session.
-		{"outright_mismatch", "kino.watch", domain.Site{Host: "evil.example"}, false},
-		{"lookalike_suffix", "kino.watch", domain.Site{Host: "evilkino.watch"}, false},
-		{"stored_site_as_suffix_of_target", "kino.watch", domain.Site{Host: "kino.watch.evil.example"}, false},
-		{"other_known_host_not_implied", "kino.watch", domain.Site{Host: "kino.pub"}, false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := storedCredentialsAllowed(tc.storedSite, tc.target); got != tc.want {
-				t.Errorf("storedCredentialsAllowed(%q, %q) = %v, want %v",
-					tc.storedSite, tc.target, got, tc.want)
-			}
-		})
-	}
-}
-
 // --- exitCodeFor ---
 
 func TestExitCodeFor(t *testing.T) {

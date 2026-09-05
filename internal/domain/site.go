@@ -137,6 +137,10 @@ func (r EpisodeRef) IsZero() bool { return r.Season == 0 && r.Episode == 0 }
 // zero-padding-insensitive, and returns the zero EpisodeRef for anything else —
 // including podcast feed URLs, whose trailing segment is an access token.
 func EpisodeRefFromURL(rawURL string) EpisodeRef {
+	// A platform link names the episode in its fragment, the same way.
+	if link, ok := ParsePlatformLink(rawURL); ok {
+		return link.Ref
+	}
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
 		return EpisodeRef{}

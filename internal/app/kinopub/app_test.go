@@ -27,9 +27,13 @@ func (m *mockLogger) Component(name string) domain.Logger       { return m }
 type mockInputResolver struct {
 	source domain.FeedSource
 	err    error
+	class  domain.InputClass // ClassPodcastFeed when unset
 }
 
 func (m *mockInputResolver) Classify(rawURL string) (domain.InputClass, error) {
+	if m.class != domain.ClassUnclassified {
+		return m.class, nil
+	}
 	return domain.ClassPodcastFeed, nil
 }
 func (m *mockInputResolver) Resolve(ctx context.Context, rawURL string) (domain.FeedSource, error) {
@@ -419,4 +423,37 @@ func (d *stubHLSDownloader) ListVideoQualities(ctx context.Context,
 
 func (d *stubHLSDownloader) ProbeTrackStats(context.Context, string, domain.Quality) ([]domain.TrackStats, []domain.TrackStats, error) {
 	return nil, nil, nil
+}
+
+// TestRun_NoRSSFallbackForPlatformLink pins that a platform page whose scrape
+// fails reports that failure as is. The platform publishes no feed, so the RSS
+// pipeline could only replace the real error — a missing session, say — with
+// an "unclassified URL" that points the user the wrong way.
+func TestRun_NoRSSFallbackForPlatformLink(t *testing.T) {
+	deps := validDeps()
+	resolver := &countingInputResolver{}
+	resolver.class = domain.ClassPlatformTitle
+	deps.InputResolver = resolver
+	scrapeErr := errors.New("kino.example answered 401 Unauthorized")
+	deps.PageScraper = &failingPageScraper{err: scrapeErr}
+	deps.HLSDownloader = &stubHLSDownloader{}
+
+	app, err := New(deps)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = app.Run(context.Background(), domain.RunConfig{InputURL: "https://kino.example/#/title/201"})
+	if !errors.Is(err, scrapeErr) {
+		t.Fatalf("want the scrape error to surface, got %v", err)
+	}
+	if resolver.calls != 0 {
+		t.Errorf("RSS pipeline must not run for a platform page (input resolved %d times)", resolver.calls)
+	}
+}
+
+// failingPageScraper stands in for a platform that refused the scrape.
+type failingPageScraper struct{ err error }
+
+func (s *failingPageScraper) ExtractAllSeasons(context.Context, string) (*domain.PagePlaylist, error) {
+	return nil, s.err
 }

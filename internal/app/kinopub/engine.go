@@ -77,6 +77,13 @@ func (e *engine) run(ctx context.Context, cfg domain.RunConfig) (domain.RunResul
 		if cfg.AppMode || errors.Is(err, domain.ErrInvalidFlag) {
 			return result, err
 		}
+		// A platform page has no RSS equivalent either: the platform publishes
+		// no feed, so the fallback could only fail again — with an
+		// "unclassified URL" that hides the real error, such as a missing
+		// session.
+		if class, _ := e.deps.InputResolver.Classify(cfg.InputURL); class == domain.ClassPlatformTitle {
+			return result, err
+		}
 		log.Warn("HLS pipeline failed, falling back to RSS pipeline",
 			domain.F("error", err.Error()),
 		)

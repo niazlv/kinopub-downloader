@@ -106,7 +106,7 @@ func runDoctor(args []string) int {
 	// failure is non-fatal here — doctor can still run read-only checks without
 	// fresh source resolution.
 	site := domain.SiteFromHost(siteHost)
-	resolvedCookie, userAgent, _ := resolveAuth(cookie, userAgent, browserCk, site, false)
+	resolvedCookie, userAgent, _ := resolveAuth(cookie, userAgent, browserCk, site, false, false)
 
 	auth := domain.RequestAuth{
 		Cookie:    resolvedCookie,

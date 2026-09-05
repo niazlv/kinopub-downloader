@@ -83,6 +83,12 @@ func (r *Resolver) Classify(rawURL string) (domain.InputClass, error) {
 		return domain.ClassUnclassified, domain.ErrInvalidInputURL
 	}
 
+	// A platform title page is identified by its fragment, which the browser
+	// keeps to itself but the copied link still carries.
+	if _, ok := domain.ParsePlatformLink(rawURL); ok {
+		return domain.ClassPlatformTitle, nil
+	}
+
 	// Match path against known patterns.
 	if podcastFeedRe.MatchString(u.Path) {
 		return domain.ClassPodcastFeed, nil
@@ -98,7 +104,9 @@ func (r *Resolver) Classify(rawURL string) (domain.InputClass, error) {
 // Resolve produces a FeedSource from the given URL. For podcast feed URLs it
 // extracts the ID and token directly. For page links it returns
 // ErrFeedTokenUnavailable since the token cannot be obtained without auth.
-// Invalid/unclassified URLs return ErrInvalidInputURL.
+// Platform title pages have no feed at all and return
+// ErrPlatformSessionRequired. Invalid/unclassified URLs return
+// ErrInvalidInputURL.
 func (r *Resolver) Resolve(ctx context.Context, rawURL string) (domain.FeedSource, error) {
 	class, err := r.Classify(rawURL)
 	if err != nil {
@@ -128,6 +136,15 @@ func (r *Resolver) Resolve(ctx context.Context, rawURL string) (domain.FeedSourc
 		}
 		r.log.Info("resolving page link via HTML scraping", domain.F("url", rawURL))
 		return r.scraper.ExtractFeedSource(ctx, rawURL)
+
+	case domain.ClassPlatformTitle:
+		// The platform has no feed to resolve into: its pages go through the
+		// HLS pipeline (platformscraper), which needs the platform session.
+		// Reaching this point means the run has none.
+		r.log.Warn("platform page needs the platform's own session; kino.pub credentials do not apply",
+			domain.F("url", rawURL),
+		)
+		return domain.FeedSource{}, domain.ErrPlatformSessionRequired
 
 	default:
 		return domain.FeedSource{}, domain.ErrInvalidInputURL
