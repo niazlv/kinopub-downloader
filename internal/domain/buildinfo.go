@@ -110,16 +110,24 @@ func (b BuildInfo) UpdateRepo() string {
 	return UpstreamRepo
 }
 
+// ShortCommit abbreviates a commit hash for display, the way `git log
+// --abbrev=12` would. Twelve hex digits are unique in any repository this
+// project will ever be, and are what `--version` and `update` both print, so
+// the two can be compared by eye.
+func ShortCommit(commit string) string {
+	commit = strings.TrimSpace(commit)
+	if len(commit) > 12 {
+		return commit[:12]
+	}
+	return commit
+}
+
 // Describe renders the build's provenance for `--version`.
 func (b BuildInfo) Describe() string {
 	var sb strings.Builder
 	sb.WriteString(b.Version)
 	if b.Commit != "" {
-		commit := b.Commit
-		if len(commit) > 12 {
-			commit = commit[:12]
-		}
-		fmt.Fprintf(&sb, " (%s", commit)
+		fmt.Fprintf(&sb, " (%s", ShortCommit(b.Commit))
 		if b.Dirty {
 			sb.WriteString(", dirty")
 		}

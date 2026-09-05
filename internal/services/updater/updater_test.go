@@ -35,7 +35,13 @@ type releaseServer struct {
 	*httptest.Server
 	assets map[string][]byte
 	tag    string
+	// commit is what the tag resolves to. Empty makes the lookup fail, the
+	// way a rate-limited or misbehaving API would.
+	commit string
 }
+
+// testCommit is the hash the stub's release tag points at.
+const testCommit = "59f83e2466b7a76e75d3267712a6f5893304395f"
 
 func newReleaseServer(t *testing.T, tag string, binary []byte, signWith ed25519.PrivateKey) *releaseServer {
 	t.Helper()
@@ -49,7 +55,8 @@ func newReleaseServer(t *testing.T, tag string, binary []byte, signWith ed25519.
 	checksums := fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), assetName)
 
 	rs := &releaseServer{
-		tag: tag,
+		tag:    tag,
+		commit: testCommit,
 		assets: map[string][]byte{
 			assetName:                 binary,
 			domain.ChecksumsAssetName: []byte(checksums),
@@ -62,6 +69,17 @@ func newReleaseServer(t *testing.T, tag string, binary []byte, signWith ed25519.
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/", func(w http.ResponseWriter, r *http.Request) {
+		// The commit lookup, as GitHub answers it under the SHA media type:
+		// the bare hash, nothing else.
+		if strings.HasSuffix(r.URL.Path, "/commits/refs/tags/"+rs.tag) {
+			if rs.commit == "" || r.Header.Get("Accept") != "application/vnd.github.sha" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/vnd.github.sha; charset=utf-8")
+			fmt.Fprint(w, rs.commit)
+			return
+		}
 		if !strings.HasSuffix(r.URL.Path, "/releases/latest") {
 			http.NotFound(w, r)
 			return
@@ -143,6 +161,65 @@ func TestCheck_ReportsNewerRelease(t *testing.T) {
 	}
 	if rel.Tag != "v2.0.0" {
 		t.Errorf("tag: %q", rel.Tag)
+	}
+}
+
+// The release payload only names the tag; the commit it points at is looked
+// up separately so `update` can print it beside the running build's.
+func TestCheck_ResolvesReleaseCommit(t *testing.T) {
+	rs := newReleaseServer(t, "v2.0.0", fakeBinary(t), nil)
+	u, _ := newUpdater(t, rs, releaseBuild("v1.0.0"))
+
+	rel, _, err := u.Check(context.Background())
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if rel.Commit != testCommit {
+		t.Errorf("commit: want %q, got %q", testCommit, rel.Commit)
+	}
+}
+
+// The commit is a courtesy. Losing it — to a rate limit, an outage, a fork
+// whose API differs — must not turn a successful check into a failure.
+func TestCheck_SurvivesCommitLookupFailure(t *testing.T) {
+	rs := newReleaseServer(t, "v2.0.0", fakeBinary(t), nil)
+	rs.commit = ""
+	u, _ := newUpdater(t, rs, releaseBuild("v1.0.0"))
+
+	rel, newer, err := u.Check(context.Background())
+	if err != nil {
+		t.Fatalf("Check must not fail over the commit lookup: %v", err)
+	}
+	if !newer || rel.Tag != "v2.0.0" {
+		t.Errorf("the release itself must still be reported: newer=%v tag=%q", newer, rel.Tag)
+	}
+	if rel.Commit != "" {
+		t.Errorf("commit must be empty when unresolved, got %q", rel.Commit)
+	}
+}
+
+// Whatever comes back under the SHA media type is printed next to the running
+// build's commit, so only an actual hash may get through.
+func TestIsCommitHash(t *testing.T) {
+	for _, ok := range []string{
+		testCommit,
+		strings.Repeat("a", 64), // SHA-256 repositories
+	} {
+		if !isCommitHash(ok) {
+			t.Errorf("%q must be accepted", ok)
+		}
+	}
+	for _, bad := range []string{
+		"",
+		"59f83e2466b7",                 // abbreviated
+		strings.ToUpper(testCommit),    // GitHub never upper-cases
+		testCommit[:39] + "g",          // not hex
+		`{"message":"Not Found"}`,      // JSON error under the wrong media type
+		"<!DOCTYPE html>" + testCommit, // an error page
+	} {
+		if isCommitHash(bad) {
+			t.Errorf("%q must be rejected", bad)
+		}
 	}
 }
 

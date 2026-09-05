@@ -133,7 +133,11 @@ type Release struct {
 	Tag     string
 	Version domain.Version
 	PageURL string
-	assets  map[string]string // asset name → download URL
+	// Commit is the full hash the release tag points at, so it can be set
+	// beside the commit stamped into the running binary. Empty when the lookup
+	// failed: it is informational, and a release without it is still a release.
+	Commit string
+	assets map[string]string // asset name → download URL
 }
 
 // AssetURL returns the download URL of a named asset.
@@ -217,7 +221,70 @@ func (u *Updater) latestRelease(ctx context.Context) (*Release, error) {
 	for _, a := range payload.Assets {
 		rel.assets[a.Name] = a.URL
 	}
+
+	// The release payload names the tag but not its commit: target_commitish is
+	// whatever the release was created against, usually just "main". One more
+	// request resolves the tag itself. It is a courtesy to the reader, so a
+	// failure — a rate limit, a fork with an odd tag — is noted and not fatal.
+	if commit, err := u.tagCommit(ctx, rel.Tag); err != nil {
+		u.logger.Debug("release commit not resolved",
+			domain.F("release", rel.Tag),
+			domain.F("error", err.Error()),
+		)
+	} else {
+		rel.Commit = commit
+	}
 	return rel, nil
+}
+
+// tagCommit resolves a release tag to the commit it points at, peeling an
+// annotated tag to the commit beneath it.
+//
+// GitHub's commits endpoint does the peeling, and asked for the SHA media type
+// it answers with the bare hash rather than the commit's diff, which for a
+// release commit could run to megabytes. The ref is spelled in full so a branch
+// that happens to share the tag's name cannot be picked instead.
+func (u *Updater) tagCommit(ctx context.Context, tag string) (string, error) {
+	endpoint := fmt.Sprintf("%s/repos/%s/commits/refs/tags/%s", u.apiBase, u.repo, url.PathEscape(tag))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github.sha")
+
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("query tag commit: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("query tag commit: unexpected status %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+	if err != nil {
+		return "", fmt.Errorf("query tag commit: %w", err)
+	}
+	sha := strings.TrimSpace(string(body))
+	if !isCommitHash(sha) {
+		// An error page or a JSON body under the wrong media type: not a hash,
+		// and better shown as nothing than as garbage.
+		return "", fmt.Errorf("query tag commit: response is not a commit hash")
+	}
+	return sha, nil
+}
+
+// isCommitHash reports whether s is a full lowercase SHA-1 or SHA-256 git hash.
+func isCommitHash(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Apply downloads the release binary for this platform, verifies it, and

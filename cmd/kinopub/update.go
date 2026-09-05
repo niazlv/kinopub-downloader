@@ -86,7 +86,7 @@ func runUpdate(args []string) int {
 	}
 
 	fmt.Printf("%s %s\n", outStyle.Gray("Installed:"), info.Describe())
-	fmt.Printf("%s %s\n", outStyle.Gray("Latest:   "), outStyle.Bold(rel.Tag))
+	fmt.Printf("%s %s\n", outStyle.Gray("Latest:   "), describeRelease(rel))
 
 	switch {
 	case domain.IsDevBuild(info.Version):
@@ -118,4 +118,15 @@ func runUpdate(args []string) int {
 
 	fmt.Printf("%s Updated to %s.\n", outStyle.Green("✓"), outStyle.Bold(rel.Tag))
 	return 0
+}
+
+// describeRelease renders a release the way Describe renders the running build
+// — tag, then the abbreviated commit — so the two lines line up and a reader
+// can tell at a glance whether "the same version" is also the same build.
+func describeRelease(rel *updater.Release) string {
+	out := outStyle.Bold(rel.Tag)
+	if rel.Commit != "" {
+		out += fmt.Sprintf(" (%s)", domain.ShortCommit(rel.Commit))
+	}
+	return out
 }

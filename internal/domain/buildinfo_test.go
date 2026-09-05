@@ -120,6 +120,23 @@ func TestBuildInfo_UpdateRepoFallsBackToUpstream(t *testing.T) {
 	}
 }
 
+// `--version` and `update` both go through ShortCommit, so what they print can
+// be compared by eye.
+func TestShortCommit(t *testing.T) {
+	cases := map[string]string{
+		"0123456789abcdef0123456789abcdef01234567": "0123456789ab",
+		"0123456789ab":         "0123456789ab", // already short: untouched, not padded
+		"abc":                  "abc",          // shorter still: never sliced past its end
+		"  abcdef1234567890  ": "abcdef123456",
+		"":                     "",
+	}
+	for in, want := range cases {
+		if got := ShortCommit(in); got != want {
+			t.Errorf("ShortCommit(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestBuildInfo_Describe(t *testing.T) {
 	t.Run("release", func(t *testing.T) {
 		got := releaseBuild().Describe()
