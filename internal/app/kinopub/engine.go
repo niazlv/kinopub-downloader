@@ -5,12 +5,14 @@ package kinopub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,7 +71,10 @@ func (e *engine) run(ctx context.Context, cfg domain.RunConfig) (domain.RunResul
 		// source and the RSS feed path needs a cookie the run does not carry.
 		// Surface the real error (e.g. an expired token) instead of masking it
 		// behind a confusing feed failure.
-		if cfg.AppMode {
+		// An invalid flag cannot be cured by another pipeline: a -f that names
+		// nothing the episode offers must fail as such, not turn into a whole
+		// feed download with a warning.
+		if cfg.AppMode || errors.Is(err, domain.ErrInvalidFlag) {
 			return result, err
 		}
 		log.Warn("HLS pipeline failed, falling back to RSS pipeline",
@@ -108,6 +113,18 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 	if cfg.SubtitlesOnly {
 		return domain.RunResult{}, fmt.Errorf(
 			"--subs-only requires the HLS pipeline: pass a page link (…/item/view/…) with valid credentials")
+	}
+	// -f on this path can only pick the file: the feed carries finished files,
+	// so track ids and patterns have nothing to select. Say so, as --audio
+	// does above, rather than dropping them silently.
+	if spec := cfg.FormatSpec; !spec.IsZero() {
+		if spec.Quality != "" {
+			cfg.Quality = spec.Quality
+		}
+		if len(spec.Audio)+len(spec.Subtitles)+len(spec.Patterns)+len(spec.Excludes) > 0 {
+			log.Warn("-f track selection applies to page-link (HLS) downloads only; " +
+				"this run keeps every track the feed's file contains (the quality part of -f still applies)")
+		}
 	}
 	if !cfg.SubsPref.IsAll() || cfg.SubsMenu || cfg.SubsExternal {
 		log.Warn("subtitle selection applies to page-link (HLS) downloads only; " +
@@ -171,6 +188,17 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 
 	// 4. Filter episodes by SeasonSel/EpisodeSel, skip completed
 	allMatching := e.matchingEpisodes(series, cfg)
+
+	// 4b. --list-formats: report what the feed offers for the first matching
+	// episode. Completed episodes stay in scope, as on the HLS path.
+	if cfg.ListFormats {
+		listing, err := e.listFeedFormats(ctx, cfg, allMatching)
+		if err != nil {
+			return domain.RunResult{}, err
+		}
+		return domain.RunResult{Total: len(allMatching), Formats: listing}, nil
+	}
+
 	selected := e.filterCompleted(allMatching, state, cfg)
 	if len(selected) == 0 {
 		log.Info("no episodes to download")
@@ -518,6 +546,19 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 
 	// 4. Filter episodes.
 	allMatching := e.matchingEpisodes(series, cfg)
+
+	// 4b. --list-formats probes the first matching episode and reports what the
+	// source offers instead of downloading. Completed episodes stay in scope
+	// here: their renditions are just as informative, and a listing is not a
+	// download that could be skipped.
+	if cfg.ListFormats {
+		listing, err := e.listFormats(ctx, cfg, allMatching)
+		if err != nil {
+			return domain.RunResult{}, err
+		}
+		return domain.RunResult{Total: len(allMatching), Formats: listing}, nil
+	}
+
 	selected := e.filterCompleted(allMatching, state, cfg)
 	if len(selected) == 0 {
 		log.Info("no episodes to download (all completed)")
@@ -536,6 +577,17 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 			log.Info(fmt.Sprintf("  %s %s", ep.Key.Label(), ep.Title))
 		}
 		return domain.RunResult{Total: len(selected)}, nil
+	}
+
+	// 4c. -f: resolve the spec against the first episode and turn it into the
+	// ordinary quality, audio and subtitle preferences, so the rest of the run
+	// (including the menus, which an explicit preference bypasses) stays
+	// unaware of it. This happens before anything touches the disk: a spec
+	// that matches nothing must not leave a series directory behind.
+	if !cfg.FormatSpec.IsZero() {
+		if err := e.applyFormatSpec(ctx, &cfg, selected); err != nil {
+			return domain.RunResult{}, err
+		}
 	}
 
 	// 5. Persist series metadata.
@@ -1391,4 +1443,164 @@ func (e *engine) downloadPoster(ctx context.Context, posterURL, outputDir string
 	}
 
 	return posterPath, nil
+}
+
+// listFormats builds the --list-formats report for the first of the given
+// episodes from the same probes the interactive pickers use, so the listing
+// shows exactly the choices a run could make. The audio and subtitle groups
+// follow the configured quality, as they would in a download: a master lists
+// one audio group per video rendition, and the tracks are the same across them.
+func (e *engine) listFormats(ctx context.Context, cfg domain.RunConfig, episodes []domain.Episode) (*domain.FormatListing, error) {
+	if len(episodes) == 0 {
+		return nil, fmt.Errorf("no episodes match the selection")
+	}
+	ep := episodes[0]
+	var manifestURL string
+	for _, src := range ep.MediaSources {
+		if src.Kind == domain.MediaHLS && src.URL != "" {
+			manifestURL = src.URL
+			break
+		}
+	}
+	if manifestURL == "" {
+		return nil, fmt.Errorf("%s has no HLS manifest to inspect", ep.Key.Label())
+	}
+
+	e.deps.Logger.Component("engine-hls").Info("listing formats",
+		domain.F("episode", ep.Key.Label()),
+		domain.F("matching", len(episodes)),
+	)
+
+	video, err := e.deps.HLSDownloader.ListVideoQualities(ctx, manifestURL)
+	if err != nil {
+		return nil, fmt.Errorf("video qualities: %w", err)
+	}
+	audio, err := e.deps.HLSDownloader.ListAudioTracks(ctx, manifestURL, cfg.Quality)
+	if err != nil {
+		return nil, fmt.Errorf("audio tracks: %w", err)
+	}
+	subs, err := e.deps.HLSDownloader.ListSubtitleTracks(ctx, manifestURL, cfg.Quality)
+	if err != nil {
+		return nil, fmt.Errorf("subtitle tracks: %w", err)
+	}
+	return &domain.FormatListing{
+		Episode:   ep.Key,
+		Title:     ep.Title,
+		Duration:  ep.Duration,
+		Matching:  len(episodes),
+		Video:     video,
+		Audio:     audio,
+		Subtitles: subs,
+	}, nil
+}
+
+// applyFormatSpec turns cfg.FormatSpec into cfg.Quality, cfg.AudioPref and
+// cfg.SubsPref using the first episode's listing. The video selector is applied
+// before the probe: the audio and subtitle groups follow the chosen variant, as
+// they will in the download itself.
+func (e *engine) applyFormatSpec(ctx context.Context, cfg *domain.RunConfig, selected []domain.Episode) error {
+	if cfg.FormatSpec.Quality != "" {
+		cfg.Quality = cfg.FormatSpec.Quality
+	}
+	listing, err := e.listFormats(ctx, *cfg, selected)
+	if err != nil {
+		return fmt.Errorf("-f: %w", err)
+	}
+	sel, err := cfg.FormatSpec.Resolve(listing)
+	if err != nil {
+		return err
+	}
+	if sel.HasAudio {
+		cfg.AudioPref = sel.Audio
+	}
+	if sel.HasSubtitles {
+		cfg.SubsPref = sel.Subtitles
+	}
+	e.deps.Logger.Component("engine").Info("format selection (-f)",
+		domain.F("quality", string(cfg.Quality)),
+		domain.F("audio", strings.Join(cfg.AudioPref.Include, ", ")),
+		domain.F("subs", strings.Join(cfg.SubsPref.Include, ", ")),
+		domain.F("exclude", strings.Join(cfg.FormatSpec.Excludes, ", ")),
+	)
+	return nil
+}
+
+// listFeedFormats builds the --list-formats report for the first of the given
+// episodes on the feed path. The feed itself declares no more than a quality
+// label per file, so the file the run would pick is probed for its real
+// tracks, best effort: without ffprobe the listing still says what the feed
+// says.
+func (e *engine) listFeedFormats(ctx context.Context, cfg domain.RunConfig, episodes []domain.Episode) (*domain.FormatListing, error) {
+	if len(episodes) == 0 {
+		return nil, fmt.Errorf("no episodes match the selection")
+	}
+	log := e.deps.Logger.Component("engine")
+	ep := episodes[0]
+	listing := &domain.FormatListing{
+		Episode:  ep.Key,
+		Title:    ep.Title,
+		Duration: ep.Duration,
+		Matching: len(episodes),
+		Feed:     true,
+	}
+	for _, src := range ep.MediaSources {
+		listing.Video = append(listing.Video, domain.VideoQualityInfo{
+			Index:   len(listing.Video),
+			Height:  qualityHeight(src.Quality),
+			Quality: domain.Quality(src.Quality),
+		})
+	}
+	log.Info("listing formats",
+		domain.F("episode", ep.Key.Label()),
+		domain.F("matching", len(episodes)),
+	)
+
+	media, err := e.deps.MediaResolver.Resolve(ctx, ep, cfg.Quality)
+	if err != nil {
+		log.Warn("could not probe the feed's file; listing what the feed declares",
+			domain.F("error", err.Error()))
+		return listing, nil
+	}
+	if media.Duration > 0 {
+		listing.Duration = media.Duration
+	}
+	for i := range listing.Video {
+		if listing.Video[i].Quality == domain.Quality(media.Source.Quality) || len(listing.Video) == 1 {
+			listing.Video[i].Width, listing.Video[i].Height = parseResolution(media.Video.Resolution, listing.Video[i].Height)
+			listing.Video[i].BitrateKbps = media.Video.BitRate
+		}
+	}
+	for i, a := range media.Audio {
+		listing.Audio = append(listing.Audio, domain.AudioTrackInfo{Index: i, Name: a.Studio, Language: a.Language})
+	}
+	for i, s := range media.Subtitles {
+		listing.Subtitles = append(listing.Subtitles, domain.SubtitleTrackInfo{Index: i, Name: s.Source, Language: s.Language})
+	}
+	return listing, nil
+}
+
+// qualityHeight reads the height out of a feed quality label ("1080p" → 1080),
+// zero when the label carries none.
+func qualityHeight(label string) int {
+	digits := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(label)), "p")
+	if digits == "4k" {
+		return 2160
+	}
+	n, _ := strconv.Atoi(digits)
+	return n
+}
+
+// parseResolution splits "1920x1080" into width and height, keeping the
+// fallback height when the string is not of that shape.
+func parseResolution(res string, fallbackHeight int) (int, int) {
+	w, h, ok := strings.Cut(strings.ToLower(strings.TrimSpace(res)), "x")
+	if !ok {
+		return 0, fallbackHeight
+	}
+	width, err1 := strconv.Atoi(w)
+	height, err2 := strconv.Atoi(h)
+	if err1 != nil || err2 != nil {
+		return 0, fallbackHeight
+	}
+	return width, height
 }

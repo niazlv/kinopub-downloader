@@ -139,6 +139,8 @@ func run() int {
 		subsExtern  bool
 		subsOnly    bool
 		videoMenu   bool
+		listFormats bool
+		format      string
 		interactive bool
 		siteHost    string
 		keepDomains bool
@@ -172,6 +174,10 @@ func run() int {
 	fs.StringVar(&seasons, "seasons", "", "season selection (e.g. 1,3-5)")
 	fs.StringVar(&episodes, "episodes", "", "episode selection (e.g. 1,3-5)")
 	fs.BoolVar(&dryRun, "dry-run", false, "list episodes without downloading")
+	fs.BoolVar(&listFormats, "list-formats", false, "list the video qualities, audio tracks and subtitles the source offers, with the flags that pick them, without downloading")
+	fs.BoolVar(&listFormats, "F", false, "list formats (shorthand)")
+	fs.StringVar(&format, "format", "", "what to keep, by the ids and patterns -F prints, comma-separated: a quality (1080p-h264), track ids (a1, s2) or any pattern, which keeps every audio and subtitle track it matches (rus); '!' excludes")
+	fs.StringVar(&format, "f", "", "format selection (shorthand)")
 	fs.StringVar(&cookie, "cookie", "", "raw Cookie header value sent with every request (and to ffmpeg)")
 	fs.StringVar(&userAgent, "user-agent", "", "User-Agent sent with every request (must match the browser that issued the cookies)")
 	fs.Var(&headerVals, "header", "extra HTTP header 'Name: Value' (repeatable)")
@@ -263,6 +269,12 @@ func run() int {
 			"kinopub -o ./downloads https://kino.watch/podcast/get/12345/token")
 		h.example("List what would be downloaded without writing files",
 			"kinopub --dry-run https://kino.watch/item/view/38290")
+		h.example("See which qualities, audio tracks and subtitles an episode offers",
+			"kinopub -F https://kino.watch/item/view/38290/s1e1")
+		h.example("Pick by the ids -F printed, the yt-dlp way",
+			"kinopub -f 1080p-h264,a1,s1 https://kino.watch/item/view/38290")
+		h.example("Every Russian audio track and subtitle, no Japanese original",
+			"kinopub -f rus,!jpn https://kino.watch/item/view/38290")
 		h.example("Only seasons 1 and 3-5, 1080p, through a proxy",
 			"kinopub --seasons 1,3-5 -q 1080p --proxy socks5://127.0.0.1:1080 <url>")
 		h.example("Keep only the AniLibria dub, never the Japanese original",
@@ -416,6 +428,14 @@ func run() int {
 		return 1
 	}
 
+	// Parse -f. It is resolved against the first episode later, once the
+	// renditions are known; here only the grammar is checked.
+	formatSpec, err := domain.ParseFormatSpec(format)
+	if err != nil {
+		errorf("%v", err)
+		return 1
+	}
+
 	// Parse the bandwidth cap up front so a typo fails fast, before any network
 	// work, rather than after resolving auth and scraping.
 	rateLimit, err := ratelimit.ParseRate(limitRate)
@@ -518,6 +538,8 @@ func run() int {
 		SeasonSel:       seasonSel,
 		EpisodeSel:      episodeSel,
 		DryRun:          dryRun,
+		ListFormats:     listFormats,
+		FormatSpec:      formatSpec,
 		Cookie:          resolvedCookie,
 		UserAgent:       userAgent,
 		Headers:         headerVals.toMap(),
@@ -558,9 +580,9 @@ func run() int {
 		return 1
 	}
 
-	// Check ffmpeg availability (Req 7.3). Skipped in dry-run mode since no
-	// downloads are performed.
-	if !cfg.DryRun {
+	// Check ffmpeg availability (Req 7.3). Skipped for --dry-run and
+	// --list-formats, which download nothing.
+	if !cfg.DryRun && !cfg.ListFormats {
 		if _, err := exec.LookPath(cfg.FFmpegPath); err != nil {
 			errorf("%s", domain.ErrFFmpegNotFound.Error())
 			return 1
@@ -610,6 +632,10 @@ func run() int {
 		return 1
 	}
 
+	if res.Formats != nil {
+		renderFormats(os.Stdout, outStyle, res.Formats)
+	}
+
 	// Remember which credentials worked, so a later run with no flags reaches
 	// for the same ones first.
 	switch {
@@ -619,7 +645,7 @@ func run() int {
 		recordAuthMethodUsed(credstore.MethodCookie)
 	}
 
-	return exitCodeFor(res, ctx.Err(), cfg.DryRun)
+	return exitCodeFor(res, ctx.Err(), cfg.DryRun || cfg.ListFormats)
 }
 
 // exitCodeFor maps a finished run to a process exit status. The engine reports

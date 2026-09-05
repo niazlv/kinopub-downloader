@@ -53,10 +53,12 @@ type RunConfig struct {
 	FFmpegPath      string    // default "ffmpeg" on PATH (Req 7.3)
 	LogFilePath     string    // "" → no file sink (Req 13.7)
 	Container       Container
-	ForceRedownload bool      // (Req 12.4)
-	SeasonSel       Selection // (Req 15.5)
-	EpisodeSel      Selection // (Req 15.5)
-	DryRun          bool      // (Req 15.6)
+	ForceRedownload bool       // (Req 12.4)
+	SeasonSel       Selection  // (Req 15.5)
+	EpisodeSel      Selection  // (Req 15.5)
+	DryRun          bool       // (Req 15.6)
+	ListFormats     bool       // probe the first matching episode and report its renditions instead of downloading
+	FormatSpec      FormatSpec // -f: what to keep, by the ids and patterns -F prints; zero when not given
 
 	// Site is the origin the run targets, derived from InputURL so any mirror
 	// works, or set explicitly via --site when there is no URL to derive it

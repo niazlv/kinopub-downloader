@@ -20,6 +20,8 @@ type VideoQualityInfo struct {
 	Index int
 	// Height is the vertical resolution, e.g. 1080.
 	Height int
+	// Width is the horizontal resolution, e.g. 1920; zero when the source did not say.
+	Width int
 	// Codec is "h264" or "h265".
 	Codec string
 	// BitrateKbps is the declared bandwidth in kbit/s.

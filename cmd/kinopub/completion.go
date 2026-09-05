@@ -69,6 +69,8 @@ complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l fo
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l seasons        -d "Season selection (e.g. 1,3-5)" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l episodes       -d "Episode selection (e.g. 1,3-5)" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l dry-run        -d "List episodes without downloading"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s F -l list-formats   -d "List qualities, audio tracks and subtitles without downloading"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands" -s f -l format         -d "Pick by -F ids or patterns (e.g. 1080p-h264,a1,s1 or rus,!jpn)" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l cookie         -d "Raw Cookie header value" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l user-agent     -d "User-Agent header" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l header         -d "Extra HTTP header 'Name: Value'" -r
@@ -155,7 +157,7 @@ _kinopub_completion() {
     local subcommands="login logout sessions doctor config completion update"
     local main_flags="-o --output -c --concurrency --limit-rate --proxy -q --quality
         --verbosity -v --ffmpeg --log-file --container --force --seasons --episodes
-        --dry-run --cookie --user-agent --header --browser-cookies
+        --dry-run -F --list-formats -f --format --cookie --user-agent --header --browser-cookies
         --feed-file --ffmpeg-args -x --no-chunked --audio --audio-menu \
         --subs --subs-menu --subs-external --subs-only \\
         --video-menu --no-domain-rewrite -i --interactive \

@@ -27,4 +27,7 @@ type RunResult struct {
 	Failed    int
 	Skipped   int
 	Outcomes  []JobOutcome
+	// Formats is set by a --list-formats run, which reports renditions instead
+	// of downloading anything.
+	Formats *FormatListing
 }

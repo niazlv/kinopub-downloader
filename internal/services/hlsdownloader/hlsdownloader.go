@@ -273,6 +273,7 @@ func videoQualitiesFrom(variants []Variant) []domain.VideoQualityInfo {
 		out = append(out, domain.VideoQualityInfo{
 			Index:       len(out),
 			Height:      v.Height,
+			Width:       v.Width,
 			Codec:       codec,
 			BitrateKbps: v.BitrateKbps(),
 			Quality:     domain.VideoQualitySelector(v.Height, codec),

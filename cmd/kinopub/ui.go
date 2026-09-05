@@ -501,7 +501,7 @@ var mainFlagGroups = []flagGroup{
 		"o", "output", "container", "force", "dry-run",
 	}},
 	{title: "What to download:", names: []string{
-		"q", "quality", "seasons", "episodes", "audio", "subs", "subs-external", "subs-only",
+		"F", "list-formats", "f", "format", "q", "quality", "seasons", "episodes", "audio", "subs", "subs-external", "subs-only",
 	}},
 	{title: "Interactive selection:", names: []string{
 		"i", "interactive", "video-menu", "audio-menu", "subs-menu",
