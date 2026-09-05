@@ -13,8 +13,8 @@ import (
 // FormatSpec is a parsed -f value: the yt-dlp-style way to say what to keep in
 // one flag, using the ids and patterns that -F prints.
 //
-// Tokens are separated by "," (or "+", for yt-dlp muscle memory) and come in
-// three shapes: a video selector in -q's grammar ("1080p-h264", "max"), a typed
+// Tokens are joined with "+", the way yt-dlp spells "these together"
+// (-f 137+140); "," is accepted as well. They come in three shapes: a video selector in -q's grammar ("1080p-h264", "max"), a typed
 // track id from the listing ("a1", "s2"), or a free pattern, which selects
 // every audio and subtitle track it matches, so "rus" takes all Russian dubs
 // and all Russian subtitles at once. A "!" (or "-") prefix turns a pattern into

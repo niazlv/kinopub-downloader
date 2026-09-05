@@ -47,7 +47,7 @@ func TestRenderFormats(t *testing.T) {
 		"ID          KIND   RESOLUTION  FPS  CODEC          BITRATE    ~SIZE     LANG  NAME                                PATTERN",
 		"1080p-h264  video  1920x1080   24   h264           3805 kbps  ~644 MiB",
 		"406p-h264   video  720x406     24   h264           1060 kbps  ~179 MiB",
-		"Example: kinopub -f 1080p-h264,a1,s1 <url>",
+		"Example: kinopub -f 1080p-h264+a1+s1 <url>",
 	}
 	for _, line := range want {
 		if !strings.Contains(out, line+"\n") {

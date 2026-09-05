@@ -223,7 +223,7 @@ func TestRun_ListFormats_FeedWithoutProbe(t *testing.T) {
 // ordinary quality and track preferences.
 func TestRun_FormatSpec_SetsPreferencesFromListing(t *testing.T) {
 	app, hls := listingApp(t)
-	spec, err := domain.ParseFormatSpec("406p-h264,a2,s1")
+	spec, err := domain.ParseFormatSpec("406p-h264+a2+s1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestRun_FormatSpec_OnFeedPicksOnlyTheFile(t *testing.T) {
 		Video: domain.VideoTrack{Resolution: "1920x1080"},
 	}}}
 	app := feedApp(t, resolver)
-	spec, _ := domain.ParseFormatSpec("720p,rus")
+	spec, _ := domain.ParseFormatSpec("720p+rus")
 	cfg := domain.RunConfig{InputURL: "https://kino.pub/podcast/get/123/abc", FormatSpec: spec}
 	ApplyDefaults(&cfg)
 

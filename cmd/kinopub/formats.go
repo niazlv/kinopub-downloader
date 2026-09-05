@@ -196,7 +196,8 @@ func formatClock(d time.Duration) string {
 }
 
 // exampleCommand assembles a -f that picks the first entry of each kind, so the
-// reader sees the ids in the position they go in.
+// reader sees the ids in the position they go in. The ids are joined with "+",
+// the way yt-dlp spells "these together" (-f 137+140).
 func exampleCommand(l *domain.FormatListing) string {
 	var ids []string
 	if len(l.Video) > 0 && l.Video[0].Quality != "" {
@@ -214,5 +215,5 @@ func exampleCommand(l *domain.FormatListing) string {
 	if len(ids) == 0 {
 		return ""
 	}
-	return "kinopub -f " + strings.Join(ids, ",") + " <url>"
+	return "kinopub -f " + strings.Join(ids, "+") + " <url>"
 }
