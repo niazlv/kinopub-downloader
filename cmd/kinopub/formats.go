@@ -68,7 +68,7 @@ func renderFormats(w io.Writer, st termx.Styler, l *domain.FormatListing) {
 	case l.Feed:
 		fmt.Fprintln(w, st.Gray("         the feed serves finished files: -f (or -q) picks the file, and its audio and subtitle tracks come along as they are"))
 	case len(l.Video)+len(l.Audio)+len(l.Subtitles) > 0:
-		fmt.Fprintln(w, st.Gray("         a pattern keeps every match, e.g. -f rus; -q, --audio and --subs still work"))
+		fmt.Fprintln(w, st.Gray("         a pattern keeps every match, e.g. -f "rus"; -q, --audio and --subs still work"))
 	}
 }
 
@@ -215,5 +215,5 @@ func exampleCommand(l *domain.FormatListing) string {
 	if len(ids) == 0 {
 		return ""
 	}
-	return "kinopub -f " + strings.Join(ids, "+") + " <url>"
+	return `kinopub -f "` + strings.Join(ids, "+") + `" <url>`
 }

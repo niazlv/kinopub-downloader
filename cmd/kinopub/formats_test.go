@@ -47,7 +47,7 @@ func TestRenderFormats(t *testing.T) {
 		"ID          KIND   RESOLUTION  FPS  CODEC          BITRATE    ~SIZE     LANG  NAME                                PATTERN",
 		"1080p-h264  video  1920x1080   24   h264           3805 kbps  ~644 MiB",
 		"406p-h264   video  720x406     24   h264           1060 kbps  ~179 MiB",
-		"Example: kinopub -f 1080p-h264+a1+s1 <url>",
+		`Example: kinopub -f "1080p-h264+a1+s1" <url>`,
 	}
 	for _, line := range want {
 		if !strings.Contains(out, line+"\n") {
@@ -104,7 +104,7 @@ func TestRenderFormats_MentionsOtherMatchingEpisodes(t *testing.T) {
 func TestExampleCommand_IsAValidSpec(t *testing.T) {
 	l := sampleListing()
 	example := exampleCommand(l)
-	spec, err := domain.ParseFormatSpec(strings.TrimSuffix(strings.TrimPrefix(example, "kinopub -f "), " <url>"))
+	spec, err := domain.ParseFormatSpec(strings.Trim(strings.TrimSuffix(strings.TrimPrefix(example, "kinopub -f "), " <url>"), `"`))
 	if err != nil {
 		t.Fatalf("example %q does not parse: %v", example, err)
 	}
@@ -157,7 +157,7 @@ func TestRenderFormats_Feed(t *testing.T) {
 	var buf bytes.Buffer
 	renderFormats(&buf, termx.NewStyler(false), l)
 	out := buf.String()
-	for _, want := range []string{"1080p  file", "1920x1080", "audio in file", "Example: kinopub -f 1080p <url>", "finished files"} {
+	for _, want := range []string{"1080p  file", "1920x1080", "audio in file", `Example: kinopub -f "1080p" <url>`, "finished files"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}

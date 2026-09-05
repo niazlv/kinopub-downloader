@@ -189,9 +189,9 @@ func run() int {
 	fs.StringVar(&ffmpegArgs, "ffmpeg-args", "", "extra ffmpeg arguments as a single string (advanced, e.g. \"-c:v libx265 -crf 28\")")
 	fs.Var(&ffmpegX, "x", "extra ffmpeg argument (repeatable, advanced, e.g. --x \"-c:v\" --x libx265)")
 	fs.BoolVar(&noChunked, "no-chunked", false, "disable chunked HTTP download (use ffmpeg streaming for all sources)")
-	fs.StringVar(&audioSel, "audio", "", "audio track selection: comma-separated patterns; prefix with '!' (or '-') to exclude (e.g. \"anilibria\", \"!jpn\", \"anilibria,!jpn\")")
+	fs.StringVar(&audioSel, "audio", "", "audio track selection: comma-separated patterns; prefix with '!' (or '-') to exclude (e.g. anilibria, '!jpn', 'anilibria,!jpn'; single quotes keep bash and zsh from expanding the !)")
 	fs.BoolVar(&audioMenu, "audio-menu", false, "show an interactive audio-track picker before downloading (TTY only)")
-	fs.StringVar(&subsSel, "subs", "", "subtitle track selection, same syntax as --audio (e.g. \"rus\", \"!eng\", \"rus,!eng\")")
+	fs.StringVar(&subsSel, "subs", "", "subtitle track selection, same syntax as --audio (e.g. rus, '!eng', 'rus,!eng')")
 	fs.BoolVar(&subsMenu, "subs-menu", false, "show an interactive subtitle-track picker before downloading (TTY only)")
 	fs.BoolVar(&subsExtern, "subs-external", false, "write subtitles as separate .srt files instead of muxing them into the container")
 	fs.BoolVar(&subsOnly, "subs-only", false, "download only subtitles as .srt files, skipping video and audio (page links only)")
@@ -272,13 +272,13 @@ func run() int {
 		h.example("See which qualities, audio tracks and subtitles an episode offers",
 			"kinopub -F https://kino.watch/item/view/38290/s1e1")
 		h.example("Pick by the ids -F printed, the yt-dlp way",
-			"kinopub -f 1080p-h264+a1+s1 https://kino.watch/item/view/38290")
+			"kinopub -f \"1080p-h264+a1+s1\" https://kino.watch/item/view/38290")
 		h.example("Every Russian audio track and subtitle, no Japanese original",
-			"kinopub -f rus+!jpn https://kino.watch/item/view/38290")
+			"kinopub -f 'rus+!jpn' https://kino.watch/item/view/38290")
 		h.example("Only seasons 1 and 3-5, 1080p, through a proxy",
 			"kinopub --seasons 1,3-5 -q 1080p --proxy socks5://127.0.0.1:1080 <url>")
 		h.example("Keep only the AniLibria dub, never the Japanese original",
-			"kinopub --audio \"anilibria,!jpn\" https://kino.watch/item/view/38290")
+			"kinopub --audio 'anilibria,!jpn' https://kino.watch/item/view/38290")
 		h.example("Pick the audio track interactively before downloading",
 			"kinopub --audio-menu https://kino.watch/item/view/38290")
 		h.example("Keep only Russian subtitles, as separate .srt files",
