@@ -1483,7 +1483,7 @@ func (e *engine) listFormats(ctx context.Context, cfg domain.RunConfig, episodes
 	if err != nil {
 		return nil, fmt.Errorf("subtitle tracks: %w", err)
 	}
-	return &domain.FormatListing{
+	listing := &domain.FormatListing{
 		Episode:   ep.Key,
 		Title:     ep.Title,
 		Duration:  ep.Duration,
@@ -1491,7 +1491,25 @@ func (e *engine) listFormats(ctx context.Context, cfg domain.RunConfig, episodes
 		Video:     video,
 		Audio:     audio,
 		Subtitles: subs,
-	}, nil
+	}
+
+	// The master states no bitrate for audio and subtitle renditions, so the
+	// listing samples them (a few requests per track). A listing is the one
+	// place that is worth it, and a failed probe only leaves those cells blank.
+	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	audioStats, subStats, err := e.deps.HLSDownloader.ProbeTrackStats(probeCtx, manifestURL, cfg.Quality)
+	if err != nil {
+		e.deps.Logger.Component("engine-hls").Debug("track stats probe failed", domain.F("error", err.Error()))
+	} else {
+		if len(audioStats) == len(audio) {
+			listing.AudioStats = audioStats
+		}
+		if len(subStats) == len(subs) {
+			listing.SubtitleStats = subStats
+		}
+	}
+	return listing, nil
 }
 
 // applyFormatSpec turns cfg.FormatSpec into cfg.Quality, cfg.AudioPref and

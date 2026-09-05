@@ -26,6 +26,8 @@ type VideoQualityInfo struct {
 	Codec string
 	// BitrateKbps is the declared bandwidth in kbit/s.
 	BitrateKbps int
+	// FPS is the declared frame rate; zero when the master does not say.
+	FPS float64
 	// Quality is the selector equivalent to picking this option.
 	Quality Quality
 }

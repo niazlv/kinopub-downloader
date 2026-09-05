@@ -224,6 +224,14 @@ type HLSDownloader interface {
 	// offers, best first and with duplicates of the same resolution and codec
 	// collapsed, so they can be presented as a menu.
 	ListVideoQualities(ctx context.Context, manifestURL string) ([]VideoQualityInfo, error)
+
+	// ProbeTrackStats samples the audio and subtitle renditions of the selected
+	// quality: each media playlist is read for its duration and the first
+	// segments are measured for a bitrate, from which a size is projected. It
+	// exists for listings and costs a few requests per track. The results
+	// align with ListAudioTracks and ListSubtitleTracks; a track that could not
+	// be sampled has zero stats rather than failing the whole probe.
+	ProbeTrackStats(ctx context.Context, manifestURL string, quality Quality) (audio, subtitles []TrackStats, err error)
 }
 
 // AudioChooser presents the available audio tracks to the user and returns the

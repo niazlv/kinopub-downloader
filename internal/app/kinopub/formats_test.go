@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,6 +74,11 @@ func (d *listingHLSDownloader) ListSubtitleTracks(context.Context, string, domai
 	}, nil
 }
 
+func (d *listingHLSDownloader) ProbeTrackStats(context.Context, string, domain.Quality) ([]domain.TrackStats, []domain.TrackStats, error) {
+	return []domain.TrackStats{{Codec: "mp4a.40.2", BitrateKbps: 128, SizeBytes: 22720000}, {Codec: "mp4a.40.2"}},
+		[]domain.TrackStats{{BitrateKbps: 1, SizeBytes: 90000}, {}}, nil
+}
+
 func listingApp(t *testing.T) (*App, *listingHLSDownloader) {
 	t.Helper()
 	deps := validDeps()
@@ -116,6 +122,9 @@ func TestRun_ListFormats_ProbesFirstMatchingEpisodeWithoutDownloading(t *testing
 	}
 	if strings.Join(hls.probed, ",") != "https://cdn.example/s1e1.m3u8" {
 		t.Errorf("probed manifests = %v, want only the first episode's", hls.probed)
+	}
+	if len(l.AudioStats) != 2 || l.AudioStats[0].BitrateKbps != 128 || len(l.SubtitleStats) != 2 {
+		t.Errorf("track stats not attached: audio %+v, subs %+v", l.AudioStats, l.SubtitleStats)
 	}
 }
 
@@ -301,13 +310,17 @@ func TestRun_FormatSpec_MissIsAnError(t *testing.T) {
 }
 
 // prefRecordingResolver remembers the quality preference each probe was given.
+// The RSS pipeline resolves episodes from several workers, hence the mutex.
 type prefRecordingResolver struct {
 	mockMediaResolver
+	mu    sync.Mutex
 	prefs []domain.QualityPref
 }
 
 func (r *prefRecordingResolver) Resolve(ctx context.Context, ep domain.Episode, pref domain.QualityPref) (domain.ResolvedMedia, error) {
+	r.mu.Lock()
 	r.prefs = append(r.prefs, pref)
+	r.mu.Unlock()
 	return r.mockMediaResolver.Resolve(ctx, ep, pref)
 }
 

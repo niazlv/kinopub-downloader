@@ -416,3 +416,7 @@ func (d *stubHLSDownloader) ListVideoQualities(ctx context.Context,
 	manifestURL string) ([]domain.VideoQualityInfo, error) {
 	return nil, nil
 }
+
+func (d *stubHLSDownloader) ProbeTrackStats(context.Context, string, domain.Quality) ([]domain.TrackStats, []domain.TrackStats, error) {
+	return nil, nil, nil
+}

@@ -243,3 +243,7 @@ func TestRunHLS_GivesUpAfterBudget(t *testing.T) {
 		t.Errorf("episode attempted %d times, want %d (budget)", got, maxEpisodeAttempts)
 	}
 }
+
+func (f *fakeHLSDownloader) ProbeTrackStats(context.Context, string, domain.Quality) ([]domain.TrackStats, []domain.TrackStats, error) {
+	return nil, nil, nil
+}

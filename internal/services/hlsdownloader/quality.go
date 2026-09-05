@@ -14,14 +14,15 @@ import (
 
 // Variant represents a single quality variant from an HLS master playlist.
 type Variant struct {
-	Bandwidth  int    // bits per second
-	Resolution string // e.g. "1920x1080"
-	Codecs     string // e.g. "avc1.640028,mp4a.40.2"
-	URL        string // media playlist URL (relative or absolute)
-	Width      int    // parsed from Resolution
-	Height     int    // parsed from Resolution
-	AudioGroup string // GROUP-ID of associated audio renditions (empty = muxed)
-	SubsGroup  string // GROUP-ID of associated subtitle renditions (empty = none)
+	Bandwidth  int     // bits per second
+	Resolution string  // e.g. "1920x1080"
+	Codecs     string  // e.g. "avc1.640028,mp4a.40.2"
+	URL        string  // media playlist URL (relative or absolute)
+	Width      int     // parsed from Resolution
+	Height     int     // parsed from Resolution
+	AudioGroup string  // GROUP-ID of associated audio renditions (empty = muxed)
+	SubsGroup  string  // GROUP-ID of associated subtitle renditions (empty = none)
+	FrameRate  float64 // FRAME-RATE attribute; 0 when absent
 }
 
 // IsH265 reports whether this variant uses HEVC/H.265 codec.

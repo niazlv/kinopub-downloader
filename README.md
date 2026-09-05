@@ -297,16 +297,16 @@ Selection (e.g. 1; Enter/TAB or 'auto' to keep automatic):
 ```text
 $ kinopub -F https://kino.watch/item/view/119614/s2e10
 S02E10  Многочисленные молитвы  (23:40)
-ID          KIND   RESOLUTION  CODEC  BITRATE    ~SIZE     LANG  NAME                                PATTERN
-1080p-h264  video  1920x1080   h264   3805 kbps  ~644 MiB
-720p-h264   video  1280x720    h264   1933 kbps  ~327 MiB
-406p-h264   video  720x406     h264   1060 kbps  ~179 MiB
-a1          audio                                          rus   01. Многоголосый. StudioBand (RUS)  studioband
-a2          audio                                          jpn   02. Оригинал (JPN)                  jpn
-s1          subs                                           rus   RUS #01                             rus
-s5          subs                                           eng   ENG #05                             eng
-s6          subs                                           chi   CHI #06                             chi
-s7          subs                                           chi   CHI #07                             chi
+ID          KIND   RESOLUTION  FPS     CODEC      BITRATE    ~SIZE     LANG  NAME                                PATTERN
+1080p-h264  video  1920x1080   23.976  h264       3805 kbps  ~644 MiB
+720p-h264   video  1280x720    23.976  h264       1933 kbps  ~327 MiB
+406p-h264   video  720x406     23.976  h264       1060 kbps  ~179 MiB
+a1          audio                      mp4a.40.2  152 kbps   ~26 MiB   rus   01. Многоголосый. StudioBand (RUS)  studioband
+a2          audio                      mp4a.40.2  177 kbps   ~30 MiB   jpn   02. Оригинал (JPN)                  jpn
+s1          subs                                             ~36 KiB   rus   RUS #01                             rus
+s5          subs                                             ~25 KiB   eng   ENG #05                             eng
+s6          subs                                             ~25 KiB   chi   CHI #06                             chi
+s7          subs                                             ~25 KiB   chi   CHI #07                             chi
 Example: kinopub -f 1080p-h264,a1,s1 <url>
          a pattern keeps every match, e.g. -f rus; -q, --audio and --subs still work
 ```
@@ -325,7 +325,7 @@ kinopub -f 1080p-h264,a1,s1 https://kino.watch/item/view/119614
 kinopub -f rus,!jpn https://kino.watch/item/view/119614
 ```
 
-Значение, которое ничему не соответствует (`a9`, опечатка в шаблоне), это ошибка до начала скачивания, а не молчаливый откат: оно скопировано из таблицы. Размер в таблице — оценка по битрейту и длительности. Аудио и субтитры показываются для варианта, который выбрал бы `-q` (по умолчанию «оптимальный»); у остальных вариантов дорожки те же. На feed-ссылке (`/podcast/get/…`, `--feed-file`) `-F` показывает записи feed, а при наличии ffprobe и дорожки внутри файла; `-f` там выбирает только качество, потому что файл скачивается целиком, а о проигнорированных дорожках утилита предупредит.
+Значение, которое ничему не соответствует (`a9`, опечатка в шаблоне), это ошибка до начала скачивания, а не молчаливый откат: оно скопировано из таблицы. Размеры — оценки: для видео по заявленному битрейту и длительности, для аудио и субтитров по размеру первых сегментов дорожки (пара лёгких запросов на дорожку), поэтому они помечены тильдой. Аудио и субтитры показываются для варианта, который выбрал бы `-q` (по умолчанию «оптимальный»); у остальных вариантов дорожки те же. На feed-ссылке (`/podcast/get/…`, `--feed-file`) `-F` показывает записи feed, а при наличии ffprobe и дорожки внутри файла; `-f` там выбирает только качество, потому что файл скачивается целиком, а о проигнорированных дорожках утилита предупредит.
 
 ### Интерактивный режим (`-i`)
 

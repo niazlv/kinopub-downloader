@@ -20,15 +20,20 @@ func sampleListing() *domain.FormatListing {
 		Duration: 1420 * time.Second,
 		Matching: 1,
 		Video: []domain.VideoQualityInfo{
-			{Height: 1080, Width: 1920, Codec: "h264", BitrateKbps: 3805, Quality: "1080p-h264"},
-			{Height: 720, Width: 1280, Codec: "h264", BitrateKbps: 1933, Quality: "720p-h264"},
-			{Height: 406, Width: 720, Codec: "h264", BitrateKbps: 1060, Quality: "406p-h264"},
+			{Height: 1080, Width: 1920, Codec: "h264", BitrateKbps: 3805, FPS: 24, Quality: "1080p-h264"},
+			{Height: 720, Width: 1280, Codec: "h264", BitrateKbps: 1933, FPS: 24, Quality: "720p-h264"},
+			{Height: 406, Width: 720, Codec: "h264", BitrateKbps: 1060, FPS: 24, Quality: "406p-h264"},
 		},
 		Audio: []domain.AudioTrackInfo{
 			{Name: "01. Многоголосый. StudioBand (RUS)", Language: "rus"},
 			{Name: "02. Оригинал (JPN)", Language: "jpn"},
 		},
-		Subtitles: []domain.SubtitleTrackInfo{{Name: "RUS #01", Language: "rus"}},
+		AudioStats: []domain.TrackStats{
+			{Codec: "mp4a.40.2", Channels: 2, BitrateKbps: 128, SizeBytes: 22720000},
+			{}, // not sampled: its cells stay blank
+		},
+		Subtitles:     []domain.SubtitleTrackInfo{{Name: "RUS #01", Language: "rus"}},
+		SubtitleStats: []domain.TrackStats{{BitrateKbps: 1, SizeBytes: 90000}},
 	}
 }
 
@@ -39,18 +44,31 @@ func TestRenderFormats(t *testing.T) {
 
 	want := []string{
 		"S02E10  Storm  (23:40)",
-		"ID          KIND   RESOLUTION  CODEC  BITRATE    ~SIZE     LANG  NAME                                PATTERN",
-		"1080p-h264  video  1920x1080   h264   3805 kbps  ~644 MiB",
-		"406p-h264   video  720x406     h264   1060 kbps  ~179 MiB",
-		"a1          audio                                          rus   01. Многоголосый. StudioBand (RUS)  studioband",
-		"a2          audio                                          jpn   02. Оригинал (JPN)                  jpn",
-		"s1          subs                                           rus   RUS #01                             rus",
+		"ID          KIND   RESOLUTION  FPS  CODEC          BITRATE    ~SIZE     LANG  NAME                                PATTERN",
+		"1080p-h264  video  1920x1080   24   h264           3805 kbps  ~644 MiB",
+		"406p-h264   video  720x406     24   h264           1060 kbps  ~179 MiB",
 		"Example: kinopub -f 1080p-h264,a1,s1 <url>",
 	}
 	for _, line := range want {
 		if !strings.Contains(out, line+"\n") {
 			t.Errorf("missing line %q in:\n%s", line, out)
 		}
+	}
+	// Track rows: sampled stats where known, blanks where not, patterns last.
+	for _, fragments := range [][]string{
+		{"a1          audio", "mp4a.40.2 2ch", "128 kbps", "~22 MiB", "rus   01. Многоголосый. StudioBand (RUS)  studioband"},
+		{"a2          audio", "jpn   02. Оригинал (JPN)                  jpn"},
+		{"s1          subs", "1 kbps", "~88 KiB", "rus   RUS #01                             rus"},
+	} {
+		line := lineContaining(out, fragments[0])
+		for _, f := range fragments {
+			if !strings.Contains(line, f) {
+				t.Errorf("row %q lacks %q:\n%s", fragments[0], f, out)
+			}
+		}
+	}
+	if a2 := lineContaining(out, "a2          audio"); strings.Contains(a2, "kbps") || strings.Contains(a2, "MiB") {
+		t.Errorf("an unsampled track must show no stats: %q", a2)
 	}
 	if strings.Contains(out, "matching episodes") {
 		t.Errorf("a single-episode listing must not mention other episodes:\n%s", out)
@@ -60,6 +78,16 @@ func TestRenderFormats(t *testing.T) {
 			t.Errorf("trailing spaces in %q", line)
 		}
 	}
+}
+
+// lineContaining returns the first line of out that contains s, or "".
+func lineContaining(out, s string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, s) {
+			return line
+		}
+	}
+	return ""
 }
 
 func TestRenderFormats_MentionsOtherMatchingEpisodes(t *testing.T) {

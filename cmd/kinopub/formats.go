@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -32,7 +33,7 @@ func renderFormats(w io.Writer, st termx.Styler, l *domain.FormatListing) {
 			"%d matching episodes; the listing is for the first, the rest normally offer the same", l.Matching)))
 	}
 
-	rows := [][]string{{"ID", "KIND", "RESOLUTION", "CODEC", "BITRATE", "~SIZE", "LANG", "NAME", "PATTERN"}}
+	rows := [][]string{{"ID", "KIND", "RESOLUTION", "FPS", "CODEC", "BITRATE", "~SIZE", "LANG", "NAME", "PATTERN"}}
 	for _, v := range l.Video {
 		id, kind := string(v.Quality), "video"
 		if l.Feed {
@@ -42,14 +43,15 @@ func renderFormats(w io.Writer, st termx.Styler, l *domain.FormatListing) {
 			}
 		}
 		rows = append(rows, []string{
-			id, kind, resolutionOf(v), v.Codec, bitrateOf(v), estimateSize(v.BitrateKbps, l.Duration), "", "", "",
+			id, kind, resolutionOf(v), fpsOf(v), v.Codec, bitrateOf(v.BitrateKbps),
+			estimateSize(v.BitrateKbps, l.Duration), "", "", "",
 		})
 	}
 	for i, a := range l.Audio {
-		rows = append(rows, trackRow(l.Feed, fmt.Sprintf("a%d", i+1), "audio", a, domain.AudioSelector(a)))
+		rows = append(rows, trackRow(l.Feed, fmt.Sprintf("a%d", i+1), "audio", a, statsAt(l.AudioStats, i), domain.AudioSelector(a)))
 	}
 	for i, s := range l.Subtitles {
-		rows = append(rows, trackRow(l.Feed, fmt.Sprintf("s%d", i+1), "subs", s, domain.SubtitleSelector(s)))
+		rows = append(rows, trackRow(l.Feed, fmt.Sprintf("s%d", i+1), "subs", s, statsAt(l.SubtitleStats, i), domain.SubtitleSelector(s)))
 	}
 	if l.Feed {
 		// Nothing inside a feed's file can be picked, so there is no pattern to show.
@@ -72,19 +74,44 @@ func renderFormats(w io.Writer, st termx.Styler, l *domain.FormatListing) {
 
 // trackRow renders an audio or subtitle track. Inside a feed's file a track is
 // information, not a choice, so it carries no id.
-func trackRow(feed bool, id, kind string, t domain.TrackInfo, pattern string) []string {
-	if feed {
-		return []string{"", kind + " in file", "", "", "", "", t.Language, t.Name, ""}
+func trackRow(feed bool, id, kind string, t domain.TrackInfo, stats domain.TrackStats, pattern string) []string {
+	codec := stats.Codec
+	if stats.Channels > 0 {
+		codec = strings.TrimSpace(fmt.Sprintf("%s %dch", codec, stats.Channels))
 	}
-	return []string{id, kind, "", "", "", "", t.Language, t.Name, pattern}
+	size := ""
+	if stats.SizeBytes > 0 {
+		size = "~" + formatSize(float64(stats.SizeBytes))
+	}
+	if feed {
+		return []string{"", kind + " in file", "", "", codec, bitrateOf(stats.BitrateKbps), size, t.Language, t.Name, ""}
+	}
+	return []string{id, kind, "", "", codec, bitrateOf(stats.BitrateKbps), size, t.Language, t.Name, pattern}
 }
 
-// bitrateOf renders the bitrate, or nothing when the source did not state one.
-func bitrateOf(v domain.VideoQualityInfo) string {
-	if v.BitrateKbps <= 0 {
+// statsAt returns the probed stats for track i, or zero stats when the probe
+// did not run or did not cover it.
+func statsAt(stats []domain.TrackStats, i int) domain.TrackStats {
+	if i < len(stats) {
+		return stats[i]
+	}
+	return domain.TrackStats{}
+}
+
+// bitrateOf renders a bitrate, or nothing when it is unknown.
+func bitrateOf(kbps int) string {
+	if kbps <= 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d kbps", v.BitrateKbps)
+	return fmt.Sprintf("%d kbps", kbps)
+}
+
+// fpsOf renders the frame rate, or nothing when the master did not state it.
+func fpsOf(v domain.VideoQualityInfo) string {
+	if v.FPS <= 0 {
+		return ""
+	}
+	return strconv.FormatFloat(v.FPS, 'f', -1, 64)
 }
 
 // writeTable prints rows as aligned columns, the first row as a header. Widths
@@ -141,12 +168,21 @@ func estimateSize(bitrateKbps int, d time.Duration) string {
 	if bitrateKbps <= 0 || d <= 0 {
 		return ""
 	}
-	bytes := float64(bitrateKbps) * 1000 / 8 * d.Seconds()
-	const mib = 1024 * 1024
-	if bytes >= 1024*mib {
-		return fmt.Sprintf("~%.1f GiB", bytes/(1024*mib))
+	return "~" + formatSize(float64(bitrateKbps)*1000/8*d.Seconds())
+}
+
+// formatSize renders a byte count in the unit that keeps it readable: KiB for
+// subtitle-sized things, MiB for episodes, GiB with a decimal above that.
+func formatSize(bytes float64) string {
+	const kib, mib, gib = 1024, 1024 * 1024, 1024 * 1024 * 1024
+	switch {
+	case bytes >= gib:
+		return fmt.Sprintf("%.1f GiB", bytes/gib)
+	case bytes >= mib:
+		return fmt.Sprintf("%.0f MiB", bytes/mib)
+	default:
+		return fmt.Sprintf("%.0f KiB", bytes/kib)
 	}
-	return fmt.Sprintf("~%.0f MiB", bytes/mib)
 }
 
 // formatClock renders a duration as m:ss, or h:mm:ss past an hour.

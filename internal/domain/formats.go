@@ -30,6 +30,23 @@ type FormatListing struct {
 	Video     []VideoQualityInfo
 	Audio     []AudioTrackInfo
 	Subtitles []SubtitleTrackInfo
+
+	// AudioStats and SubtitleStats align with Audio and Subtitles when the
+	// tracks were probed (HLSDownloader.ProbeTrackStats); nil otherwise.
+	AudioStats    []TrackStats
+	SubtitleStats []TrackStats
+}
+
+// TrackStats is what a listing learns about an audio or subtitle track beyond
+// its name by sampling its media playlist: the codec the master declares for
+// its group, a bitrate measured on the first segments, and the size that
+// bitrate projects over the track's duration. Zero values mean "unknown".
+type TrackStats struct {
+	Codec       string // e.g. "mp4a.40.2"
+	Channels    int    // 0 when the master does not say
+	BitrateKbps int    // sampled; 0 when unknown
+	SizeBytes   int64  // projected from the sample; 0 when unknown
+	Duration    time.Duration
 }
 
 // AudioSelector returns the --audio pattern that picks the given track. It is

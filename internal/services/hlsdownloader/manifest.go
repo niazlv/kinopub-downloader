@@ -30,6 +30,7 @@ type AudioRendition struct {
 	Name     string
 	Language string
 	URI      string // media playlist URL for this audio track
+	Channels int    // CHANNELS attribute; 0 when absent
 }
 
 // MasterPlaylist holds parsed data from an HLS master playlist.
@@ -191,6 +192,8 @@ func parseMasterPlaylist(r io.Reader, baseURL string) (*MasterPlaylist, error) {
 					Language: attrs["LANGUAGE"],
 					URI:      resolveURL(baseURL, attrs["URI"]),
 				}
+				// CHANNELS is "2" or "6", occasionally "6/JOC" for Atmos.
+				rendition.Channels, _ = strconv.Atoi(strings.SplitN(attrs["CHANNELS"], "/", 2)[0])
 				result.Audio = append(result.Audio, rendition)
 			case "SUBTITLES":
 				// A SUBTITLES rendition always carries its own URI; unlike audio
@@ -336,6 +339,7 @@ func parseVariantAttrs(attrs string) Variant {
 	v.Codecs = parsed["CODECS"]
 	v.AudioGroup = parsed["AUDIO"]
 	v.SubsGroup = parsed["SUBTITLES"]
+	v.FrameRate, _ = strconv.ParseFloat(parsed["FRAME-RATE"], 64)
 
 	return v
 }
