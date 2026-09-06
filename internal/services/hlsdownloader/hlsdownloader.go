@@ -506,10 +506,10 @@ func (d *Downloader) downloadEpisodeInternal(
 	// Total segments across video + all audio + all subtitles for progress.
 	totalSegments := 0
 	if videoPlaylist != nil {
-		totalSegments = len(videoPlaylist.Segments)
+		totalSegments = len(mediaSegments(videoPlaylist))
 	}
 	for _, aj := range audioJobs {
-		totalSegments += len(aj.playlist.Segments)
+		totalSegments += len(mediaSegments(aj.playlist))
 	}
 	for _, sj := range subsJobs {
 		totalSegments += len(sj.playlist.Segments)
@@ -543,7 +543,7 @@ func (d *Downloader) downloadEpisodeInternal(
 		videoTrackIdx = len(trackInfos)
 		trackInfos = append(trackInfos, domain.TrackProgressInfo{
 			Label:         "Video",
-			TotalSegments: len(videoPlaylist.Segments),
+			TotalSegments: len(mediaSegments(videoPlaylist)),
 		})
 	}
 
@@ -558,7 +558,7 @@ func (d *Downloader) downloadEpisodeInternal(
 		}
 		trackInfos = append(trackInfos, domain.TrackProgressInfo{
 			Label:         label,
-			TotalSegments: len(aj.playlist.Segments),
+			TotalSegments: len(mediaSegments(aj.playlist)),
 		})
 	}
 
@@ -753,7 +753,7 @@ func (d *Downloader) downloadEpisodeInternal(
 		trackWG.Add(1)
 		go func() {
 			defer trackWG.Done()
-			if err := downloadTrack(tracksCtx, videoTrackIdx, videoPlaylist.Segments,
+			if err := downloadTrack(tracksCtx, videoTrackIdx, mediaSegments(videoPlaylist),
 				videoDir, videoPath, d.concatenateSegmentsDir); err != nil {
 				recordErr(fmt.Errorf("video track: %w", err))
 			}
@@ -766,7 +766,7 @@ func (d *Downloader) downloadEpisodeInternal(
 		go func(ai int, aj audioJob) {
 			defer trackWG.Done()
 			audioDir := filepath.Join(tmpDir, fmt.Sprintf("audio_%d", ai))
-			if err := downloadTrack(tracksCtx, audioBase+ai, aj.playlist.Segments,
+			if err := downloadTrack(tracksCtx, audioBase+ai, mediaSegments(aj.playlist),
 				audioDir, aj.outFile, d.concatenateSegmentsDir); err != nil {
 				recordErr(fmt.Errorf("audio track %d: %w", ai, err))
 				return
@@ -1159,8 +1159,23 @@ func (d *Downloader) fetchSegment(ctx context.Context, segURL, outPath string) (
 	return n, nil
 }
 
+// mediaSegments is the download order of a video or audio track: the fMP4
+// initialization segment first, when the playlist names one, then the media
+// segments. Joined in this order they form a valid fragmented MP4, just as
+// MPEG-TS segments form a valid transport stream; ffmpeg tells the two apart
+// by content, so the .ts name of the joined file does not matter.
+func mediaSegments(pl *MediaPlaylist) []Segment {
+	if pl == nil || pl.InitURL == "" {
+		return pl.Segments
+	}
+	out := make([]Segment, 0, len(pl.Segments)+1)
+	out = append(out, Segment{URL: pl.InitURL, Index: -1})
+	return append(out, pl.Segments...)
+}
+
 // concatenateSegmentsDir joins all segment .ts files from segDir into outPath.
-// HLS .ts segments are MPEG-TS and can be concatenated byte-by-byte.
+// HLS .ts segments are MPEG-TS and can be concatenated byte-by-byte; fMP4
+// segments likewise, once the initialization segment comes first.
 func (d *Downloader) concatenateSegmentsDir(segments []Segment, segDir, outPath string) error {
 	out, err := os.Create(outPath)
 	if err != nil {

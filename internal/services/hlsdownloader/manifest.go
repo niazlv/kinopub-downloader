@@ -75,6 +75,10 @@ type MasterPlaylist struct {
 type MediaPlaylist struct {
 	Segments      []Segment
 	TotalDuration float64 // sum of all segment durations
+	// InitURL is the fMP4 initialization segment (#EXT-X-MAP), empty for
+	// MPEG-TS streams. It carries the codec setup every media segment
+	// depends on, so the joined file starts with it — see mediaSegments.
+	InitURL string
 }
 
 // FetchMasterPlaylist downloads and parses an HLS master playlist.
@@ -248,11 +252,6 @@ func checkUnsupportedMediaTag(line string) error {
 		}
 		return fmt.Errorf("encrypted HLS stream (METHOD=%s) is not supported: this downloader cannot decrypt segments", method)
 
-	case strings.HasPrefix(line, "#EXT-X-MAP"):
-		// fMP4 streams put codec setup in a separate initialization segment;
-		// concatenating media segments without it yields an invalid file.
-		return fmt.Errorf("fMP4 HLS stream (#EXT-X-MAP initialization segment) is not supported: only MPEG-TS segments can be concatenated")
-
 	case strings.HasPrefix(line, "#EXT-X-BYTERANGE"):
 		// Byte-range segments share one resource; fetching them needs Range
 		// requests, which fetchSegment does not make — it would download the
@@ -285,6 +284,25 @@ func parseMediaPlaylist(r io.Reader, baseURL string) (*MediaPlaylist, error) {
 			return nil, err
 		}
 
+		// fMP4: the initialization segment is fetched once and written first;
+		// after it, media segments concatenate into a valid fragmented MP4
+		// the same way MPEG-TS segments concatenate into a transport stream.
+		if strings.HasPrefix(line, "#EXT-X-MAP:") {
+			attrs := parseHLSAttributes(line[len("#EXT-X-MAP:"):])
+			if attrs["BYTERANGE"] != "" {
+				return nil, fmt.Errorf("fMP4 initialization segment with BYTERANGE is not supported: this downloader fetches whole resources only")
+			}
+			uri := strings.TrimSpace(attrs["URI"])
+			if uri == "" {
+				return nil, fmt.Errorf("fMP4 initialization segment (#EXT-X-MAP) without a URI")
+			}
+			initURL := resolveURL(baseURL, uri)
+			if result.InitURL != "" && result.InitURL != initURL {
+				return nil, fmt.Errorf("fMP4 stream changes its initialization segment mid-playlist: not supported")
+			}
+			result.InitURL = initURL
+			continue
+		}
 		if strings.HasPrefix(line, "#EXTINF:") {
 			// Parse duration: #EXTINF:10.0, or #EXTINF:10.0
 			durStr := line[len("#EXTINF:"):]

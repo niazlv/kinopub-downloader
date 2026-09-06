@@ -399,9 +399,9 @@ func TestParseMediaPlaylistAllowsKeyMethodNone(t *testing.T) {
 	}
 }
 
-func TestParseMediaPlaylistRejectsFMP4Map(t *testing.T) {
-	// An fMP4 stream needs its initialization segment prepended and cannot be
-	// assembled by concatenating media segments.
+func TestParseMediaPlaylistAcceptsFMP4Map(t *testing.T) {
+	// An fMP4 stream carries its codec setup in an initialization segment;
+	// the playlist keeps it apart so the downloader fetches it first.
 	const base = "https://cdn.example.com/index.m3u8"
 	body := `#EXTM3U
 #EXT-X-MAP:URI="init.mp4"
@@ -409,10 +409,31 @@ func TestParseMediaPlaylistRejectsFMP4Map(t *testing.T) {
 seg0.m4s
 `
 	pl, err := parseMediaPlaylist(strings.NewReader(body), base)
-	if pl != nil {
-		t.Errorf("expected no playlist on error, got %+v", pl)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	assertFatalError(t, err, "#EXT-X-MAP")
+	if pl.InitURL != "https://cdn.example.com/init.mp4" {
+		t.Errorf("InitURL = %q, want the resolved init segment", pl.InitURL)
+	}
+	if len(pl.Segments) != 1 {
+		t.Errorf("got %d segments, want 1", len(pl.Segments))
+	}
+	segs := mediaSegments(pl)
+	if len(segs) != 2 || segs[0].URL != pl.InitURL || segs[0].Index != -1 {
+		t.Errorf("mediaSegments = %+v, want the init segment first", segs)
+	}
+}
+
+func TestParseMediaPlaylistRejectsFMP4MapByterange(t *testing.T) {
+	// A BYTERANGE init segment needs a Range request, which fetchSegment
+	// does not make.
+	body := `#EXTM3U
+#EXT-X-MAP:URI="init.mp4",BYTERANGE="720@0"
+#EXTINF:6.0,
+seg0.m4s
+`
+	_, err := parseMediaPlaylist(strings.NewReader(body), "https://cdn.example.com/index.m3u8")
+	assertFatalError(t, err, "BYTERANGE")
 }
 
 func TestParseMediaPlaylistRejectsByterange(t *testing.T) {
