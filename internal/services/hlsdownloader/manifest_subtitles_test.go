@@ -135,3 +135,49 @@ video/720.m3u8
 		t.Errorf("kept the wrong rendition: %+v", got[0])
 	}
 }
+
+// kinopub declares the same tracks once per codec family, reusing one group
+// id, so a group can hold entries a viewer cannot tell apart. Muxing them all
+// would put the same speech (or the same subtitles) into the file twice.
+func TestRenditionsFor_CollapsesIndistinguishableDuplicates(t *testing.T) {
+	const body = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a480",NAME="01. Одноголосый (RUS)",LANGUAGE="rus",URI="audio/rus-hevc.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a480",NAME="02. Оригинал (ENG)",LANGUAGE="eng",URI="audio/eng-hevc.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a480",NAME="01. Одноголосый (RUS)",LANGUAGE="rus",URI="audio/rus-h264.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a480",NAME="02. Оригинал (ENG)",LANGUAGE="eng",URI="audio/eng-h264.m3u8"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="sub",NAME="RUS #02",LANGUAGE="rus",URI="subs/rus.m3u8"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="sub",NAME="RUS #02",LANGUAGE="rus",URI="subs/rus-again.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=720x524,AUDIO="a480",SUBTITLES="sub"
+video/480.m3u8
+`
+	m := parseMaster(t, body, "https://cdn.example/hls/master.m3u8")
+
+	audio := audioRenditionsFor(m, m.Variants[0])
+	if len(audio) != 2 {
+		t.Fatalf("want 2 distinct audio renditions, got %d: %+v", len(audio), audio)
+	}
+	// The first declaration wins, so the order a viewer sees is preserved.
+	if audio[0].URI != "https://cdn.example/hls/audio/rus-hevc.m3u8" {
+		t.Errorf("kept the wrong copy: %q", audio[0].URI)
+	}
+	if audio[0].Name == audio[1].Name {
+		t.Errorf("both renditions carry the same name: %q", audio[0].Name)
+	}
+
+	subs := subtitleRenditionsFor(m, m.Variants[0])
+	if len(subs) != 1 {
+		t.Fatalf("want 1 distinct subtitle rendition, got %d: %+v", len(subs), subs)
+	}
+
+	// Tracks that differ only by name stay separate: they are distinguishable.
+	const distinct = `#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="sub",NAME="ENG #05",LANGUAGE="eng",URI="subs/e5.m3u8"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="sub",NAME="ENG #06",LANGUAGE="eng",URI="subs/e6.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=720x524,SUBTITLES="sub"
+video/480.m3u8
+`
+	d := parseMaster(t, distinct, "https://cdn.example/hls/master.m3u8")
+	if got := subtitleRenditionsFor(d, d.Variants[0]); len(got) != 2 {
+		t.Errorf("same-language tracks with different names must both survive, got %d", len(got))
+	}
+}

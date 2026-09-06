@@ -176,10 +176,21 @@ func audioRenditionsFor(master *MasterPlaylist, selected Variant) []AudioRenditi
 	if selected.AudioGroup == "" {
 		return out
 	}
+	seen := make(map[string]bool)
 	for _, a := range master.Audio {
-		if a.GroupID == selected.AudioGroup && a.URI != "" {
-			out = append(out, a)
+		if a.GroupID != selected.AudioGroup || a.URI == "" {
+			continue
 		}
+		// kinopub declares the same track once per codec family (HEVC and
+		// H.264 reuse one group id), so a group can hold several entries a
+		// viewer cannot tell apart. Keeping them all would mux the same
+		// speech into the file twice; the first one is as good as any.
+		key := a.Name + "\x00" + a.Language
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, a)
 	}
 	return out
 }
@@ -292,10 +303,19 @@ func subtitleRenditionsFor(master *MasterPlaylist, selected Variant) []SubtitleR
 	if selected.SubsGroup == "" {
 		return out
 	}
+	seen := make(map[string]bool)
 	for _, s := range master.Subtitles {
-		if s.GroupID == selected.SubsGroup && s.URI != "" {
-			out = append(out, s)
+		if s.GroupID != selected.SubsGroup || s.URI == "" {
+			continue
 		}
+		// Same reasoning as for audio: indistinguishable duplicates would
+		// become duplicate subtitle tracks in the output.
+		key := s.Name + "\x00" + s.Language
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, s)
 	}
 	return out
 }
