@@ -203,7 +203,7 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 		if err != nil {
 			return domain.RunResult{}, err
 		}
-		return domain.RunResult{Total: len(allMatching), Formats: listing}, nil
+		return domain.RunResult{Total: len(allMatching), Formats: listing, Series: &series}, nil
 	}
 
 	selected := e.filterCompleted(allMatching, state, cfg)
@@ -225,7 +225,7 @@ func (e *engine) runRSS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 		for _, ep := range selected {
 			log.Info(fmt.Sprintf("  %s %s", ep.Key.Label(), ep.Title))
 		}
-		return domain.RunResult{Total: len(selected)}, nil
+		return domain.RunResult{Total: len(selected), Series: &series}, nil
 	}
 
 	// 5b. Persist series-level metadata for provenance/recovery.
@@ -563,7 +563,7 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 		if err != nil {
 			return domain.RunResult{}, err
 		}
-		return domain.RunResult{Total: len(allMatching), Formats: listing}, nil
+		return domain.RunResult{Total: len(allMatching), Formats: listing, Series: &series}, nil
 	}
 
 	selected := e.filterCompleted(allMatching, state, cfg)
@@ -583,7 +583,7 @@ func (e *engine) runHLS(ctx context.Context, cfg domain.RunConfig) (domain.RunRe
 		for _, ep := range selected {
 			log.Info(fmt.Sprintf("  %s %s", ep.Key.Label(), ep.Title))
 		}
-		return domain.RunResult{Total: len(selected)}, nil
+		return domain.RunResult{Total: len(selected), Series: &series}, nil
 	}
 
 	// 4c. -f: resolve the spec against the first episode and turn it into the

@@ -30,4 +30,8 @@ type RunResult struct {
 	// Formats is set by a --list-formats run, which reports renditions instead
 	// of downloading anything.
 	Formats *FormatListing
+	// Series is what the run learned about the source before downloading:
+	// title, seasons, episodes. Set by --dry-run and --list-formats, so a host
+	// can show the choice a run would make and let the user narrow it.
+	Series *Series
 }

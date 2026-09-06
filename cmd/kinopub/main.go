@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,36 +18,19 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/niazlv/kinopub-downloader/internal/app/kinopub"
+	"github.com/niazlv/kinopub-downloader/internal/app/wire"
 	"github.com/niazlv/kinopub-downloader/internal/domain"
-	"github.com/niazlv/kinopub-downloader/internal/lib/audiomenu"
 	"github.com/niazlv/kinopub-downloader/internal/lib/browsercookies"
 	"github.com/niazlv/kinopub-downloader/internal/lib/credstore"
-	"github.com/niazlv/kinopub-downloader/internal/lib/desktopnotify"
-	"github.com/niazlv/kinopub-downloader/internal/lib/httpx"
-	"github.com/niazlv/kinopub-downloader/internal/lib/kplog"
 	"github.com/niazlv/kinopub-downloader/internal/lib/logx"
 	"github.com/niazlv/kinopub-downloader/internal/lib/ratelimit"
-	"github.com/niazlv/kinopub-downloader/internal/lib/termuxapi"
 	"github.com/niazlv/kinopub-downloader/internal/lib/termx"
 	"github.com/niazlv/kinopub-downloader/internal/lib/usercfg"
-	"github.com/niazlv/kinopub-downloader/internal/services/apiscraper"
-	"github.com/niazlv/kinopub-downloader/internal/services/downloader"
-	"github.com/niazlv/kinopub-downloader/internal/services/feedparser"
-	"github.com/niazlv/kinopub-downloader/internal/services/hlsdownloader"
-	"github.com/niazlv/kinopub-downloader/internal/services/inputresolver"
 	"github.com/niazlv/kinopub-downloader/internal/services/kinopubapp"
-	"github.com/niazlv/kinopub-downloader/internal/services/manifestscraper"
 	"github.com/niazlv/kinopub-downloader/internal/services/mediaresolver"
-	"github.com/niazlv/kinopub-downloader/internal/services/outputlayout"
-	"github.com/niazlv/kinopub-downloader/internal/services/pagescraper"
-	"github.com/niazlv/kinopub-downloader/internal/services/platformscraper"
 	"github.com/niazlv/kinopub-downloader/internal/services/progress"
-	"github.com/niazlv/kinopub-downloader/internal/services/proxyprovider"
-	"github.com/niazlv/kinopub-downloader/internal/services/statestore"
-	kpapi "github.com/niazlv/kinopub-downloader/pkg/kinopub"
 )
 
 // Build provenance, stamped by the release workflow through -ldflags. An
@@ -111,46 +95,47 @@ func run() int {
 
 	// Define flags.
 	var (
-		output      string
-		concurrency int
-		limitRate   string
-		proxyURL    string
-		quality     string
-		verbosity   string
-		ffmpegPath  string
-		logFile     string
-		container   string
-		force       bool
-		seasons     string
-		episodes    string
-		dryRun      bool
-		showVersion bool
-		cookie      string
-		userAgent   string
-		headerVals  headerList
-		browserCk   browserCookiesFlag
-		feedFile    string
-		ffmpegArgs  string
-		ffmpegX     ffmpegExtraList
-		noChunked   bool
-		audioSel    string
-		audioMenu   bool
-		subsSel     string
-		subsMenu    bool
-		subsExtern  bool
-		subsOnly    bool
-		videoMenu   bool
-		listFormats bool
-		format      string
-		interactive bool
-		siteHost    string
-		keepDomains bool
-		appMode     bool
-		appToken    string
-		appBase     string
-		appCodec    string
-		noNotify    bool
-		notify      bool
+		output       string
+		concurrency  int
+		limitRate    string
+		proxyURL     string
+		quality      string
+		verbosity    string
+		ffmpegPath   string
+		logFile      string
+		container    string
+		force        bool
+		seasons      string
+		episodes     string
+		dryRun       bool
+		showVersion  bool
+		cookie       string
+		userAgent    string
+		headerVals   headerList
+		browserCk    browserCookiesFlag
+		feedFile     string
+		ffmpegArgs   string
+		ffmpegX      ffmpegExtraList
+		noChunked    bool
+		audioSel     string
+		audioMenu    bool
+		subsSel      string
+		subsMenu     bool
+		subsExtern   bool
+		subsOnly     bool
+		videoMenu    bool
+		listFormats  bool
+		progressJSON bool
+		format       string
+		interactive  bool
+		siteHost     string
+		keepDomains  bool
+		appMode      bool
+		appToken     string
+		appBase      string
+		appCodec     string
+		noNotify     bool
+		notify       bool
 	)
 
 	var fromURL string
@@ -177,6 +162,7 @@ func run() int {
 	fs.BoolVar(&dryRun, "dry-run", false, "list episodes without downloading")
 	fs.BoolVar(&listFormats, "list-formats", false, "list the video qualities, audio tracks and subtitles the source offers, with the flags that pick them, without downloading")
 	fs.BoolVar(&listFormats, "F", false, "list formats (shorthand)")
+	fs.BoolVar(&progressJSON, "progress-json", false, "print progress and the final result to stdout as JSON lines, one object per line, for another program to read; no bars, no menus")
 	fs.StringVar(&format, "format", "", "what to keep, by the ids and patterns -F prints, joined with + as in yt-dlp: a quality (1080p-h264), track ids (a1, s2) or any pattern, which keeps every audio and subtitle track it matches (rus); '!' excludes")
 	fs.StringVar(&format, "f", "", "format selection (shorthand)")
 	fs.StringVar(&cookie, "cookie", "", "raw Cookie header value sent with every request (and to ffmpeg)")
@@ -618,7 +604,15 @@ func run() int {
 	}
 
 	// Wire up services.
-	deps, cleanup, err := buildDependencies(&cfg)
+	opts := cliWireOptions()
+	if progressJSON {
+		// A program reads stdout: progress goes there as JSON lines, and the
+		// terminal keeps neither bars nor menus even when it is a TTY.
+		opts.Reporter = progress.NewJSON(os.Stdout)
+		opts.Console = false
+		opts.Interactive = false
+	}
+	deps, cleanup, err := wire.Build(&cfg, opts)
 	if err != nil {
 		errorf("%v", err)
 		return 1
@@ -633,6 +627,9 @@ func run() int {
 	}
 
 	res, runErr := app.Run(ctx, cfg)
+	if progressJSON {
+		emitJSONResult(os.Stdout, res, runErr)
+	}
 	if runErr != nil {
 		// A token that expires mid-run surfaces here as ErrAPIUnauthorized;
 		// translate it to the same actionable guidance the up-front check gives,
@@ -660,7 +657,7 @@ func run() int {
 		return 1
 	}
 
-	if res.Formats != nil {
+	if res.Formats != nil && !progressJSON {
 		renderFormats(os.Stdout, outStyle, res.Formats)
 	}
 
@@ -710,314 +707,44 @@ func exitCodeFor(res domain.RunResult, ctxErr error, dryRun bool) int {
 	}
 }
 
-// buildDependencies constructs all real service implementations and returns
-// the Dependencies struct, a cleanup function, and any error.
+// buildDependencies wires the services for a CLI run; the wiring itself lives
+// in internal/app/wire so other hosts build the same pipeline.
 func buildDependencies(cfg *domain.RunConfig) (kinopub.Dependencies, func(), error) {
-	var cleanups []func()
-	cleanup := func() {
-		for i := len(cleanups) - 1; i >= 0; i-- {
-			cleanups[i]()
-		}
-	}
-
-	// Coordinator for TTY line-discipline.
-	coord := logx.NewCoordinator(os.Stderr)
-
-	// Build logger handlers.
-	handlers := buildLogHandlers(*cfg, coord)
-
-	// Open log file if configured.
-	if cfg.LogFilePath != "" {
-		// Owner-only: the log records request URLs and headers, which carry feed
-		// tokens and signed media links.
-		f, err := os.OpenFile(cfg.LogFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-		if err != nil {
-			return kinopub.Dependencies{}, cleanup, fmt.Errorf("cannot open log file: %w", err)
-		}
-		cleanups = append(cleanups, func() { f.Close() })
-		handlers = append(handlers, logx.NewFileHandler(f, nil))
-	}
-
-	logger := logx.New(handlers)
-
-	// Proxy provider.
-	proxyProv, err := proxyprovider.New(cfg.ProxyURL)
-	if err != nil {
-		return kinopub.Dependencies{}, cleanup, err
-	}
-
-	// Build the auth-aware HTTP client: wrap the proxy client so every request
-	// carries the configured Cookie / User-Agent / extra headers.
-	auth := domain.RequestAuth{
-		Cookie:    cfg.Cookie,
-		UserAgent: cfg.UserAgent,
-		Headers:   cfg.Headers,
-		Site:      cfg.Site,
-	}
-	// Always include a Referer pointing at the site — the CDN (digital-cdn.net)
-	// requires it and will hang/timeout without it.
-	if auth.Headers == nil {
-		auth.Headers = make(map[string]string)
-	}
-	if auth.Headers["Referer"] == "" {
-		auth.Headers["Referer"] = cfg.Site.Referer()
-	}
-	httpClient := httpx.WithAuth(proxyProv.HTTPClient(), auth)
-
-	// Input resolver — with page scraper when auth is available.
-	var resolverOpts []inputresolver.Option
-	if auth.HasCredentials() {
-		scraper := pagescraper.New(httpClient, logger)
-		resolverOpts = append(resolverOpts, inputresolver.WithPageScraper(scraper))
-	}
-	inputRes := inputresolver.New(logger, resolverOpts...)
-
-	// Feed parser. Links inside the feed that still name a former site domain
-	// are moved onto the current one, unless --no-domain-rewrite says otherwise.
-	feedPars := feedparser.New(httpClient, logger,
-		feedparser.WithDomainRewrite(!cfg.NoDomainRewrite))
-
-	// Media resolver — needs a RunOutput function for ffprobe. Its m3u8 fetches
-	// go straight to the CDN, which gates HLS on cf_clearance, so this client
-	// carries the cookie everywhere rather than only to the site.
-	mediaRes := mediaresolver.New(
-		httpx.WithAuthCDNCookies(proxyProv.HTTPClient(), auth),
-		makeRunOutput(),
-		logger,
-		auth,
-	)
-
-	// Output layout.
-	layout := outputlayout.New(cfg.Container)
-
-	// State store.
-	outputDir := cfg.OutputPath
-	if outputDir == "" {
-		outputDir, _ = os.Getwd()
-	}
-	stateStr := statestore.New(outputDir, logger)
-
-	// Downloader.
-	dl := downloader.New(
-		makeRunFunc(),
-		proxyProv,
-		logger,
-		downloader.WithFFmpegPath(cfg.FFmpegPath),
-		downloader.WithAuth(auth),
-		downloader.WithExtraArgs(cfg.FFmpegExtraArgs),
-		downloader.WithNoChunked(cfg.NoChunked),
-		downloader.WithHTTPClient(httpClient),
-	)
-
-	// Progress reporter — choose live or log based on TTY.
-	var progReporter domain.ProgressReporter
-	if termx.IsTTY(os.Stderr) {
-		progReporter = progress.NewLive(os.Stderr, coord, progress.WithColor(errStyle.Enabled()))
-	} else {
-		progReporter = progress.NewLog(logger)
-	}
-	// System notifications, unless the user turned them off for this run
-	// (--no-notify) or for good (`kinopub config set notifications off`).
-	if !cfg.NoNotify {
-		// Wrap with Termux notifications if termux-notification is available.
-		progReporter = termuxapi.Wrap(progReporter, termuxapi.WithLogger(logger))
-		// And with native desktop notifications on macOS/Linux (no-op elsewhere,
-		// and on Termux, which the richer Termux notifier above already covers).
-		progReporter = desktopnotify.Wrap(progReporter)
-	}
-
-	deps := kinopub.Dependencies{
-		Logger:           logger,
-		InputResolver:    inputRes,
-		FeedParser:       feedPars,
-		MediaResolver:    mediaRes,
-		Downloader:       dl,
-		ProxyProvider:    proxyProv,
-		ProgressReporter: progReporter,
-		StateStore:       stateStr,
-		OutputLayout:     layout,
-		AuthedHTTPClient: httpClient,
-	}
-
-	// Optional HLS pipeline. Two ways to feed it:
-	//   - --api: the JSON API backend, which fetches items with a Bearer token
-	//     and yields signed hls4 manifests. No cookie needed; the token and the
-	//     app User-Agent were resolved into cfg by prepareAppSession.
-	//   - website: the HTML page scraper, available only when a cookie is
-	//     present (the player page is behind Cloudflare + auth).
-	//   - --from: a platform manifest. The platform already resolved the
-	//     source, so this path needs no site credentials at all.
-	switch {
-	case cfg.FromURL != "":
-		// Манифест забирается один раз: ссылка короткоживущая, и ходить по
-		// ней повторно незачем.
-		mctx, cancelManifest := context.WithTimeout(context.Background(), 30*time.Second)
-		m, err := manifestscraper.Fetch(mctx, httpClient, cfg.FromURL)
-		cancelManifest()
-		if err != nil {
-			return deps, cleanup, err
-		}
-		applyManifestSelection(cfg, m, logger)
-		deps.PageScraper = manifestscraper.New(m, logger)
-		deps.HLSDownloader = hlsdownloader.New(httpClient, auth, logger,
-			hlsdownloader.WithConcurrency(cfg.MaxConcurrency),
-			hlsdownloader.WithProxy(proxyProv.ProxyURL()),
-			hlsdownloader.WithRateLimit(cfg.RateLimit))
-	case cfg.AppMode:
-		apiCli := kpapi.New(proxyProv.HTTPClient(), cfg.APIBase, cfg.AppToken,
-			kpapi.WithUserAgent(cfg.UserAgent), kpapi.WithLogger(kplog.Adapt(logger)))
-		deps.PageScraper = apiscraper.New(apiCli, logger,
-			apiscraper.WithPreferredCodec(cfg.AppCodec))
-		deps.HLSDownloader = hlsdownloader.New(httpClient, auth, logger,
-			hlsdownloader.WithConcurrency(cfg.MaxConcurrency),
-			hlsdownloader.WithProxy(proxyProv.ProxyURL()),
-			hlsdownloader.WithRateLimit(cfg.RateLimit))
-	case auth.HasCredentials():
-		// A platform page is read through the platform's API, not its HTML:
-		// the page is an app shell with nothing in it, and the platform hands
-		// a logged-in user the episode list and a manifest per episode.
-		var scraper domain.PageScraper = pagescraper.New(httpClient, logger)
-		if _, ok := domain.ParsePlatformLink(cfg.InputURL); ok {
-			// The selection already carries the link's own season/episode
-			// suffix (ApplyURLEpisodeRef), so the scraper asks the platform
-			// for exactly the episodes the run will download.
-			scraper = platformscraper.New(httpClient, logger,
-				platformscraper.WithSelection(cfg.SeasonSel, cfg.EpisodeSel))
-		}
-		hlsDl := hlsdownloader.New(httpClient, auth, logger,
-			hlsdownloader.WithConcurrency(cfg.MaxConcurrency),
-			hlsdownloader.WithProxy(proxyProv.ProxyURL()),
-			hlsdownloader.WithRateLimit(cfg.RateLimit))
-		deps.PageScraper = scraper
-		deps.HLSDownloader = hlsDl
-	}
-
-	// Interactive audio-track picker. Only meaningful when the menu is enabled
-	// and stdin/stderr are a real terminal.
-	if cfg.AudioMenu && termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr) {
-		deps.AudioChooser = audiomenu.New(os.Stdin, os.Stderr, true, audiomenu.WithColor(errStyle.Enabled()))
-	}
-
-	// Interactive subtitle-track picker, on the same terms as the audio one.
-	if cfg.SubsMenu && termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr) {
-		deps.SubtitleChooser = audiomenu.New(os.Stdin, os.Stderr, true, audiomenu.WithColor(errStyle.Enabled()))
-	}
-
-	// Interactive video-quality picker, likewise.
-	if cfg.VideoMenu && termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr) {
-		deps.VideoChooser = audiomenu.New(os.Stdin, os.Stderr, true, audiomenu.WithColor(errStyle.Enabled()))
-	}
-
-	return deps, cleanup, nil
+	return wire.Build(cfg, cliWireOptions())
 }
 
-// buildLogHandlers creates the console log handler based on TTY detection and verbosity.
-func buildLogHandlers(cfg domain.RunConfig, coord *logx.Coordinator) []logx.Handler {
-	return consoleHandlers(cfg.Verbosity, coord)
+// cliWireOptions is what the terminal knows and the wiring does not: whether
+// stderr is a terminal, whether menus may ask, and which colors to use.
+func cliWireOptions() wire.Options {
+	return wire.Options{
+		Style:       errStyle,
+		Console:     termx.IsTTY(os.Stderr),
+		Interactive: termx.IsTTY(os.Stdin) && termx.IsTTY(os.Stderr),
+	}
 }
 
-// consoleHandlers picks the stderr log handler every subcommand shares: the
-// compact, colored layout for a terminal, the timestamped plain one for a file
-// or a pipe. --color=always keeps the compact layout in a pipe, because asking
-// for color is asking for the terminal presentation.
 func consoleHandlers(verb domain.Verbosity, coord *logx.Coordinator) []logx.Handler {
-	if termx.IsTTY(os.Stderr) || errStyle.Enabled() {
-		return []logx.Handler{logx.NewConsoleHandler(os.Stderr, verb, coord, errStyle)}
-	}
-	return []logx.Handler{logx.NewPlainHandler(os.Stderr, verb, coord)}
+	return wire.ConsoleHandlers(verb, coord, cliWireOptions())
 }
 
-// makeRunOutput creates a RunOutputFunc that executes a command and captures stdout.
-// On failure, stderr is included in the error message for diagnostics.
-func makeRunOutput() mediaresolver.RunOutputFunc {
-	return func(ctx context.Context, name string, args, env []string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, name, args...)
-		if len(env) > 0 {
-			cmd.Env = append(os.Environ(), env...)
-		}
-		var stderr strings.Builder
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-		if err != nil {
-			errMsg := stderr.String()
-			if errMsg != "" {
-				return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(errMsg))
-			}
-			return nil, err
-		}
-		return out, nil
-	}
-}
+func makeRunOutput() mediaresolver.RunOutputFunc { return wire.MakeRunOutput() }
 
-// makeRunFunc creates a downloader.RunFunc that executes a command, streaming
-// stdout to the provided writer. ffmpeg stderr is discarded in interactive mode
-// to keep the progress display clean — all useful progress info comes via
-// -progress pipe:1 on stdout.
-func makeRunFunc() downloader.RunFunc {
-	return func(ctx context.Context, name string, args, env []string, stdout io.Writer) error {
-		cmd := exec.CommandContext(ctx, name, args...)
-		if len(env) > 0 {
-			cmd.Env = append(os.Environ(), env...)
-		}
-		cmd.Stdout = stdout
-		// Discard ffmpeg stderr: the verbose codec/stream info clutters the
-		// live progress display. Errors are detected via the exit code.
-		cmd.Stderr = io.Discard
-		return cmd.Run()
+// emitJSONResult is the last line of a --progress-json run: the totals, the
+// error if the run failed as a whole, and — for --list-formats and --dry-run —
+// what the run learned about the source.
+func emitJSONResult(w io.Writer, res domain.RunResult, runErr error) {
+	out := struct {
+		Type      string                `json:"type"`
+		Total     int                   `json:"total"`
+		Succeeded int                   `json:"succeeded"`
+		Failed    int                   `json:"failed"`
+		Skipped   int                   `json:"skipped"`
+		Error     string                `json:"error,omitempty"`
+		Formats   *domain.FormatListing `json:"formats,omitempty"`
+		Series    *domain.Series        `json:"series,omitempty"`
+	}{"result", res.Total, res.Succeeded, res.Failed, res.Skipped, "", res.Formats, res.Series}
+	if runErr != nil {
+		out.Error = runErr.Error()
 	}
-}
-
-// applyManifestSelection переносит выбор, сделанный в интерфейсе платформы,
-// в настройки прогона — но только там, где человек не сказал иного флагом.
-// Явный флаг всегда сильнее: он набран сейчас, а манифест выписан раньше.
-//
-// Дорожки в манифесте отмечены идентификаторами, а отбор в утилите идёт по
-// подстроке имени или языка, поэтому идентификаторы переводятся в подписи.
-// Отсюда и ограничение: две дорожки с похожими подписями отбором не
-// различить — тогда останутся обе, что безопаснее, чем потерять нужную.
-func applyManifestSelection(cfg *domain.RunConfig, m *manifestscraper.Manifest, logger domain.Logger) {
-	log := logger.Component("manifest")
-
-	if cfg.Quality == "" && m.Select.MaxHeight > 0 {
-		cfg.Quality = domain.Quality(fmt.Sprintf("%dp", m.Select.MaxHeight))
-		log.Debug("quality taken from the manifest", domain.F("quality", string(cfg.Quality)))
-	}
-
-	if cfg.AudioPref.IsAll() {
-		if pats := patternsFor(m.Audios, m.Select.Audios); len(pats) > 0 {
-			cfg.AudioPref = domain.AudioPreference{Include: pats}
-			log.Debug("audio selection taken from the manifest", domain.F("tracks", len(pats)))
-		}
-	}
-	if cfg.SubsPref.IsAll() {
-		if pats := patternsFor(m.Subtitles, m.Select.Subtitles); len(pats) > 0 {
-			cfg.SubsPref = domain.SubtitlePreference{Include: pats}
-			log.Debug("subtitle selection taken from the manifest", domain.F("tracks", len(pats)))
-		}
-	}
-}
-
-// patternsFor переводит выбранные идентификаторы в подписи для отбора.
-// Пустой список идентификаторов означает «всё» — тогда сужать нечего.
-func patternsFor(tracks []manifestscraper.Track, ids []string) []string {
-	if len(ids) == 0 || len(ids) == len(tracks) {
-		return nil
-	}
-	want := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		want[id] = true
-	}
-	var out []string
-	for _, t := range tracks {
-		if !want[t.ID] {
-			continue
-		}
-		switch {
-		case t.Title != "":
-			out = append(out, t.Title)
-		case t.Language != "":
-			out = append(out, t.Language)
-		}
-	}
-	return out
+	_ = json.NewEncoder(w).Encode(out)
 }
