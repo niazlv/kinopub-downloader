@@ -295,9 +295,10 @@ func TestHasPort(t *testing.T) {
 // The connection here is cleartext rather than TLS — roundTripH2 only ever sees
 // a net.Conn, and h2c lets the test skip a certificate it would learn nothing
 // from. What it does cover is the http2.Transport that roundTripH2 builds to
-// mint the ClientConn: on Go 1.27, x/net's NewClientConn reaches for an
-// internal *http.Transport that only exists once the transport has been
-// initialised, so a bare &http2.Transport{} panics on a nil pointer here.
+// mint the ClientConn: on Go 1.27 x/net's NewClientConn reaches for an
+// internal *http.Transport that exists only once the transport has been
+// initialised, and before x/net v0.57.0 a bare &http2.Transport{} panicked on
+// a nil pointer here (golang/go#80198).
 func TestRoundTripH2_ServesRequestOverEstablishedConn(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

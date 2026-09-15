@@ -260,12 +260,15 @@ func (t *browserTransport) dialTLS(ctx context.Context, addr string) (net.Conn, 
 func (t *browserTransport) roundTripH2(req *http.Request, conn net.Conn) (*http.Response, error) {
 	host := req.URL.Host
 
-	// The ClientConn is minted through an internal *http.Transport that x/net
-	// only wires up when the http2.Transport is initialised. Every other entry
-	// point initialises it lazily, but NewClientConn does not (x/net v0.55.0 on
-	// Go 1.27), so a bare &http2.Transport{} dereferences a nil pointer here.
-	// ConfigureTransports is the documented way to get one already wired up; the
-	// *http.Transport it configures is ours alone and never round-trips itself.
+	// On Go 1.27 x/net delegates HTTP/2 to the standard library and mints the
+	// ClientConn through an internal *http.Transport that exists only once the
+	// http2.Transport has been initialised. NewClientConn skipped that step
+	// before x/net v0.57.0, so a bare &http2.Transport{} dereferenced nil here
+	// (golang/go#80198). go.mod now requires a fixed release, but
+	// ConfigureTransports is the documented way to get a transport wired up on
+	// either side of the build tag, so it stays rather than lean on a lazy init
+	// that has already gone missing once. The *http.Transport it configures is
+	// ours alone and never round-trips itself.
 	tr, err := http2.ConfigureTransports(&http.Transport{})
 	if err != nil {
 		conn.Close()
