@@ -6,12 +6,15 @@ package browserhttp
 import (
 	"bufio"
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/net/http2"
 )
 
 // connectProxy is a fake HTTP CONNECT proxy. It reads exactly one CONNECT
@@ -282,5 +285,67 @@ func TestHasPort(t *testing.T) {
 		if got := hasPort(tt.addr); got != tt.want {
 			t.Errorf("hasPort(%q) = %v, want %v", tt.addr, got, tt.want)
 		}
+	}
+}
+
+// TestRoundTripH2_ServesRequestOverEstablishedConn drives roundTripH2 the way
+// RoundTrip does once ALPN has settled on h2: hand it a connection that is
+// already speaking HTTP/2 and expect a served response back.
+//
+// The connection here is cleartext rather than TLS — roundTripH2 only ever sees
+// a net.Conn, and h2c lets the test skip a certificate it would learn nothing
+// from. What it does cover is the http2.Transport that roundTripH2 builds to
+// mint the ClientConn: on Go 1.27 x/net's NewClientConn reaches for an
+// internal *http.Transport that exists only once the transport has been
+// initialised, and before x/net v0.57.0 a bare &http2.Transport{} panicked on
+// a nil pointer here (golang/go#80198).
+func TestRoundTripH2_ServesRequestOverEstablishedConn(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		(&http2.Server{}).ServeConn(conn, &http2.ServeConnOpts{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.WriteString(w, "served over "+r.Proto)
+			}),
+		})
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://example.invalid/segment.ts", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	tr := &browserTransport{}
+	resp, err := tr.roundTripH2(req, conn)
+	if err != nil {
+		t.Fatalf("roundTripH2: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if got, want := string(body), "served over HTTP/2.0"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+
+	// The freshly-minted connection must also land in the pool, so the next
+	// request to this host skips the handshake.
+	if tr.h2Clients[req.URL.Host] == nil {
+		t.Errorf("connection was not pooled for host %q", req.URL.Host)
 	}
 }
