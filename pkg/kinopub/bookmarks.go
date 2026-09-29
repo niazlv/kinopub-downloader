@@ -30,7 +30,7 @@ type foldersResponse struct {
 // BookmarkFolders — все папки аккаунта, одним запросом.
 func (c *Client) BookmarkFolders(ctx context.Context) ([]BookmarkFolder, error) {
 	var r foldersResponse
-	if err := c.get(ctx, "/bookmarks", nil, &r); err != nil {
+	if err := c.getOnce(ctx, "/bookmarks", nil, &r); err != nil {
 		return nil, err
 	}
 	return r.Items, nil
@@ -48,7 +48,7 @@ func (c *Client) BookmarkItems(ctx context.Context, folderID int) ([]Item, error
 	for page := 1; page <= maxBookmarkPages; page++ {
 		var r itemsResponse
 		q := url.Values{"page": {strconv.Itoa(page)}}
-		if err := c.get(ctx, path, q, &r); err != nil {
+		if err := c.getOnce(ctx, path, q, &r); err != nil {
 			return out, err
 		}
 		out = append(out, r.Items...)

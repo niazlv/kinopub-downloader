@@ -34,7 +34,7 @@ type watchingResponse struct {
 // WatchingSerials — сериалы, которые аккаунт смотрит.
 func (c *Client) WatchingSerials(ctx context.Context) ([]WatchingItem, error) {
 	var r watchingResponse
-	if err := c.get(ctx, "/watching/serials", nil, &r); err != nil {
+	if err := c.getOnce(ctx, "/watching/serials", nil, &r); err != nil {
 		return nil, err
 	}
 	return r.Items, nil
@@ -43,7 +43,7 @@ func (c *Client) WatchingSerials(ctx context.Context) ([]WatchingItem, error) {
 // WatchingMovies — начатые фильмы. Счётчиков серий здесь нет.
 func (c *Client) WatchingMovies(ctx context.Context) ([]WatchingItem, error) {
 	var r watchingResponse
-	if err := c.get(ctx, "/watching/movies", nil, &r); err != nil {
+	if err := c.getOnce(ctx, "/watching/movies", nil, &r); err != nil {
 		return nil, err
 	}
 	return r.Items, nil
