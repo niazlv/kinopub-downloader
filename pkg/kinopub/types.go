@@ -61,6 +61,32 @@ type Item struct {
 	// "-updated" даёт инкрементальный обход.
 	UpdatedAt int64 `json:"updated_at"`
 	CreatedAt int64 `json:"created_at"`
+
+	// Views — сколько раз смотрели на площадке. У сериала считается каждая
+	// серия: «Теория большого взрыва» набирает двадцать миллионов, и рядом
+	// с фильмом это число без пересчёта на серию не сравнимо.
+	Views Count `json:"views"`
+	// KinopoiskVotes и IMDBVotes — сколько человек оценили произведение
+	// там. Ноль — и «никто», и «тайтла там нет» (API отдаёт null).
+	KinopoiskVotes Count `json:"kinopoisk_votes"`
+	IMDBVotes      Count `json:"imdb_votes"`
+}
+
+// Count — неотрицательный счётчик из ответа API.
+//
+// Разбирается терпимо: null, строка с числом и мусор дают число или ноль,
+// но не ошибку. Счётчик — подсказка для сортировки, и споткнувшийся на
+// нём разбор потерял бы весь элемент (так уже было с Duration).
+type Count int64
+
+func (c *Count) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(string(b), `"`)
+	if n, err := strconv.ParseFloat(s, 64); err == nil && n > 0 {
+		*c = Count(n)
+		return nil
+	}
+	*c = 0
+	return nil
 }
 
 // Duration — суммарная и средняя длительность по элементу, в секундах.

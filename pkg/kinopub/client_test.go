@@ -5,6 +5,7 @@ package kinopub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -97,6 +98,24 @@ func TestItemSerialDecodes(t *testing.T) {
 	ep := it.Seasons[0].Episodes[0]
 	if ep.SNumber != 1 || ep.Number != 1 || ep.Title != "Pilot" {
 		t.Errorf("episode = %+v", ep)
+	}
+}
+
+// Счётчики разбираются терпимо: null, строка и мусор не роняют элемент.
+func TestItemCountersTolerant(t *testing.T) {
+	var it Item
+	if err := json.Unmarshal([]byte(`{"id":1,"views":727866,"kinopoisk_votes":null,
+		"imdb_votes":"1094198"}`), &it); err != nil {
+		t.Fatalf("разбор: %v", err)
+	}
+	if it.Views != 727866 || it.KinopoiskVotes != 0 || it.IMDBVotes != 1094198 {
+		t.Errorf("views=%d kp=%d imdb=%d", it.Views, it.KinopoiskVotes, it.IMDBVotes)
+	}
+	if err := json.Unmarshal([]byte(`{"id":2,"views":{"x":1},"kinopoisk_votes":-5}`), &it); err != nil {
+		t.Fatalf("мусор в счётчике уронил элемент: %v", err)
+	}
+	if it.ID != 2 || it.Views != 0 || it.KinopoiskVotes != 0 {
+		t.Errorf("id=%d views=%d kp=%d", it.ID, it.Views, it.KinopoiskVotes)
 	}
 }
 
