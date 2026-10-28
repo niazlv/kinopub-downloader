@@ -43,7 +43,12 @@ CLI-утилита для скачивания видео с kino.watch (быв�
 | macOS | Intel | `kinopub-darwin-amd64` |
 | Linux | x86_64 | `kinopub-linux-amd64` |
 | Linux | ARM64 (Raspberry Pi и др.) | `kinopub-linux-arm64` |
-| Android / Termux | ARM64 | `kinopub-android-arm64` |
+| Windows | x86_64 | `kinopub-windows-amd64.exe` (или `.zip`) |
+| Windows | ARM64 (Snapdragon X и др.) | `kinopub-windows-arm64.exe` (или `.zip`) |
+| Android / Termux | ARM64 (armv8, почти все телефоны) | `kinopub-android-arm64` |
+| Android / Termux | ARMv7 (32-битные телефоны и ТВ-приставки) | `kinopub-android-armv7` |
+
+Какой файл нужен на Android, подскажет `uname -m` в Termux: `aarch64` — `arm64`, `armv7l` или `armv8l` — `armv7`.
 
 ```bash
 # Пример для macOS Apple Silicon:
@@ -636,7 +641,7 @@ Doctor проверяет:
 - **macOS Safari**: Требует Full Disk Access для терминала
 - **macOS Chrome**: Куки зашифрованы через Keychain, может потребоваться разрешение
 - **Linux/Windows Chrome/Firefox**: Работает через библиотеку kooky, если профиль не зашифрован. **Не тестировалось** — при проблемах используйте ручное копирование куки (способ 1) или сессию приложения (`--app`).
-- **Termux**: Используй бинарник `kinopub-android-arm64` — он собран специально для Android и не падает с `SIGSYS`. Автозагрузка из браузера недоступна: используйте ручное копирование куки или сессию приложения (`--app`).
+- **Termux**: Используй бинарник `kinopub-android-arm64` (или `kinopub-android-armv7` на 32-битной системе) — он собран специально для Android и не падает с `SIGSYS`. Автозагрузка из браузера недоступна: используйте ручное копирование куки или сессию приложения (`--app`).
 
 ## Все флаги
 
@@ -829,8 +834,18 @@ GOOS=linux GOARCH=amd64 go build -o kinopub-linux-amd64 ./cmd/kinopub
 # Linux ARM64 (Raspberry Pi и др.)
 GOOS=linux GOARCH=arm64 go build -o kinopub-linux-arm64 ./cmd/kinopub
 
+# Windows x86_64 и ARM64
+GOOS=windows GOARCH=amd64 go build -o kinopub-windows-amd64.exe ./cmd/kinopub
+GOOS=windows GOARCH=arm64 go build -o kinopub-windows-arm64.exe ./cmd/kinopub
+
 # Android / Termux
 CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -o kinopub-android-arm64 ./cmd/kinopub
+
+# Android / Termux, 32-битный ARMv7: Go линкует android/arm только через cgo,
+# поэтому нужен clang из Android NDK ($NDK — каталог NDK, host — darwin-x86_64
+# или linux-x86_64)
+CGO_ENABLED=1 CC="$NDK/toolchains/llvm/prebuilt/<host>/bin/armv7a-linux-androideabi21-clang" \
+  GOOS=android GOARCH=arm GOARM=7 go build -o kinopub-android-armv7 ./cmd/kinopub
 ```
 
 ## Обновление

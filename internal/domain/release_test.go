@@ -128,7 +128,9 @@ func TestReleaseAssetName(t *testing.T) {
 		{"linux", "amd64"}:   "kinopub-linux-amd64",
 		{"linux", "arm64"}:   "kinopub-linux-arm64",
 		{"windows", "amd64"}: "kinopub-windows-amd64.exe",
+		{"windows", "arm64"}: "kinopub-windows-arm64.exe",
 		{"android", "arm64"}: "kinopub-android-arm64",
+		{"android", "arm"}:   "kinopub-android-armv7",
 	}
 	for platform, want := range cases {
 		got, ok := ReleaseAssetName(platform[0], platform[1])
@@ -147,7 +149,8 @@ func TestReleaseAssetName(t *testing.T) {
 func TestReleaseAssetName_UnsupportedPlatforms(t *testing.T) {
 	for _, p := range [][2]string{
 		{"linux", "386"},
-		{"windows", "arm64"},
+		{"linux", "arm"},
+		{"windows", "386"},
 		{"freebsd", "amd64"},
 		{"darwin", "386"},
 		{"", ""},

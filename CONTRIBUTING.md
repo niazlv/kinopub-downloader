@@ -70,9 +70,13 @@ go test ./...
 Кросс-компиляция под все целевые платформы (ломается чаще всего из-за build-тегов):
 
 ```bash
-for p in android/arm64 windows/amd64 darwin/arm64 linux/amd64; do
+for p in android/arm64 windows/amd64 windows/arm64 darwin/arm64 linux/amd64; do
   CGO_ENABLED=0 GOOS="${p%%/*}" GOARCH="${p##*/}" go build ./... || echo "FAILED: $p"
 done
+
+# android/arm (ARMv7) без cgo не линкуется — нужен clang из Android NDK
+CGO_ENABLED=1 CC="$NDK/toolchains/llvm/prebuilt/<host>/bin/armv7a-linux-androideabi21-clang" \
+  GOOS=android GOARCH=arm GOARM=7 go build ./...
 ```
 
 ## Архитектура

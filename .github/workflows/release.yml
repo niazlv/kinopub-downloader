@@ -63,22 +63,32 @@ jobs:
           GOOS=linux   GOARCH=amd64 go build -ldflags="$LDFLAGS" -o kinopub-linux-amd64   ./cmd/kinopub
           GOOS=linux   GOARCH=arm64 go build -ldflags="$LDFLAGS" -o kinopub-linux-arm64   ./cmd/kinopub
           GOOS=windows GOARCH=amd64 go build -ldflags="$LDFLAGS" -o kinopub-windows-amd64.exe ./cmd/kinopub
+          GOOS=windows GOARCH=arm64 go build -ldflags="$LDFLAGS" -o kinopub-windows-arm64.exe ./cmd/kinopub
           # Termux (Android): GOOS=android избегает faccessat2 syscall,
           # который Android блокирует через seccomp (SIGSYS вместо ENOSYS).
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="$LDFLAGS" -o kinopub-android-arm64 ./cmd/kinopub
+          # 32-битные телефоны и ТВ-приставки (armeabi-v7a). android/arm Go
+          # линкует только внешним линкером, отсюда cgo и clang из NDK — он
+          # уже есть в образе раннера. API 21 — нижняя граница NDK, чтобы
+          # бинарник запускался и на старых приставках.
+          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CGO_ENABLED=1 CC="$NDK_BIN/armv7a-linux-androideabi21-clang" GOOS=android GOARCH=arm GOARM=7 \
+            go build -ldflags="$LDFLAGS" -o kinopub-android-armv7 ./cmd/kinopub
 
           # Архивы для Homebrew (требует .tar.gz)
           for bin in kinopub-darwin-arm64 kinopub-darwin-amd64 kinopub-linux-amd64 kinopub-linux-arm64; do
             tar -czf "${bin}.tar.gz" "$bin"
           done
           zip kinopub-windows-amd64.zip kinopub-windows-amd64.exe
+          zip kinopub-windows-arm64.zip kinopub-windows-arm64.exe
 
           # Контрольные суммы: `kinopub update` скачивает бинарник и заменяет
           # им себя, поэтому он обязан убедиться, что скачал именно то, что
           # собрал этот workflow, а не подменённый по пути файл.
           sha256sum kinopub-darwin-arm64 kinopub-darwin-amd64 \
                     kinopub-linux-amd64 kinopub-linux-arm64 \
-                    kinopub-windows-amd64.exe kinopub-android-arm64 > checksums.txt
+                    kinopub-windows-amd64.exe kinopub-windows-arm64.exe \
+                    kinopub-android-arm64 kinopub-android-armv7 > checksums.txt
           cat checksums.txt
 
       - name: Sign checksums
@@ -107,6 +117,9 @@ jobs:
             kinopub-linux-arm64.tar.gz
             kinopub-windows-amd64.exe
             kinopub-windows-amd64.zip
+            kinopub-windows-arm64.exe
+            kinopub-windows-arm64.zip
             kinopub-android-arm64
+            kinopub-android-armv7
             checksums.txt
             checksums.txt.sig

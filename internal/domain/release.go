@@ -114,7 +114,9 @@ var releaseTargets = map[string]bool{
 	"linux/amd64":   true,
 	"linux/arm64":   true,
 	"windows/amd64": true,
+	"windows/arm64": true,
 	"android/arm64": true,
+	"android/arm":   true,
 }
 
 // ReleaseAssetName returns the release asset holding the binary for a platform,
@@ -123,6 +125,11 @@ var releaseTargets = map[string]bool{
 func ReleaseAssetName(goos, goarch string) (name string, ok bool) {
 	if !releaseTargets[goos+"/"+goarch] {
 		return "", false
+	}
+	// The 32-bit ARM binary is built with GOARM=7, and the asset says so: "arm"
+	// alone does not tell a Termux user on an old phone which file to take.
+	if goarch == "arm" {
+		goarch = "armv7"
 	}
 	name = fmt.Sprintf("kinopub-%s-%s", goos, goarch)
 	if goos == "windows" {

@@ -55,7 +55,11 @@ jobs:
           - { goos: linux, goarch: amd64 }
           - { goos: linux, goarch: arm64 }
           - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
           - { goos: android, goarch: arm64 }
+          # android/arm links only externally, so it needs cgo and the NDK's
+          # clang, which the runner image already carries. Same as release.yml.
+          - { goos: android, goarch: arm, goarm: "7", cgo: "1", cc: armv7a-linux-androideabi21-clang }
 
     steps:
       - uses: actions/checkout@v4
@@ -68,6 +72,13 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          # Left at Go's cross-compile default (0), same as release.yml.
-          CGO_ENABLED: 0
-        run: go build ./...
+          GOARM: ${{ matrix.goarm }}
+          # Left at Go's cross-compile default (0), same as release.yml, except
+          # for the one target that cannot link without it.
+          CGO_ENABLED: ${{ matrix.cgo || '0' }}
+          NDK_CC: ${{ matrix.cc }}
+        run: |
+          if [ -n "$NDK_CC" ]; then
+            export CC="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/$NDK_CC"
+          fi
+          go build ./...
