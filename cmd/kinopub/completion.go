@@ -87,7 +87,7 @@ complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l su
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l subs-only      -d "Download only subtitles, skipping video/audio"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l video-menu     -d "Show interactive video-quality picker"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l no-domain-rewrite -d "Do not rewrite former site domains to the current one"
-complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l app            -d "Use the installed kino.pub app's session (its API token)"
+complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l app            -d "Use the installed kino.pub or Kino.Watch app session (its API token)"
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l app-token      -d "App access token for --app" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l app-base       -d "Override the kino.pub JSON API base URL" -r
 complete -c kinopub -n "not __fish_seen_subcommand_from $subcommands"      -l app-codec      -d "Preferred codec for --app: h264 or h265" -r -a "h264 h265"
@@ -108,7 +108,7 @@ complete -c kinopub -n "__fish_seen_subcommand_from login doctor config update" 
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l cookie          -d "Cookie header to store" -r
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l user-agent      -d "User-Agent to store" -r
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l browser-cookies -d "Auto-load cookies from browser" -r -a "safari chrome firefox auto"
-complete -c kinopub -n "__fish_seen_subcommand_from login" -l app             -d "Save the installed kino.pub app's session (its API token)"
+complete -c kinopub -n "__fish_seen_subcommand_from login" -l app             -d "Save the installed kino.pub or Kino.Watch app session (its API token)"
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l app-token       -d "App access token to save for --app" -r
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l qr              -d "Authorize this tool by QR/device code (own, self-renewing session)"
 complete -c kinopub -n "__fish_seen_subcommand_from login" -l client-secret   -d "OAuth client secret for --qr" -r

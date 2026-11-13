@@ -65,7 +65,7 @@ func loginQR(ctx context.Context, apiBase, proxyURL, explicitSecret, explicitUA 
 	}
 
 	// Confirm the session works before storing it, and show whose it is.
-	user, code := validateAppToken(ctx, proxyURL, apiBase, tok.Access, ua)
+	user, code := validateAppToken(ctx, proxyURL, apiBase, kinopubapp.VariantKinoPub.Label, tok.Access, ua)
 	if code != 0 {
 		return code
 	}

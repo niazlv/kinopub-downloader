@@ -106,15 +106,25 @@ var (
 	reExoVersion  = regexp.MustCompile(`\) ExoPlayerLib/([0-9]+\.[0-9]+\.[0-9]+)`)
 	reOkHTTP      = regexp.MustCompile(`okhttp/([0-9]+\.[0-9]+\.[0-9]+)`)
 	reOAuthClient = regexp.MustCompile(`client_id=([A-Za-z0-9_.\-]+)&client_secret=([A-Za-z0-9_.\-]+)`)
-	reAppNameLit  = regexp.MustCompile(`Android KinoPub`)
 )
+
+// appNameLiterals are the ExoPlayer User-Agent application-name constants each
+// known client embeds, in Variants order. A given APK carries exactly one, so
+// scanning for all of them recovers the right name whichever client is being
+// read, without the scanner needing to know which Variant it is.
+var appNameLiterals = []string{BaselineAppName, kinoWatchAppName}
 
 // scanDEX recovers build facts from a single DEX image. String constants live
 // in the DEX as contiguous ASCII, so a byte scan over the raw image finds them
 // without decoding the class structure. Absent facts stay empty.
 func scanDEX(dex []byte, f *dexFacts) {
-	if f.AppName == "" && reAppNameLit.Match(dex) {
-		f.AppName = BaselineAppName
+	if f.AppName == "" {
+		for _, lit := range appNameLiterals {
+			if bytes.Contains(dex, []byte(lit)) {
+				f.AppName = lit
+				break
+			}
+		}
 	}
 	if f.ExoVersion == "" {
 		if m := reExoVersion.FindSubmatch(dex); m != nil {

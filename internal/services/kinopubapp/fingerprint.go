@@ -46,9 +46,24 @@ type Fingerprint struct {
 	APIBase       string
 	Source        Source
 
+	// variant records which client this fingerprint describes, so drift and the
+	// baseline User-Agent are measured against the right client's baseline. The
+	// zero value is the kino.pub baseline (see baseline).
+	variant Variant
+
 	// ext holds only the values actually recovered from the device/APK, so
 	// drift can be measured against the baseline. Empty means "not extracted".
 	ext extracted
+}
+
+// baseline returns the build baseline this fingerprint is compared against. A
+// zero variant (e.g. a bare Fingerprint literal) falls back to the kino.pub
+// baseline, matching the package-level Baseline* constants.
+func (f Fingerprint) baseline() Baseline {
+	if f.variant.Package == "" {
+		return VariantKinoPub.Baseline
+	}
+	return f.variant.Baseline
 }
 
 type extracted struct {
@@ -135,11 +150,12 @@ func (f Fingerprint) DriftFromBaseline() []Drift {
 			d = append(d, Drift{Field: field, Extracted: got, Baseline: base})
 		}
 	}
-	add("versionName", f.ext.versionName, BaselineVersionName)
-	add("appName", f.ext.appName, BaselineAppName)
-	add("exoPlayerVersion", f.ext.exoVersion, BaselineExoVersion)
-	add("okhttpVersion", f.ext.okhttp, BaselineOkHTTPVersion)
-	add("clientId", f.ext.clientID, BaselineClientID)
+	b := f.baseline()
+	add("versionName", f.ext.versionName, b.VersionName)
+	add("appName", f.ext.appName, b.AppName)
+	add("exoPlayerVersion", f.ext.exoVersion, b.ExoVersion)
+	add("okhttpVersion", f.ext.okhttp, b.OkHTTPVersion)
+	add("clientId", f.ext.clientID, b.ClientID)
 	return d
 }
 
@@ -147,7 +163,8 @@ func (f Fingerprint) DriftFromBaseline() []Drift {
 // baseline, keeping only the device's real OS release. Callers offer it as the
 // alternative to the extracted User-Agent when the two disagree.
 func (f Fingerprint) BaselineUserAgent() string {
-	return buildUserAgent(BaselineAppName, BaselineVersionName, f.OSRelease, BaselineExoVersion)
+	b := f.baseline()
+	return buildUserAgent(b.AppName, b.VersionName, f.OSRelease, b.ExoVersion)
 }
 
 // HasClientSecret reports whether an OAuth client secret was recovered (needed

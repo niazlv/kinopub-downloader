@@ -1,8 +1,12 @@
 // Copyright (C) 2026 niazlv <niazlv03@gmail.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Package kinopubapp introspects the official kino.pub Android client that is
-// installed on the same device as this CLI.
+// Package kinopubapp introspects the official Android client of the service
+// installed on the same device as this CLI. The service ships two such clients
+// — the original com.kinopub ("KinoPub") and the current watch.kino
+// ("Kino.Watch") — and a device may have either or both; each is described by a
+// Variant and read the same way. ReadTokens reads every installed client and
+// orders their sessions newest-first so a caller can use the freshest one.
 //
 // It reads the app's stored OAuth session so a run can reuse the already
 // authorized device (and its account device-slot) instead of registering a new
@@ -34,21 +38,35 @@ type Reader interface {
 	PackageDump(ctx context.Context, pkg string) ([]byte, error)
 }
 
-// App introspects the installed kino.pub client through a Reader.
+// App introspects one installed client of the service through a Reader. Which
+// client it reads — com.kinopub or watch.kino — is fixed at construction by its
+// Variant.
 type App struct {
-	su     Reader
-	logger domain.Logger
+	su      Reader
+	variant Variant
+	logger  domain.Logger
 }
 
-// New builds an App over the given Reader. A nil Reader is tolerated: every
-// method then behaves as if root were unavailable (token reads fail, the
-// fingerprint is the baseline).
+// New builds an App for the original kino.pub client over the given Reader. A
+// nil Reader is tolerated: every method then behaves as if root were
+// unavailable (token reads fail, the fingerprint is the baseline). Use
+// NewForVariant to introspect another client (e.g. Kino.Watch).
 func New(su Reader, logger domain.Logger) *App {
+	return NewForVariant(su, VariantKinoPub, logger)
+}
+
+// NewForVariant builds an App that reads the given client Variant. It is how a
+// caller introspects a specific installed app; ReadTokens uses it to read each
+// known client in turn.
+func NewForVariant(su Reader, variant Variant, logger domain.Logger) *App {
 	if logger != nil {
 		logger = logger.Component("kinopubapp")
 	}
-	return &App{su: su, logger: logger}
+	return &App{su: su, variant: variant, logger: logger}
 }
+
+// Variant reports which client this App introspects.
+func (a *App) Variant() Variant { return a.variant }
 
 // RootAvailable reports whether the app's private storage and APK can be read,
 // i.e. whether the automatic token read and APK fingerprinting are possible.
@@ -65,7 +83,7 @@ func (a *App) ReadToken(ctx context.Context) (Token, error) {
 	if a.su == nil {
 		return Token{}, domain.ErrAppTokenUnavailable
 	}
-	data, err := a.su.ReadAppFile(ctx, Package, loginPrefsPath)
+	data, err := a.su.ReadAppFile(ctx, a.variant.Package, loginPrefsPath)
 	if err != nil {
 		a.debug("cannot read app login store", domain.F("error", err.Error()))
 		return Token{}, domain.ErrAppTokenUnavailable
@@ -90,13 +108,14 @@ func (a *App) ReadToken(ctx context.Context) (Token, error) {
 //     scanning the installed APK (root needed to read /data/app).
 func (a *App) Fingerprint(ctx context.Context) Fingerprint {
 	fp := Fingerprint{
-		Package:       Package,
-		VersionName:   BaselineVersionName,
-		AppName:       BaselineAppName,
-		ExoVersion:    BaselineExoVersion,
-		OkHTTPVersion: BaselineOkHTTPVersion,
-		ClientID:      BaselineClientID,
-		APIBase:       DefaultAPIBase,
+		variant:       a.variant,
+		Package:       a.variant.Package,
+		VersionName:   a.variant.Baseline.VersionName,
+		AppName:       a.variant.Baseline.AppName,
+		ExoVersion:    a.variant.Baseline.ExoVersion,
+		OkHTTPVersion: a.variant.Baseline.OkHTTPVersion,
+		ClientID:      a.variant.Baseline.ClientID,
+		APIBase:       a.variant.DefaultAPIBase,
 	}
 
 	if a.su == nil {
@@ -108,14 +127,14 @@ func (a *App) Fingerprint(ctx context.Context) Fingerprint {
 		fp.OSRelease = rel
 	}
 
-	if dump, err := a.su.PackageDump(ctx, Package); err == nil {
+	if dump, err := a.su.PackageDump(ctx, a.variant.Package); err == nil {
 		if v := parseVersionName(dump); v != "" {
 			fp.ext.versionName = v
 			fp.VersionName = v
 		}
 	}
 
-	if apkPath, err := a.su.PackageAPKPath(ctx, Package); err == nil {
+	if apkPath, err := a.su.PackageAPKPath(ctx, a.variant.Package); err == nil {
 		if apk, err := a.su.ReadFile(ctx, apkPath); err == nil {
 			if facts, err := scanAPK(apk); err == nil {
 				fp.applyDEX(facts)

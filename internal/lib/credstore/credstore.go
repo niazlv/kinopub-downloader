@@ -112,6 +112,13 @@ type Credentials struct {
 	AppClientID     string `json:"app_client_id,omitempty"`
 	AppClientSecret string `json:"app_client_secret,omitempty"`
 
+	// AppPackage records which installed client an imported app session came
+	// from — com.kinopub or watch.kino — so advice about re-importing an expired
+	// token names the right app to open. Empty means it was not recorded (an
+	// older store, an explicit --app-token, or a `login --qr` session); callers
+	// treat empty as the original kino.pub client.
+	AppPackage string `json:"app_package,omitempty"`
+
 	// CookieSavedAt and AppSavedAt record when each half was last stored, and
 	// LastUsed/LastUsedAt which one last authorized a run. Together they let a
 	// run with no explicit flag pick the credentials the user actually works

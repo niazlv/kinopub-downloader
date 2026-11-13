@@ -136,7 +136,8 @@ func refreshStoredSession(ctx context.Context, cfg *domain.RunConfig, stored cre
 }
 
 // reportTokenExpiredFor prints advice for a rejected token, which depends
-// entirely on whose session it is.
+// entirely on whose session it is. For an imported app session it names the
+// client the session was read from, so the user is told which app to open.
 func reportTokenExpiredFor(source string) {
 	if source == credstore.SourceDevice {
 		errorf("the kino.pub session has expired and could not be renewed automatically.")
@@ -144,11 +145,31 @@ func reportTokenExpiredFor(source string) {
 		return
 	}
 	// An imported app session, or none recorded: the phone owns it.
-	errorf("the kino.pub app token has expired — the API rejected it (HTTP 401).")
+	reportAppTokenExpired(storedAppVariant())
+}
+
+// storedAppVariant resolves which client the saved app session was imported
+// from. An unrecorded package reads as the original kino.pub client.
+func storedAppVariant() kinopubapp.Variant {
+	stored, err := credstore.Load()
+	if err != nil {
+		return kinopubapp.VariantKinoPub
+	}
+	if v, ok := kinopubapp.VariantForPackage(stored.AppPackage); ok {
+		return v
+	}
+	return kinopubapp.VariantKinoPub
+}
+
+// reportAppTokenExpired prints the advice for an expired imported app session,
+// naming the client it came from (kino.pub or Kino.Watch) so the user opens the
+// right app to let it refresh its own session.
+func reportAppTokenExpired(v kinopubapp.Variant) {
+	errorf("the %s app token has expired — the API rejected it (HTTP 401).", v.Label)
 	fmt.Fprintf(os.Stderr, "  This session belongs to the phone app, so it is deliberately never\n"+
 		"  refreshed here: rotating the token would sign the app out.\n")
-	fmt.Fprintf(os.Stderr, "  Open the kino.pub app once (it refreshes its own session), then:\n"+
-		"    %s login --app\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  Open the %s app once (it refreshes its own session), then:\n"+
+		"    %s login --app\n", v.Label, os.Args[0])
 	fmt.Fprintf(os.Stderr, "  Or switch to a session this tool owns and renews by itself:\n"+
 		"    %s login --qr\n", os.Args[0])
 }

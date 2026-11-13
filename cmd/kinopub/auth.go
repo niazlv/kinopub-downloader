@@ -201,7 +201,7 @@ func runLogin(args []string) int {
 	fs.StringVar(&userAgent, "user-agent", "", "User-Agent to store (browser UA for cookies; the app's UA for --app)")
 	fs.Var(&browserCk, "browser-cookies", "auto-load cookies from a browser: safari, chrome, firefox, or auto")
 	fs.StringVar(&siteHost, "site", "", "site host: whose cookies to read, or with --qr the platform to authorize this tool on (default: "+strings.Join(domain.KnownSiteHosts, ", then ")+")")
-	fs.BoolVar(&appMode, "app", false, "save the installed kino.pub app's session (its API token) instead of a website cookie — reuses the app's device slot")
+	fs.BoolVar(&appMode, "app", false, "save the installed kino.pub or Kino.Watch app session (its API token) instead of a website cookie — uses whichever is fresher, reuses the app device slot")
 	fs.StringVar(&appToken, "app-token", "", "app access token to save for --app (default: read from the installed app when run as root)")
 	fs.BoolVar(&qrMode, "qr", false, "authorize this tool with kino.pub by QR/device code — its own session, works without root or Android, and renews itself")
 	fs.StringVar(&appBase, "app-base", "", "override the kino.pub JSON API base URL for --app (default: "+kinopubapp.DefaultAPIBase+")")
@@ -231,14 +231,15 @@ func runLogin(args []string) int {
 		h.text("A platform built on this tool issues the tool a session of its own: no browser " +
 			"cookies to expire, and it renews itself for as long as it is used.")
 
-		h.section("kino.pub mobile app session (reuses the app's device slot):")
+		h.section("kino.pub / Kino.Watch mobile app session (reuses the app's device slot):")
 		h.commands(
 			command{name: "kinopub login --app", desc: "read the token from the installed app (must run as root)"},
 			command{name: "kinopub login --app --app-token <TOKEN>", desc: "save a token you already have (no root)"},
 		)
 		h.blank()
-		h.text("--app takes the access token the installed kino.pub Android app already holds, " +
-			"so no new device slot is claimed. Reading it from the app needs the process to be " +
+		h.text("--app takes the access token the installed kino.pub or Kino.Watch Android app already " +
+			"holds — whichever has the fresher, still-valid session when both are present — so no new " +
+			"device slot is claimed. Reading it from the app needs the process to be " +
 			"root — the tool never elevates itself, so run it under root yourself:")
 		h.line("    %s", errStyle.Cyan("su -c 'kinopub login --app'      # Android / Termux"))
 		h.line("    %s", errStyle.Cyan("sudo kinopub login --app         # Linux / desktop"))
@@ -378,7 +379,7 @@ func runLogout(args []string) int {
 	fs.SetOutput(os.Stderr)
 	var appOnly, cookieOnly bool
 	var siteHost string
-	fs.BoolVar(&appOnly, "app", false, "remove only the kino.pub app session, keep the website logins")
+	fs.BoolVar(&appOnly, "app", false, "remove only the kino.pub/Kino.Watch app session, keep the website logins")
 	fs.BoolVar(&cookieOnly, "cookie", false, "remove only a website login, keep the app session")
 	fs.StringVar(&siteHost, "site", "", "with --cookie: the site whose login to remove (required when several are stored)")
 	registerColorFlags(fs)
@@ -430,9 +431,10 @@ func runLogout(args []string) int {
 			fmt.Fprintf(os.Stderr, "No kino.pub app session was stored.\n")
 			return 0
 		}
+		removed = appLabel(creds.AppPackage) + " app session"
 		creds.AppToken, creds.AppUserAgent, creds.APIBase = "", "", ""
 		creds.AppSavedAt = time.Time{}
-		removed = "kino.pub app session"
+		creds.AppPackage = ""
 	case cookieOnly:
 		sites := creds.SiteHosts()
 		if len(sites) == 0 {
@@ -561,8 +563,14 @@ func runSessions(args []string) int {
 		if base == "" {
 			base = "(default)"
 		}
-		fmt.Fprintf(os.Stderr, "%s%-8s · API %s%s\n",
-			mark, sessionKindLabel(creds), errStyle.Cyan(base), savedSuffix(creds.AppSavedAt))
+		// Name which client an imported session came from; a `login --qr` session
+		// is the tool's own and belongs to no app, so it is not tagged.
+		client := ""
+		if creds.TokenSource() != credstore.SourceDevice {
+			client = " · " + appLabel(creds.AppPackage)
+		}
+		fmt.Fprintf(os.Stderr, "%s%-8s · API %s%s%s\n",
+			mark, sessionKindLabel(creds), errStyle.Cyan(base), client, savedSuffix(creds.AppSavedAt))
 
 		// Whether the session renews itself is the practically important fact
 		// about it, so it is stated rather than left to be inferred.
@@ -575,7 +583,7 @@ func runSessions(args []string) int {
 
 		if check {
 			ctx := context.Background()
-			user, code := validateAppToken(ctx, proxyURL, creds.APIBase, creds.AppToken, creds.AppUserAgent)
+			user, code := validateAppToken(ctx, proxyURL, creds.APIBase, appLabel(creds.AppPackage), creds.AppToken, creds.AppUserAgent)
 			if code == 0 {
 				_ = user // validateAppToken already prints the account line
 			}

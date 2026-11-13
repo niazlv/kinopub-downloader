@@ -159,6 +159,11 @@ type fakeReader struct {
 func (r *fakeReader) Available(context.Context) bool { return r.available }
 
 func (r *fakeReader) ReadAppFile(_ context.Context, pkg, rel string) ([]byte, error) {
+	// A per-package key wins so a test can serve different apps different
+	// stores; a package-agnostic key is the fallback older tests rely on.
+	if b, ok := r.files["app:"+pkg+":"+rel]; ok {
+		return b, nil
+	}
 	if b, ok := r.files["app:"+rel]; ok {
 		return b, nil
 	}

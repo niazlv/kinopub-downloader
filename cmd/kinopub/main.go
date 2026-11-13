@@ -185,7 +185,7 @@ func run() int {
 	fs.BoolVar(&videoMenu, "video-menu", false, "show an interactive video-quality picker before downloading (TTY only)")
 	fs.BoolVar(&interactive, "interactive", false, "pick quality, then audio, then subtitles interactively (implies --video-menu --audio-menu --subs-menu)")
 	fs.BoolVar(&interactive, "i", false, "interactive mode (shorthand)")
-	fs.BoolVar(&appMode, "app", false, "download using the installed kino.pub app's session (its API token) instead of website cookies — reuses the app's device slot, no new login")
+	fs.BoolVar(&appMode, "app", false, "download using the installed kino.pub or Kino.Watch app session (its API token) instead of website cookies — uses whichever is fresher, reuses the app device slot, no new login")
 	fs.StringVar(&appToken, "app-token", "", "app access token for --app (default: the token saved by `login --app`, else read from the installed app when run as root)")
 	fs.StringVar(&appBase, "app-base", "", "override the kino.pub JSON API base URL for --app (default: "+kinopubapp.DefaultAPIBase+")")
 	fs.StringVar(&appCodec, "app-codec", "", "preferred codec family for --app downloads: h264 (default) or h265")
